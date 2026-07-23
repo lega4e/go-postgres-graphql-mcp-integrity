@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-BWrTaem3.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-1M8g53xF.css">
+    <script type="module" crossorigin src="./assets/index-BdCt8TtK.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-D0boo5cg.css">
   </head>
   <body>
     <main>
@@ -13,9 +13,12 @@
         <h1>gopgql</h1>
         <p class="tagline">
           One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ.
-          This is the <strong>M0</strong> preview: the translation below runs
-          entirely in your browser as compiled Go (WebAssembly) — no server,
-          no JavaScript re-implementation.
+          This is <strong>M1</strong>: the SDL below is parsed and validated, an
+          initial <code>goose</code> migration is generated, and the GraphQL
+          query is compiled to a <code>GRAPH_TABLE</code> statement — all
+          running entirely in your browser as compiled Go (WebAssembly), the
+          real <code>sdl</code>+<code>generator</code>+<code>compiler</code>
+          packages, no server and no JavaScript re-implementation.
         </p>
       </header>
 
@@ -23,6 +26,8 @@
         <div class="pane">
           <label for="sdl">GraphQL SDL</label>
           <textarea id="sdl" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+          <label for="gql">GraphQL query</label>
+          <textarea id="gql" class="query-input" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
           <div class="controls">
             <button id="run" disabled>Generate</button>
             <span id="status" class="status">loading WebAssembly…</span>
@@ -30,9 +35,9 @@
         </div>
 
         <div class="pane">
-          <label for="ddl">Migration DDL (goose)</label>
+          <label for="ddl">Migration <code>0001_init.sql</code> (goose)</label>
           <pre id="ddl" class="output"></pre>
-          <label for="query">Sample <code>GRAPH_TABLE</code> query</label>
+          <label for="query">Compiled <code>GRAPH_TABLE</code> query</label>
           <pre id="query" class="output"></pre>
         </div>
       </section>
