@@ -1,6 +1,7 @@
 import './style.css'
 
 const sdlEl = document.getElementById('sdl')
+const gqlEl = document.getElementById('gql')
 const ddlEl = document.getElementById('ddl')
 const queryEl = document.getElementById('query')
 const runEl = document.getElementById('run')
@@ -19,7 +20,7 @@ function loadScript(src) {
 }
 
 function render() {
-  const result = globalThis.gopgqlGenerate(sdlEl.value)
+  const result = globalThis.gopgqlGenerate(sdlEl.value, gqlEl.value)
   if (result.error) {
     ddlEl.textContent = ''
     queryEl.textContent = ''
@@ -27,8 +28,8 @@ function render() {
     statusEl.className = 'status error'
     return
   }
-  ddlEl.textContent = result.ddl
-  queryEl.textContent = result.query
+  ddlEl.textContent = result.migration
+  queryEl.textContent = result.sql
   statusEl.textContent = 'generated'
   statusEl.className = 'status ok'
 }
@@ -51,6 +52,7 @@ async function boot() {
 
     // The Go main sets the exported functions synchronously before it blocks.
     sdlEl.value = globalThis.gopgqlExampleSDL || sdlEl.value
+    gqlEl.value = globalThis.gopgqlExampleQuery || gqlEl.value
     runEl.disabled = false
     statusEl.textContent = 'ready'
     statusEl.className = 'status ok'

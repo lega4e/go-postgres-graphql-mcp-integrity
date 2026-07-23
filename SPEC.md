@@ -245,11 +245,24 @@ Pure: no database contact. Mirrors `neo4j-graphql-java`’s `(cypher, params)` s
 - **Depth limit.** Selection nesting beyond `MaxDepth` (default 3) returns a typed `*DepthExceededError` at compile time.
 - **Multi-pattern workaround.** Where a query would need comma-separated patterns, emit separate `GRAPH_TABLE` calls joined on projected IDs in the outer query.
 
-### 6.3 Open spike — bind parameters inside `GRAPH_TABLE`
+### 6.3 Spike — bind parameters inside `GRAPH_TABLE` (resolved in M1)
 
-No published PG19 example places `$1` inside `MATCH`/`WHERE`; all inline literals. It is architecturally expected to work (the inline `WHERE` rewrites to an ordinary qual), but **must be verified empirically in M1**.
+No published PG19 example places `$1` inside `MATCH`/`WHERE`; all inline literals. It is architecturally expected to work (the inline `WHERE` rewrites to an ordinary qual), but had to be verified empirically.
 
-Fallback if unsupported: project the needed columns out of `GRAPH_TABLE` and apply the parameterized predicate in the **outer** `WHERE`. Still one query. The compiler carries a strategy flag so this can be switched without touching the AST walk.
+**Outcome (M1, `postgres:19beta2`): supported.** A bind parameter placed in the graph-pattern `WHERE` of a `GRAPH_TABLE` executes correctly:
+
+```sql
+SELECT name FROM GRAPH_TABLE (app_graph
+  MATCH (v IS person)
+  WHERE v.name = $1
+  COLUMNS (v.name AS name));
+```
+
+filtered to the single matching row when bound with `Alice`. This is asserted by the godog scenario *“Bind parameters work inside `GRAPH_TABLE`”* in `test/m1/features/m1_generate_compile.feature`, which runs against the real container in CI. The SQL/PGQ pattern `WHERE` is rewritten to an ordinary relational qual, so a `ParamRef` there is planned exactly like any other parameterized predicate.
+
+**Consequence for the compiler.** The `inline` strategy — emitting predicates as bind parameters directly inside the graph pattern — is viable and is the default from M3 (arguments/predicates). The fallback below is retained only as a strategy flag; it is not needed on PG19beta2.
+
+Fallback if a future PG version regresses: project the needed columns out of `GRAPH_TABLE` and apply the parameterized predicate in the **outer** `WHERE`. Still one query. The compiler carries a strategy flag so this can be switched without touching the AST walk.
 
 -----
 
