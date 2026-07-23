@@ -4,10 +4,13 @@
 //
 // It is compiled with GOOS=js GOARCH=wasm and loaded by the docs site. The
 // playground calls the real compiled Go — sdl, generator, migrate and compiler
-// — with no JavaScript re-implementation (SPEC.md §7 → M1 demo criterion). The
-// single exported function, gopgqlGenerate, takes an SDL string and a GraphQL
-// query and returns a plain JS object with "migration", "sql" and "error"
-// fields.
+// — with no JavaScript re-implementation (SPEC.md §7 → M1/M2 demo criteria).
+//
+// Two functions are exported. gopgqlGenerate takes an SDL string and a GraphQL
+// query and returns {"migration", "sql", "error"} (the M1 demo). gopgqlDelta
+// takes two SDL revisions and a query and returns {"init", "delta", "sql",
+// "error"} — the M2 demo showing the delta migration folded and diffed between
+// the revisions.
 package main
 
 import (
@@ -18,8 +21,11 @@ import (
 
 func main() {
 	js.Global().Set("gopgqlGenerate", js.FuncOf(generate))
+	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
+	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
+	js.Global().Set("gopgqlRevisedExampleQuery", js.ValueOf(playground.RevisedExampleQuery))
 	// Signal to the page that the WASM module is ready.
 	if cb := js.Global().Get("onGopgqlReady"); cb.Type() == js.TypeFunction {
 		cb.Invoke()
@@ -42,6 +48,27 @@ func generate(_ js.Value, args []js.Value) any {
 		return js.ValueOf(result)
 	}
 	result["migration"] = out.Migration
+	result["sql"] = out.SQL
+	return js.ValueOf(result)
+}
+
+// delta is the js.Func bound to window.gopgqlDelta. It expects three string
+// arguments: the prior SDL, the revised SDL, and a GraphQL query against the
+// revised SDL.
+func delta(_ js.Value, args []js.Value) any {
+	result := map[string]any{"init": "", "delta": "", "sql": "", "error": ""}
+	if len(args) < 3 || args[0].Type() != js.TypeString ||
+		args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
+		result["error"] = "gopgqlDelta expects (oldSDL, newSDL, query) string arguments"
+		return js.ValueOf(result)
+	}
+	out, err := playground.RunDelta(args[0].String(), args[1].String(), args[2].String())
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["init"] = out.Init
+	result["delta"] = out.Delta
 	result["sql"] = out.SQL
 	return js.ValueOf(result)
 }

@@ -44,3 +44,41 @@ func TestRunNoQuery(t *testing.T) {
 		t.Errorf("expected no SQL without a query, got %q", res.SQL)
 	}
 }
+
+func TestRunDeltaExample(t *testing.T) {
+	res, err := playground.RunDelta(playground.ExampleSDL, playground.RevisedExampleSDL, playground.RevisedExampleQuery)
+	if err != nil {
+		t.Fatalf("RunDelta: %v", err)
+	}
+	if !strings.HasPrefix(res.Init, "-- +goose Up\n") {
+		t.Error("init migration must be goose-formatted")
+	}
+	if !res.Changed {
+		t.Error("adding a field must produce a delta")
+	}
+	if !strings.Contains(res.Delta, "ALTER TABLE persons ADD COLUMN age integer;") {
+		t.Errorf("delta must add the new column:\n%s", res.Delta)
+	}
+	if !strings.Contains(res.Delta, "CREATE PROPERTY GRAPH app_graph") {
+		t.Errorf("delta must recreate the property graph:\n%s", res.Delta)
+	}
+	if !strings.Contains(res.SQL, "v.age AS age") {
+		t.Errorf("compiled SQL must project the new field:\n%s", res.SQL)
+	}
+}
+
+func TestRunDeltaNoChange(t *testing.T) {
+	res, err := playground.RunDelta(playground.ExampleSDL, playground.ExampleSDL, "")
+	if err != nil {
+		t.Fatalf("RunDelta: %v", err)
+	}
+	if res.Changed {
+		t.Error("identical SDL revisions must not produce a delta")
+	}
+}
+
+func TestRunDeltaError(t *testing.T) {
+	if _, err := playground.RunDelta(`type Person { id: ID! }`, playground.RevisedExampleSDL, ""); err == nil {
+		t.Error("expected error for invalid prior SDL")
+	}
+}
