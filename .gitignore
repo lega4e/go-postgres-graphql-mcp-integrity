@@ -1,0 +1,14 @@
+# Go build output
+/bin/
+*.wasm
+
+# WASM playground build artefacts (never committed — SPEC.md §8.3)
+/docs/public/gopgql.wasm
+/docs/public/wasm_exec.js
+
+# Node / Vite
+/docs/node_modules/
+/docs/dist/
+
+# Editor / OS
+.DS_Store
