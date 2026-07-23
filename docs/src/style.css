@@ -82,6 +82,10 @@ textarea {
   width: 100%;
 }
 
+textarea.query-input {
+  min-height: 4.5rem;
+}
+
 .output {
   margin: 0;
   white-space: pre;

@@ -10,23 +10,46 @@ See [`SPEC.md`](./SPEC.md) for the full design and milestone plan.
 
 ## Status
 
-**M0 — Harness.** This milestone proves the test infrastructure end to end: a
-[godog](https://github.com/cucumber/godog) BDD suite boots a real
+**M1 — Minimal generator + single-vertex compiler.** The first milestone with
+real library code. From one annotated SDL document (`@node`, `@relationship`,
+`@hasInverse`, `@ignore`; surrogate `uuid` keys; the default scalar mapping),
+gopgql:
+
+- **`sdl`** parses and validates via
+  [`vektah/gqlparser/v2`](https://github.com/vektah/gqlparser) and builds a typed
+  mapping model;
+- **`generator`** emits vertex tables, edge tables, the mandatory
+  destination-key indexes, and `CREATE PROPERTY GRAPH` — satisfying all five
+  [`SPEC.md` §5.3](./SPEC.md) invariants;
+- **`migrate`** writes `0001_init.sql` in `goose` format;
+- **`compiler`** compiles a single-root-field GraphQL query to a `GRAPH_TABLE`
+  with one vertex pattern and an enumerated `COLUMNS` projection;
+- **`shape`** regroups the flat rows into the nested GraphQL response.
+
+The [godog](https://github.com/cucumber/godog) suite boots a real
 `postgres:19beta2` container via
 [testcontainers-go](https://github.com/testcontainers/testcontainers-go),
-applies a hand-written schema and `CREATE PROPERTY GRAPH`, seeds rows, executes
-`GRAPH_TABLE` queries, and asserts on the returned data. Per-scenario reset uses
-the container's snapshot/restore.
+applies the **generated** migration with `goose`, seeds rows, runs the
+**compiler-produced** SQL, and asserts on the returned nested JSON. It also
+records the [`SPEC.md` §6.3](./SPEC.md) spike: a bind parameter (`$1`) works
+inside a `GRAPH_TABLE` `WHERE`.
 
-An early **WASM playground** (`cmd/wasm` + `docs/`) shows the M0-preview
-translation of SDL to SQL/PGQ running entirely in the browser as compiled Go.
+The **WASM playground** (`cmd/wasm` + `docs/`) runs the real
+`sdl`+`generator`+`compiler` in the browser as compiled Go — paste SDL and a
+query, see the generated migration and the emitted `GRAPH_TABLE`.
 
 ## Layout
 
 | Path             | Purpose                                                            |
 |------------------|-------------------------------------------------------------------|
-| `demo/`          | M0-preview SDL → SQL/PGQ translation (pure Go, no DB, WASM-safe).  |
-| `cmd/wasm/`      | WebAssembly entry point exposing `demo` to the playground.        |
+| `sdl/`           | Parse + validate SDL; typed directive/mapping model.              |
+| `schema/`        | In-memory physical schema model (tables, indexes, graph).         |
+| `generator/`     | SDL model → schema model → DDL (`CREATE ...`, property graph).    |
+| `migrate/`       | Emit `goose` migrations (`0001_init.sql`).                        |
+| `compiler/`      | GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.      |
+| `shape/`         | Flat rows → nested GraphQL response.                              |
+| `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |
+| `cmd/wasm/`      | WebAssembly entry point exposing `playground` to the docs site.  |
 | `docs/`          | Vite site with the browser playground.                            |
 | `test/`          | godog feature + testcontainers harness (`postgres:19beta2`).      |
 | `scripts/`       | `build-wasm.sh` — builds `gopgql.wasm` + stages `wasm_exec.js`.   |
