@@ -85,7 +85,9 @@ func TestFeatures(t *testing.T) {
 		t.Fatalf("connection string: %v", err)
 	}
 
-	goose.SetDialect("postgres")
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose set dialect: %v", err)
+	}
 	goose.SetLogger(goose.NopLogger())
 
 	suite := godog.TestSuite{

@@ -65,7 +65,7 @@ func TestInitGooseFormat(t *testing.T) {
 	if graphIdx < 0 || edgeIdx < 0 || vertexIdx < 0 {
 		t.Fatalf("Down section missing drops:\n%s", down)
 	}
-	if !(graphIdx < edgeIdx && edgeIdx < vertexIdx) {
+	if graphIdx >= edgeIdx || edgeIdx >= vertexIdx {
 		t.Errorf("Down drops out of order (graph=%d edge=%d vertex=%d)", graphIdx, edgeIdx, vertexIdx)
 	}
 }
