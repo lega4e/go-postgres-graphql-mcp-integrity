@@ -109,3 +109,44 @@ func TestRowsHandlesNonComparableKeys(t *testing.T) {
 		t.Errorf("expected 2 children, got %d", len(follows))
 	}
 }
+
+// TestRowsNestsThreeLevels covers a multi-hop projection (SPEC.md §7 → M4):
+// grouping applies at every level, so a grandchild fan-out deduplicates its
+// parent just as the root does, and each level sees only its own parent's rows.
+func TestRowsNestsThreeLevels(t *testing.T) {
+	proj := compiler.Projection{Root: &compiler.Selection{
+		ResponseKey: "persons", Alias: "v0", KeyColumn: "v0_k",
+		Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0"}},
+		Children: []*compiler.Selection{{
+			ResponseKey: "follows", Alias: "v1", KeyColumn: "v1_k",
+			Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0"}},
+			Children: []*compiler.Selection{{
+				ResponseKey: "follows", Alias: "v2", KeyColumn: "v2_k",
+				Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v2_c0"}},
+			}},
+		}},
+	}}
+	// Alice -> Bob -> {Carol, Dave}; Alice -> Erin -> Frank.
+	rows := []map[string]any{
+		{"v0_k": "a", "v0_c0": "Alice", "v1_k": "b", "v1_c0": "Bob", "v2_k": "c", "v2_c0": "Carol"},
+		{"v0_k": "a", "v0_c0": "Alice", "v1_k": "b", "v1_c0": "Bob", "v2_k": "d", "v2_c0": "Dave"},
+		{"v0_k": "a", "v0_c0": "Alice", "v1_k": "e", "v1_c0": "Erin", "v2_k": "f", "v2_c0": "Frank"},
+	}
+	want := map[string]any{
+		"persons": []any{map[string]any{
+			"name": "Alice",
+			"follows": []any{
+				map[string]any{"name": "Bob", "follows": []any{
+					map[string]any{"name": "Carol"},
+					map[string]any{"name": "Dave"},
+				}},
+				map[string]any{"name": "Erin", "follows": []any{
+					map[string]any{"name": "Frank"},
+				}},
+			},
+		}},
+	}
+	if got := shape.Rows(proj, rows); !reflect.DeepEqual(got, want) {
+		t.Errorf("Rows = %#v, want %#v", got, want)
+	}
+}
