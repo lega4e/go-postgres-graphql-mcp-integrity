@@ -2,7 +2,9 @@
 //
 // It is an interpreter over the canonical statement set gopgql emits — CREATE
 // TABLE, ALTER TABLE ADD/DROP COLUMN, CREATE/DROP INDEX, CREATE/DROP PROPERTY
-// GRAPH — not a general DDL parser (SPEC.md §7 → M2). Folding replays the
+// GRAPH — not a general DDL parser (SPEC.md §7 → M2). The reading is done by the
+// internal/ddl lexer+parser, which turns each statement into a typed AST node;
+// this file is the interpreter that walks those nodes. Folding replays the
 // -- +goose Up sections of every migration in order, so the resulting model is
 // the state a database reaches after applying them all. That is what lets the
 // generator emit a delta with no database and no sidecar state file (§3
@@ -23,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lega4e/gopgql/internal/ddl"
 	"github.com/lega4e/gopgql/schema"
 )
 
@@ -93,7 +96,11 @@ func Fold(dir string) (*schema.Schema, error) {
 func FoldContent(contents []string) (*schema.Schema, error) {
 	f := newFolder()
 	for i, content := range contents {
-		for _, stmt := range statements(upSection(content)) {
+		stmts, err := ddl.Parse(upSection(content))
+		if err != nil {
+			return nil, fmt.Errorf("migrate: fold migration %d: %w", i+1, err)
+		}
+		for _, stmt := range stmts {
 			if err := f.apply(stmt); err != nil {
 				return nil, fmt.Errorf("migrate: fold migration %d: %w", i+1, err)
 			}
@@ -112,127 +119,91 @@ type folder struct {
 	idxOrder []string
 	// graph is the most recent CREATE PROPERTY GRAPH, which classifies tables as
 	// vertices or edges and carries labels, properties and edge key metadata.
-	graph *graphModel
+	graph *ddl.CreatePropertyGraphStmt
 }
 
 func newFolder() *folder {
 	return &folder{cols: map[string][]schema.Column{}, indexes: map[string]schema.Index{}}
 }
 
-// apply interprets a single canonical statement.
-func (f *folder) apply(stmt string) error {
-	norm := strings.Join(strings.Fields(stmt), " ")
-	if norm == "" {
+// apply interprets a single parsed statement.
+func (f *folder) apply(stmt ddl.Statement) error {
+	switch s := stmt.(type) {
+	case *ddl.CreateTableStmt:
+		return f.applyCreateTable(s)
+	case *ddl.AlterTableStmt:
+		return f.applyAlterTable(s)
+	case *ddl.CreateIndexStmt:
+		return f.applyCreateIndex(s)
+	case *ddl.DropIndexStmt:
+		f.removeIndex(s.Name)
 		return nil
-	}
-	upper := strings.ToUpper(norm)
-	switch {
-	case strings.HasPrefix(upper, "CREATE TABLE "):
-		return f.applyCreateTable(norm)
-	case strings.HasPrefix(upper, "ALTER TABLE "):
-		return f.applyAlterTable(norm)
-	case strings.HasPrefix(upper, "CREATE INDEX "):
-		return f.applyCreateIndex(norm)
-	case strings.HasPrefix(upper, "DROP INDEX "):
-		return f.applyDropIndex(norm)
-	case strings.HasPrefix(upper, "DROP TABLE "):
-		return f.applyDropTable(norm)
-	case strings.HasPrefix(upper, "CREATE PROPERTY GRAPH "):
-		return f.applyCreateGraph(norm)
-	case strings.HasPrefix(upper, "DROP PROPERTY GRAPH "):
+	case *ddl.DropTableStmt:
+		return f.applyDropTable(s)
+	case *ddl.CreatePropertyGraphStmt:
+		f.graph = s
+		return nil
+	case *ddl.DropPropertyGraphStmt:
 		// The following CREATE PROPERTY GRAPH re-establishes the graph; a bare
 		// drop just clears it.
 		f.graph = nil
 		return nil
 	default:
-		return fmt.Errorf("unrecognised statement %q (fold interprets gopgql's own DDL only)", norm)
+		return fmt.Errorf("unrecognised statement %T (fold interprets gopgql's own DDL only)", stmt)
 	}
 }
 
-func (f *folder) applyCreateTable(norm string) error {
-	rest := norm[len("CREATE TABLE "):]
-	name, rest := readIdent(rest)
-	if name == "" {
-		return fmt.Errorf("CREATE TABLE missing table name")
+// column converts a parsed column definition to the schema model's column.
+func column(c ddl.ColumnDef) schema.Column {
+	col := schema.Column{
+		Name:       c.Name,
+		Type:       c.Type,
+		Array:      c.Array,
+		NotNull:    c.NotNull,
+		PrimaryKey: c.PrimaryKey,
+		Default:    c.Default,
 	}
-	inner, ok := betweenParens(rest)
-	if !ok {
-		return fmt.Errorf("CREATE TABLE %s missing column list", name)
+	if c.References != nil {
+		col.References = &schema.Reference{Table: c.References.Table, Column: c.References.Column}
 	}
-	var cols []schema.Column
-	for _, part := range splitTopLevel(inner, ',') {
-		if c, isCol := parseColumn(part); isCol {
-			cols = append(cols, c)
-		}
+	return col
+}
+
+func (f *folder) applyCreateTable(s *ddl.CreateTableStmt) error {
+	cols := make([]schema.Column, 0, len(s.Columns))
+	for _, c := range s.Columns {
+		cols = append(cols, column(c))
 	}
-	f.cols[name] = cols
+	f.cols[s.Name] = cols
 	return nil
 }
 
-func (f *folder) applyAlterTable(norm string) error {
-	rest := norm[len("ALTER TABLE "):]
-	name, rest := readIdent(rest)
-	rest = strings.TrimSpace(rest)
-	upper := strings.ToUpper(rest)
-	switch {
-	case strings.HasPrefix(upper, "ADD COLUMN "):
-		c, isCol := parseColumn(rest[len("ADD COLUMN "):])
-		if !isCol {
-			return fmt.Errorf("ALTER TABLE %s ADD COLUMN: unparseable column", name)
-		}
-		f.cols[name] = append(f.cols[name], c)
+func (f *folder) applyAlterTable(s *ddl.AlterTableStmt) error {
+	switch a := s.Action.(type) {
+	case *ddl.AddColumn:
+		f.cols[s.Name] = append(f.cols[s.Name], column(a.Column))
 		return nil
-	case strings.HasPrefix(upper, "DROP COLUMN "):
-		col, _ := readIdent(rest[len("DROP COLUMN "):])
-		f.cols[name] = removeColumn(f.cols[name], col)
+	case *ddl.DropColumn:
+		f.cols[s.Name] = removeColumn(f.cols[s.Name], a.Name)
 		return nil
 	default:
-		return fmt.Errorf("ALTER TABLE %s: unsupported action %q", name, rest)
+		return fmt.Errorf("ALTER TABLE %s: unsupported action %T", s.Name, s.Action)
 	}
 }
 
-func (f *folder) applyCreateIndex(norm string) error {
-	rest := norm[len("CREATE INDEX "):]
-	name, rest := readIdent(rest)
-	rest = strings.TrimSpace(rest)
-	if !strings.HasPrefix(strings.ToUpper(rest), "ON ") {
-		return fmt.Errorf("CREATE INDEX %s missing ON clause", name)
+func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
+	if _, exists := f.indexes[s.Name]; !exists {
+		f.idxOrder = append(f.idxOrder, s.Name)
 	}
-	table, rest := readIdent(strings.TrimSpace(rest[len("ON "):]))
-	inner, ok := betweenParens(rest)
-	if !ok {
-		return fmt.Errorf("CREATE INDEX %s missing column list", name)
-	}
-	var cols []string
-	for _, part := range splitTopLevel(inner, ',') {
-		id, _ := readIdent(part)
-		if id != "" {
-			cols = append(cols, id)
-		}
-	}
-	if _, exists := f.indexes[name]; !exists {
-		f.idxOrder = append(f.idxOrder, name)
-	}
-	f.indexes[name] = schema.Index{Name: name, Table: table, Columns: cols}
+	f.indexes[s.Name] = schema.Index{Name: s.Name, Table: s.Table, Columns: s.Columns}
 	return nil
 }
 
-func (f *folder) applyDropIndex(norm string) error {
-	rest := strings.TrimSpace(norm[len("DROP INDEX "):])
-	rest = trimIfExists(rest)
-	name, _ := readIdent(rest)
-	f.removeIndex(name)
-	return nil
-}
-
-func (f *folder) applyDropTable(norm string) error {
-	rest := strings.TrimSpace(norm[len("DROP TABLE "):])
-	rest = trimIfExists(rest)
-	name, _ := readIdent(rest)
-	delete(f.cols, name)
+func (f *folder) applyDropTable(s *ddl.DropTableStmt) error {
+	delete(f.cols, s.Name)
 	// Indexes on a dropped table go with it.
 	for _, idx := range f.indexList() {
-		if idx.Table == name {
+		if idx.Table == s.Name {
 			f.removeIndex(idx.Name)
 		}
 	}
@@ -265,15 +236,6 @@ func (f *folder) indexList() []schema.Index {
 	return out
 }
 
-func (f *folder) applyCreateGraph(norm string) error {
-	g, err := parseGraph(norm)
-	if err != nil {
-		return err
-	}
-	f.graph = g
-	return nil
-}
-
 // build assembles the folded schema from the accumulated tables, indexes and
 // graph. The graph classifies every table as a vertex or an edge and supplies
 // labels, property lists and edge key metadata; the CREATE TABLE statements
@@ -282,35 +244,35 @@ func (f *folder) build() (*schema.Schema, error) {
 	if f.graph == nil {
 		return nil, fmt.Errorf("migrate: folded migrations declare no property graph")
 	}
-	m := &schema.Schema{GraphName: f.graph.name}
-	for _, v := range f.graph.vertices {
-		cols, ok := f.cols[v.table]
+	m := &schema.Schema{GraphName: f.graph.Name}
+	for _, v := range f.graph.Vertices {
+		cols, ok := f.cols[v.Table]
 		if !ok {
-			return nil, fmt.Errorf("migrate: graph vertex table %q was never created", v.table)
+			return nil, fmt.Errorf("migrate: graph vertex table %q was never created", v.Table)
 		}
 		m.VertexTables = append(m.VertexTables, schema.VertexTable{
-			Name:       v.table,
-			Label:      v.label,
+			Name:       v.Table,
+			Label:      v.Label,
 			Columns:    cols,
-			Properties: v.properties,
+			Properties: v.Properties,
 		})
 	}
-	for _, e := range f.graph.edges {
-		cols, ok := f.cols[e.table]
+	for _, e := range f.graph.Edges {
+		cols, ok := f.cols[e.Table]
 		if !ok {
-			return nil, fmt.Errorf("migrate: graph edge table %q was never created", e.table)
+			return nil, fmt.Errorf("migrate: graph edge table %q was never created", e.Table)
 		}
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
-			Name:        e.table,
-			Label:       e.label,
+			Name:        e.Table,
+			Label:       e.Label,
 			Columns:     cols,
-			SourceKey:   e.sourceKey,
-			SourceTable: e.sourceTable,
-			SourceRef:   e.sourceRef,
-			DestKey:     e.destKey,
-			DestTable:   e.destTable,
-			DestRef:     e.destRef,
-			Properties:  e.properties,
+			SourceKey:   e.SourceKey,
+			SourceTable: e.SourceTable,
+			SourceRef:   e.SourceRef,
+			DestKey:     e.DestKey,
+			DestTable:   e.DestTable,
+			DestRef:     e.DestRef,
+			Properties:  e.Properties,
 		})
 	}
 	m.Indexes = f.indexList()
@@ -342,19 +304,6 @@ func upSection(content string) string {
 	return b.String()
 }
 
-// statements splits a SQL block into individual statements on top-level
-// semicolons. gopgql's DDL contains no semicolons inside statements, so a
-// depth-aware split is exact.
-func statements(sql string) []string {
-	var out []string
-	for _, part := range splitTopLevel(sql, ';') {
-		if strings.TrimSpace(part) != "" {
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
 // removeColumn returns cols without the column named name.
 func removeColumn(cols []schema.Column, name string) []schema.Column {
 	out := cols[:0:0]
@@ -364,12 +313,4 @@ func removeColumn(cols []schema.Column, name string) []schema.Column {
 		}
 	}
 	return out
-}
-
-// trimIfExists drops a leading "IF EXISTS " (case-insensitive).
-func trimIfExists(s string) string {
-	if strings.HasPrefix(strings.ToUpper(s), "IF EXISTS ") {
-		return strings.TrimSpace(s[len("IF EXISTS "):])
-	}
-	return s
 }

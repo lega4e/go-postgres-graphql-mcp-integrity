@@ -18,7 +18,15 @@ state file ([`SPEC.md` §3](./SPEC.md) decision 6):
 - **`migrate.Fold`** interprets gopgql's own canonical `goose` statement set
   (`0001`, `0002`, …) — `CREATE TABLE`, `ALTER TABLE ADD/DROP COLUMN`,
   `CREATE/DROP INDEX`, `CREATE/DROP PROPERTY GRAPH` — back into a `schema.Schema`.
-  It is an interpreter over gopgql's own DDL, not a general DDL parser.
+  It is an interpreter over gopgql's own DDL, not a general DDL parser. The
+  reading follows the shape every established Go SQL parser
+  ([vitess](https://github.com/vitessio/vitess),
+  [xwb1989/sqlparser](https://github.com/xwb1989/sqlparser),
+  [pg_query_go](https://github.com/pganalyze/pg_query_go)) uses — a lexer feeds a
+  recursive-descent parser that builds a typed AST — implemented in the small
+  `internal/ddl` package; `Fold` is then a plain visitor over those statement
+  nodes, so a new statement is a new node plus a production rather than another
+  string-surgery special case.
 - **`migrate.Delta`** diffs the folded prior state against the desired state and
   renders the next migration: `ALTER TABLE ADD/DROP COLUMN`, `CREATE/DROP INDEX`,
   `CREATE/DROP TABLE`, and a `DROP` + `CREATE PROPERTY GRAPH` (graphs are
@@ -57,6 +65,7 @@ SDL revisions and a query, see the initial migration, the folded-and-diffed
 | `schema/`        | In-memory physical schema model (tables, indexes, graph).         |
 | `generator/`     | SDL model → schema model → DDL (`CREATE ...`, property graph).    |
 | `migrate/`       | Emit `goose` migrations; fold prior migrations + diff deltas.     |
+| `internal/ddl/`  | Lexer + recursive-descent parser + AST for gopgql's own DDL.       |
 | `compiler/`      | GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.      |
 | `shape/`         | Flat rows → nested GraphQL response.                              |
 | `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |
