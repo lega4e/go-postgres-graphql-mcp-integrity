@@ -13,8 +13,9 @@
           One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ.
           Edit the <strong>schema</strong>, <strong>query</strong> and
           <strong>variables</strong> on the left; gopgql generates the goose
-          migration and compiles the query to a <code>GRAPH_TABLE</code>
-          statement with ordered bind parameters. It runs entirely in your
+          migration and compiles the query to a single <code>GRAPH_TABLE</code>
+          statement with ordered bind parameters — however many hops it
+          traverses, up to the depth limit. It runs entirely in your
           browser as compiled Go (WebAssembly) — the real
           <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>
           packages, no server and no JavaScript re-implementation. Nothing is
@@ -51,18 +52,60 @@
         <div class="outputs">
           <ga-tabs
             id="tabs"
-            tabs='[{"id":"query","label":"Query → SQL"},{"id":"migration","label":"Migration"},{"id":"delta","label":"Delta"}]'
+            tabs='[{"id":"query","label":"Query → SQL"},{"id":"depth","label":"Depth limit"},{"id":"interface","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"delta","label":"Delta"}]'
           >
             <div slot="query" class="panel">
               <p class="panel-hint">
-                The compiled one-hop <code>GRAPH_TABLE</code>. Argument values
-                travel as bind parameters (<code>$1</code>, …), never
-                interpolated.
+                The compiled multi-hop <code>GRAPH_TABLE</code>. Nesting extends
+                one <code>MATCH</code> chain rather than spawning a second query,
+                argument values travel as bind parameters (<code>$1</code>, …)
+                and never interpolated, and every pair of vertex positions that
+                could bind the same row is guarded with
+                <code>&lt;&gt;</code> — PostgreSQL does not enforce edge
+                isomorphism.
               </p>
               <label>Compiled <code>GRAPH_TABLE</code></label>
               <ga-code id="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="params"></ga-code>
+            </div>
+
+            <div slot="depth" class="panel">
+              <p class="panel-hint">
+                SQL/PGQ has no variable-length paths, so gopgql refuses a
+                selection nested past <code>MaxDepth</code> (default
+                <span id="maxdepth">3</span>) instead of silently truncating the
+                pattern. The rejection is a typed
+                <code>*compiler.DepthExceededError</code> raised at compile time,
+                so no SQL exists to send.
+              </p>
+              <label for="deep">GraphQL query — one hop too deep</label>
+              <textarea id="deep" class="code-input" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label>Compiler outcome</label>
+              <ga-code id="deepout"></ga-code>
+            </div>
+
+            <div slot="interface" class="panel">
+              <p class="panel-hint">
+                A GraphQL interface makes several tables one queryable position.
+                An interface carrying <code>@node(label:)</code> becomes a label
+                its implementors' tables all expose —
+                <code>(v0 IS actor)</code>; an interface without it is matched by
+                alternation over their own labels —
+                <code>(v0 IS bot|person)</code>. Edit the query below to
+                <code>{ profiles { name } }</code> to see the second form.
+              </p>
+              <label for="isdl">GraphQL SDL — interface schema</label>
+              <textarea id="isdl" class="code-input" rows="11" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="iquery">GraphQL query</label>
+              <textarea id="iquery" class="code-input" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label>Compiled <code>GRAPH_TABLE</code></label>
+              <ga-code id="isql"></ga-code>
+              <label>Generated <code>CREATE PROPERTY GRAPH</code></label>
+              <ga-code id="igraph"></ga-code>
             </div>
 
             <div slot="migration" class="panel">

@@ -14,6 +14,7 @@
 package playground
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/lega4e/gopgql/compiler"
@@ -33,9 +34,49 @@ const ExampleSDL = `type Person @node(label: "person") {
                          @hasInverse(field: "follows")
 }`
 
-// ExampleQuery is the M3 exit query (SPEC.md §7 → M3): a one-hop traversal
-// filtered by a bound variable. It is editable in the playground.
-const ExampleQuery = `{ persons(name: $n) { name follows { name } } }`
+// ExampleQuery is the M4 exit query (SPEC.md §7 → M4): a three-hop traversal
+// filtered by a bound variable, compiled to a single GRAPH_TABLE. It is
+// editable in the playground.
+const ExampleQuery = `{ persons(name: $n) { name follows { name follows { name follows { name } } } } }`
+
+// ExampleDeepQuery is one hop past the default MaxDepth. It compiles to a typed
+// *compiler.DepthExceededError rather than a truncated pattern: SQL/PGQ has no
+// variable-length paths, so gopgql rejects (SPEC.md §3, decision 3).
+const ExampleDeepQuery = `{ persons(name: $n) { follows { follows { follows { follows { name } } } } } }`
+
+// ExampleInterfaceSDL maps two vertex tables under one interface twice over
+// (SPEC.md §7 → M4). Actor carries @node, so persons and bots both expose the
+// shared `actor` label; Profile does not, so it is matched by label alternation
+// over the implementors' own labels.
+const ExampleInterfaceSDL = `interface Actor @node(label: "actor") {
+  id: ID!
+  name: String!
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+interface Profile {
+  id: ID!
+  name: String!
+}
+
+type Person implements Actor & Profile @node(label: "person") {
+  id: ID!
+  name: String!
+  email: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Bot implements Actor & Profile @node(label: "bot") {
+  id: ID!
+  name: String!
+  vendor: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT, table: "bot_follows")
+}`
+
+// ExampleInterfaceQuery traverses from the shared-label interface into a
+// concrete type. Because an actor may be a person, the two positions could bind
+// the same row, so the compiler emits the isomorphism guard (SPEC.md §2.2).
+const ExampleInterfaceQuery = `{ actors { name follows { name } } }`
 
 // ExampleVars is the initial variables document (JSON) bound to ExampleQuery.
 const ExampleVars = `{ "n": "Alice" }`
@@ -91,6 +132,23 @@ func Compile(sdlSrc, query string, vars map[string]any) (Compiled, error) {
 		return Compiled{}, err
 	}
 	return Compiled{SQL: sql, Params: renderParams(args)}, nil
+}
+
+// MaxDepth reports the compiler's default traversal-depth ceiling, so the
+// playground can name it when a query is rejected for exceeding it.
+func MaxDepth() int { return compiler.DefaultMaxDepth }
+
+// DepthExceeded classifies a Compile error: it reports whether the compiler
+// refused the query for nesting past its depth ceiling, and what that ceiling
+// was. It is what lets the playground present a depth rejection as the designed
+// outcome it is, rather than as a generic error (SPEC.md §10: depth limits
+// reject rather than truncate).
+func DepthExceeded(err error) (limit int, ok bool) {
+	var depthErr *compiler.DepthExceededError
+	if errors.As(err, &depthErr) {
+		return depthErr.MaxDepth, true
+	}
+	return 0, false
 }
 
 // Delta generates the delta migration between two SDL revisions. It builds the

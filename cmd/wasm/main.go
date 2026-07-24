@@ -12,8 +12,13 @@
 // Three functions are exported:
 //
 //   - gopgqlMigration(sdl) -> {migration, error}
-//   - gopgqlCompile(sdl, query, varsJSON) -> {sql, params, error}
+//   - gopgqlCompile(sdl, query, varsJSON) -> {sql, params, error, depthExceeded, maxDepth}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
+//
+// gopgqlCompile classifies a depth rejection separately from other errors so the
+// page can show it as the designed outcome it is: SQL/PGQ has no
+// variable-length paths, so a selection past MaxDepth is refused at compile
+// time rather than silently truncated (SPEC.md §3, decision 3).
 package main
 
 import (
@@ -31,6 +36,10 @@ func main() {
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
 	js.Global().Set("gopgqlExampleVars", js.ValueOf(playground.ExampleVars))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
+	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
+	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
+	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
+	js.Global().Set("gopgqlMaxDepth", js.ValueOf(playground.MaxDepth()))
 	// Signal to the page that the WASM module is ready.
 	if cb := js.Global().Get("onGopgqlReady"); cb.Type() == js.TypeFunction {
 		cb.Invoke()
@@ -59,7 +68,10 @@ func migration(_ js.Value, args []js.Value) any {
 // compile is bound to window.gopgqlCompile. It expects three string arguments:
 // the SDL, the GraphQL query, and a variables document as JSON (may be empty).
 func compile(_ js.Value, args []js.Value) any {
-	result := map[string]any{"sql": "", "params": "", "error": ""}
+	result := map[string]any{
+		"sql": "", "params": "", "error": "",
+		"depthExceeded": false, "maxDepth": playground.MaxDepth(),
+	}
 	if len(args) < 3 || args[0].Type() != js.TypeString ||
 		args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
 		result["error"] = "gopgqlCompile expects (sdl, query, varsJSON) string arguments"
@@ -73,6 +85,10 @@ func compile(_ js.Value, args []js.Value) any {
 	out, err := playground.Compile(args[0].String(), args[1].String(), vars)
 	if err != nil {
 		result["error"] = err.Error()
+		if limit, ok := playground.DepthExceeded(err); ok {
+			result["depthExceeded"] = true
+			result["maxDepth"] = limit
+		}
 		return js.ValueOf(result)
 	}
 	result["sql"] = out.SQL
