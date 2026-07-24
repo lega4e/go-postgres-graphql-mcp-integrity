@@ -1,15 +1,7 @@
-:root {
-  --bg: #0f1117;
-  --panel: #171a23;
-  --border: #262b38;
-  --text: #e6e9ef;
-  --muted: #9aa4b2;
-  --accent: #5aa9e6;
-  --error: #ff6b6b;
-  --ok: #4ec9a3;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
-    Arial, sans-serif;
-}
+/* The palette, fonts and spacing come from the vendored ui-kit tokens
+   (imported in main.js). This file only lays out the playground page and
+   styles the native <textarea> editors to match the kit's inputs — the kit has
+   no multi-line text component. */
 
 * {
   box-sizing: border-box;
@@ -17,122 +9,142 @@
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  line-height: 1.5;
+  min-height: 100vh;
 }
 
 main {
-  max-width: 1100px;
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 2rem 1.5rem 4rem;
+  padding: var(--ga-space-8, 32px) var(--ga-space-6, 24px) var(--ga-space-12, 48px);
 }
 
-h1 {
+header h1 {
   margin: 0;
-  font-size: 2.25rem;
-  letter-spacing: -0.02em;
+  font-family: var(--ga-font-display, monospace);
+  font-size: var(--ga-fs-3xl, 44px);
+  letter-spacing: var(--ga-tracking-tight, -0.02em);
 }
 
 .tagline {
-  color: var(--muted);
-  max-width: 60ch;
+  color: var(--ga-muted, #878787);
+  max-width: 68ch;
 }
 
+header ga-note {
+  display: block;
+  margin: var(--ga-space-4, 16px) 0 var(--ga-space-8, 32px);
+  max-width: 68ch;
+}
+
+/* Two columns: editor on the left, tabbed outputs on the right. */
 .io {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.25rem;
-  margin-top: 1.5rem;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: var(--ga-space-6, 24px);
+  align-items: start;
 }
 
-@media (max-width: 820px) {
+@media (max-width: 860px) {
   .io {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
-.pane {
+.editor {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--ga-space-2, 8px);
 }
 
 label {
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--muted);
+  font-size: var(--ga-fs-sm, 14px);
+  font-weight: 500;
+  color: var(--ga-fg, #ededed);
+  margin-top: var(--ga-space-3, 12px);
 }
 
-textarea,
-.output {
-  font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  padding: 0.75rem;
+.editor > label:first-of-type {
+  margin-top: 0;
 }
 
-textarea {
-  min-height: 320px;
-  resize: vertical;
+.code-input {
   width: 100%;
+  resize: vertical;
+  font-family: var(--ga-font-mono, ui-monospace, monospace);
+  font-size: var(--ga-fs-sm, 14px);
+  line-height: 1.5;
+  color: var(--ga-fg, #ededed);
+  background: var(--ga-bg-elev, #1a1a1a);
+  border: 1px solid var(--ga-border-strong, #2a2a2a);
+  border-radius: var(--ga-radius, 6px);
+  padding: 10px 12px;
+  transition: border-color var(--ga-transition, 0.18s ease),
+    box-shadow var(--ga-transition, 0.18s ease);
 }
 
-textarea.query-input {
-  min-height: 4.5rem;
+.code-input::placeholder {
+  color: var(--ga-dim, #454545);
 }
 
-.output {
-  margin: 0;
-  white-space: pre;
-  overflow-x: auto;
-  min-height: 3rem;
+.code-input:hover {
+  border-color: var(--ga-muted, #878787);
+}
+
+.code-input:focus {
+  outline: none;
+  border-color: var(--ga-accent, #54a2ff);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--ga-accent, #54a2ff) 25%, transparent);
 }
 
 .controls {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-}
-
-button {
-  background: var(--accent);
-  color: #06121f;
-  border: none;
-  border-radius: 6px;
-  padding: 0.5rem 1.1rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
+  gap: var(--ga-space-3, 12px);
+  margin-top: var(--ga-space-4, 16px);
 }
 
 .status {
-  font-size: 0.85rem;
-  color: var(--muted);
+  font-size: var(--ga-fs-sm, 14px);
+  color: var(--ga-muted, #878787);
 }
-
 .status.ok {
-  color: var(--ok);
+  color: var(--ga-green, #00c758);
+}
+.status.error {
+  color: var(--ga-red, #ff6568);
 }
 
-.status.error {
-  color: var(--error);
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ga-space-2, 8px);
+}
+
+.panel-hint {
+  margin: 0 0 var(--ga-space-2, 8px);
+  font-size: var(--ga-fs-sm, 14px);
+  color: var(--ga-muted, #878787);
+}
+
+/* Multi-line code blocks: pin the copy button to the top and let long output
+   scroll rather than stretch the layout. */
+ga-code::part(block) {
+  align-items: flex-start;
+}
+ga-code::part(text) {
+  max-height: 60vh;
+  overflow: auto;
 }
 
 footer {
-  margin-top: 2.5rem;
-  color: var(--muted);
-  font-size: 0.85rem;
+  margin-top: var(--ga-space-12, 48px);
+  padding-top: var(--ga-space-5, 20px);
+  border-top: 1px solid var(--ga-border, #1a1a1a);
+  color: var(--ga-muted, #878787);
+  font-size: var(--ga-fs-sm, 14px);
 }
 
 a {
-  color: var(--accent);
+  color: var(--ga-accent, #54a2ff);
 }
