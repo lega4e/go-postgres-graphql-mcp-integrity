@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-BdCt8TtK.js"></script>
+    <script type="module" crossorigin src="./assets/index-BZSzfgmK.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-D0boo5cg.css">
   </head>
   <body>
@@ -13,20 +13,26 @@
         <h1>gopgql</h1>
         <p class="tagline">
           One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ.
-          This is <strong>M1</strong>: the SDL below is parsed and validated, an
-          initial <code>goose</code> migration is generated, and the GraphQL
-          query is compiled to a <code>GRAPH_TABLE</code> statement — all
-          running entirely in your browser as compiled Go (WebAssembly), the
-          real <code>sdl</code>+<code>generator</code>+<code>compiler</code>
+          This is <strong>M2</strong>: edit the two SDL revisions below and
+          gopgql generates the initial <code>goose</code> migration for the
+          first, then <em>folds</em> it back into a schema and diffs it against
+          the second to emit a <strong>delta migration</strong>
+          (<code>ALTER TABLE</code> plus a recreated property graph). The query
+          compiles to a <code>GRAPH_TABLE</code> statement against the revised
+          SDL. It all runs entirely in your browser as compiled Go
+          (WebAssembly) — the real
+          <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>
           packages, no server and no JavaScript re-implementation.
         </p>
       </header>
 
       <section class="io">
         <div class="pane">
-          <label for="sdl">GraphQL SDL</label>
+          <label for="sdl">GraphQL SDL — revision 1 (prior)</label>
           <textarea id="sdl" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
-          <label for="gql">GraphQL query</label>
+          <label for="sdl2">GraphQL SDL — revision 2 (desired)</label>
+          <textarea id="sdl2" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+          <label for="gql">GraphQL query (against revision 2)</label>
           <textarea id="gql" class="query-input" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
           <div class="controls">
             <button id="run" disabled>Generate</button>
@@ -35,8 +41,10 @@
         </div>
 
         <div class="pane">
-          <label for="ddl">Migration <code>0001_init.sql</code> (goose)</label>
+          <label for="ddl">Initial migration <code>0001_init.sql</code> (goose)</label>
           <pre id="ddl" class="output"></pre>
+          <label for="delta">Delta migration <code>0002</code> (goose)</label>
+          <pre id="delta" class="output"></pre>
           <label for="query">Compiled <code>GRAPH_TABLE</code> query</label>
           <pre id="query" class="output"></pre>
         </div>
