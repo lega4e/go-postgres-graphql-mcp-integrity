@@ -44,12 +44,10 @@ var (
 	connString string
 )
 
-// TestFeatures is the godog entry point under `go test`.
+// TestFeatures is the godog entry point under `go test`. It always runs against
+// a real postgres:19beta2 container — there is no skip path (SPEC.md §10: every
+// milestone proves itself against real infrastructure, never a mock).
 func TestFeatures(t *testing.T) {
-	if os.Getenv("GOPGQL_SKIP_INTEGRATION") == "1" {
-		t.Skip("integration tests skipped (GOPGQL_SKIP_INTEGRATION=1)")
-	}
-
 	ctx := context.Background()
 
 	var err error
