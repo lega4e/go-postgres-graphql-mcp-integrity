@@ -1,8 +1,10 @@
 import './style.css'
 
 const sdlEl = document.getElementById('sdl')
+const sdl2El = document.getElementById('sdl2')
 const gqlEl = document.getElementById('gql')
 const ddlEl = document.getElementById('ddl')
+const deltaEl = document.getElementById('delta')
 const queryEl = document.getElementById('query')
 const runEl = document.getElementById('run')
 const statusEl = document.getElementById('status')
@@ -20,15 +22,17 @@ function loadScript(src) {
 }
 
 function render() {
-  const result = globalThis.gopgqlGenerate(sdlEl.value, gqlEl.value)
+  const result = globalThis.gopgqlDelta(sdlEl.value, sdl2El.value, gqlEl.value)
   if (result.error) {
     ddlEl.textContent = ''
+    deltaEl.textContent = ''
     queryEl.textContent = ''
     statusEl.textContent = result.error
     statusEl.className = 'status error'
     return
   }
-  ddlEl.textContent = result.migration
+  ddlEl.textContent = result.init
+  deltaEl.textContent = result.delta
   queryEl.textContent = result.sql
   statusEl.textContent = 'generated'
   statusEl.className = 'status ok'
@@ -52,7 +56,8 @@ async function boot() {
 
     // The Go main sets the exported functions synchronously before it blocks.
     sdlEl.value = globalThis.gopgqlExampleSDL || sdlEl.value
-    gqlEl.value = globalThis.gopgqlExampleQuery || gqlEl.value
+    sdl2El.value = globalThis.gopgqlRevisedExampleSDL || sdl2El.value
+    gqlEl.value = globalThis.gopgqlRevisedExampleQuery || gqlEl.value
     runEl.disabled = false
     statusEl.textContent = 'ready'
     statusEl.className = 'status ok'

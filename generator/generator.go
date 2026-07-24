@@ -154,35 +154,41 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 func DDL(m *schema.Schema) string {
 	var blocks []string
 	for i := range m.VertexTables {
-		blocks = append(blocks, vertexDDL(&m.VertexTables[i]))
+		blocks = append(blocks, VertexTableDDL(&m.VertexTables[i]))
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		block := edgeDDL(e)
+		block := EdgeTableDDL(e)
 		for _, idx := range m.Indexes {
 			if idx.Table == e.Name {
-				block += "\n" + indexDDL(idx)
+				block += "\n" + IndexDDL(idx)
 			}
 		}
 		blocks = append(blocks, block)
 	}
-	blocks = append(blocks, graphDDL(m))
+	blocks = append(blocks, GraphDDL(m))
 	return strings.Join(blocks, "\n\n") + "\n"
 }
 
-func vertexDDL(vt *schema.VertexTable) string {
+// VertexTableDDL renders a single CREATE TABLE for a vertex table. It is
+// exported so the migrate package can re-create a vertex table in a delta
+// migration (SPEC.md §7 → M2).
+func VertexTableDDL(vt *schema.VertexTable) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n", pgident.Quote(vt.Name))
 	lines := make([]string, len(vt.Columns))
 	for i, c := range vt.Columns {
-		lines[i] = "    " + columnDDL(c)
+		lines[i] = "    " + ColumnDDL(c)
 	}
 	b.WriteString(strings.Join(lines, ",\n"))
 	b.WriteString("\n);")
 	return b.String()
 }
 
-func columnDDL(c schema.Column) string {
+// ColumnDDL renders a single column definition (name, type, constraints), as it
+// appears inside CREATE TABLE or after ADD COLUMN. Exported for the migrate
+// package's delta ALTER statements (SPEC.md §7 → M2).
+func ColumnDDL(c schema.Column) string {
 	typ := c.Type
 	if c.Array {
 		typ += "[]"
@@ -204,18 +210,23 @@ func columnDDL(c schema.Column) string {
 	return strings.Join(parts, " ")
 }
 
-func edgeDDL(e *schema.EdgeTable) string {
+// EdgeTableDDL renders a single CREATE TABLE for an edge table (its two key
+// columns and the composite primary key). Exported for the migrate package's
+// delta migrations (SPEC.md §7 → M2).
+func EdgeTableDDL(e *schema.EdgeTable) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n", pgident.Quote(e.Name))
 	for _, c := range e.Columns {
-		fmt.Fprintf(&b, "    %s,\n", columnDDL(c))
+		fmt.Fprintf(&b, "    %s,\n", ColumnDDL(c))
 	}
 	fmt.Fprintf(&b, "    PRIMARY KEY (%s, %s)\n", pgident.Quote(e.SourceKey), pgident.Quote(e.DestKey))
 	b.WriteString(");")
 	return b.String()
 }
 
-func indexDDL(idx schema.Index) string {
+// IndexDDL renders a CREATE INDEX statement. Exported for the migrate package's
+// delta migrations (SPEC.md §7 → M2).
+func IndexDDL(idx schema.Index) string {
 	cols := make([]string, len(idx.Columns))
 	for i, c := range idx.Columns {
 		cols[i] = pgident.Quote(c)
@@ -224,7 +235,11 @@ func indexDDL(idx schema.Index) string {
 		pgident.Quote(idx.Name), pgident.Quote(idx.Table), strings.Join(cols, ", "))
 }
 
-func graphDDL(m *schema.Schema) string {
+// GraphDDL renders the CREATE PROPERTY GRAPH statement for a schema. Exported
+// because property graphs are metadata that a delta migration always drops and
+// recreates (SPEC.md §7 → M2); the migrate package renders both the desired
+// graph (Up) and the folded prior graph (Down) with it.
+func GraphDDL(m *schema.Schema) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE PROPERTY GRAPH %s\n", pgident.Quote(m.GraphName))
 	b.WriteString("  VERTEX TABLES (\n")
