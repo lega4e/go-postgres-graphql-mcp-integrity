@@ -131,3 +131,136 @@ func TestRejectsMissingKey(t *testing.T) {
 		t.Fatal("expected error for @node type without id: ID!")
 	}
 }
+
+// interfaceSDL maps two vertex tables under one interface. Actor carries @node,
+// so persons and bots both expose the shared `actor` label; Profile does not, so
+// it contributes no label and is matched by alternation at compile time
+// (SPEC.md §7 → M4).
+const interfaceSDL = `interface Actor @node(label: "actor") {
+  id: ID!
+  name: String!
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+interface Profile {
+  id: ID!
+  name: String!
+}
+
+type Person implements Actor & Profile @node(label: "person") {
+  id: ID!
+  name: String!
+  email: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Bot implements Actor & Profile @node(label: "bot") {
+  id: ID!
+  name: String!
+  vendor: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT, table: "bot_follows")
+}`
+
+// TestInterfaceSharedLabel checks the shared label lands on every implementor's
+// vertex table with an aligned property list — SPEC.md §5.3 invariant 5, which
+// PostgreSQL rejects the graph over if it is broken.
+func TestInterfaceSharedLabel(t *testing.T) {
+	got := buildDDL(t, interfaceSDL)
+	for _, want := range []string{
+		"bots LABEL bot PROPERTIES (id, name, vendor)\n            LABEL actor PROPERTIES (id, name)",
+		"persons LABEL person PROPERTIES (id, name, email)\n            LABEL actor PROPERTIES (id, name)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected DDL to contain:\n%s\n--- got ---\n%s", want, got)
+		}
+	}
+	// An unlabelled interface contributes nothing to the DDL.
+	if strings.Contains(got, "profile") {
+		t.Errorf("an unlabelled interface must not reach the DDL, got:\n%s", got)
+	}
+	// Both edge tables carry the same label, each with the aligned property list.
+	for _, want := range []string{
+		"bot_follows SOURCE KEY (source_id) REFERENCES bots (id)",
+		"follows SOURCE KEY (source_id) REFERENCES persons (id)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected DDL to contain %q, got:\n%s", want, got)
+		}
+	}
+	if n := strings.Count(got, "LABEL follows PROPERTIES (source_id, target_id)"); n != 2 {
+		t.Errorf("edge label `follows` spans %d tables, want 2", n)
+	}
+}
+
+// TestRejectsMisalignedSharedLabel proves invariant 5 is enforced at generate
+// time rather than surfacing as a PostgreSQL error at migration time. The two
+// implementors expose the same property *names* under `actor` but different
+// types, which PostgreSQL refuses.
+func TestRejectsMisalignedSharedLabel(t *testing.T) {
+	src := `interface Actor @node(label: "actor") {
+  id: ID!
+  name: String!
+}
+
+type Person implements Actor @node(label: "person") {
+  id: ID!
+  name: String!
+}
+
+type Bot implements Actor @node(label: "bot") {
+  id: ID!
+  name: String!
+  rank: Int
+}`
+	// Aligned: both expose (id, name) under `actor`; the extra column is not a
+	// property of the shared label.
+	doc, err := sdl.Parse(src)
+	if err != nil {
+		t.Fatalf("sdl.Parse: %v", err)
+	}
+	if _, err := generator.Build(doc, ""); err != nil {
+		t.Fatalf("aligned interface should build: %v", err)
+	}
+
+	// A property name with two types across the graph is what PostgreSQL
+	// rejects ("a property of the same name has to have the same data type").
+	clash := `type Person @node(label: "person") {
+  id: ID!
+  name: String!
+}
+
+type Gizmo @node(label: "gizmo") {
+  id: ID!
+  name: Int!
+}`
+	doc, err = sdl.Parse(clash)
+	if err != nil {
+		t.Fatalf("sdl.Parse: %v", err)
+	}
+	if _, err := generator.Build(doc, ""); err == nil {
+		t.Error("expected a property-type clash to be rejected at generate time")
+	}
+}
+
+// TestRejectsLabelClaimedTwice guards the case where an interface and one of its
+// implementors ask for the same label — the table would carry it twice with
+// different property lists.
+func TestRejectsLabelClaimedTwice(t *testing.T) {
+	src := `interface Actor @node(label: "person") {
+  id: ID!
+  name: String!
+}
+
+type Person implements Actor @node(label: "person", table: "people") {
+  id: ID!
+  name: String!
+  email: String
+}`
+	doc, err := sdl.Parse(src)
+	if err != nil {
+		t.Fatalf("sdl.Parse: %v", err)
+	}
+	if _, err := generator.Build(doc, ""); err == nil {
+		t.Error("expected an error when an interface and its implementor claim one label")
+	}
+}

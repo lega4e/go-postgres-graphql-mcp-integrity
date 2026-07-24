@@ -41,17 +41,36 @@ type Index struct {
 	Columns []string
 }
 
+// LabelProperties is one graph label exposed on a table together with the
+// property list exposed under it.
+//
+// A table carries its own label plus, from M4, any shared labels: one label
+// spanning several tables is how a GraphQL interface is mapped (SPEC.md §7 →
+// M4). PostgreSQL requires every table carrying a given label to expose the
+// same properties under it — same count, same names, same types — which is
+// SPEC.md §5.3 invariant 5.
+type LabelProperties struct {
+	// Label is the graph label.
+	Label string
+	// Properties are the graph-exposed property names under Label.
+	Properties []string
+}
+
 // VertexTable is a table mapped as a graph vertex.
 type VertexTable struct {
 	// Name is the physical table name.
 	Name string
-	// Label is the graph vertex label.
+	// Label is the table's own graph vertex label.
 	Label string
 	// Columns are the table's columns in declaration order.
 	Columns []Column
-	// Properties are the graph-exposed property names. Every KEY column is
-	// re-listed here (SPEC.md §5.3 invariant 1).
+	// Properties are the graph-exposed property names under Label. Every KEY
+	// column is re-listed here (SPEC.md §5.3 invariant 1).
 	Properties []string
+	// ExtraLabels are shared labels this table carries in addition to Label —
+	// one per interface its GraphQL type implements — each with its own
+	// property list, aligned with every other table carrying that label.
+	ExtraLabels []LabelProperties
 }
 
 // EdgeTable is a table mapped as a graph edge.

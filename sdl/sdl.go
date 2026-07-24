@@ -11,6 +11,21 @@
 // the default scalar mapping (§5.1). Parsing and validation are delegated to
 // vektah/gqlparser/v2; this package layers gopgql's directive semantics on top.
 //
+// M4 adds GraphQL interfaces (SPEC.md §7 → M4). An interface makes the tables of
+// every implementing @node type addressable as one queryable position, mapped
+// one of two ways depending on whether the interface itself carries @node:
+//
+//   - @node(label:) — a *shared label*. Every implementor's vertex table carries
+//     that label with an aligned property list, and a pattern matches it with a
+//     single label, `(v IS actor)`.
+//   - no @node — *label alternation*. A pattern matches the implementors' own
+//     labels, `(v IS bot|person)`.
+//
+// Both are exposed to the compiler through Target, which also reports the
+// tables a vertex bound at that position can come from — what decides where two
+// positions in one pattern could bind the same row and so need an
+// edge-isomorphism guard (SPEC.md §2.2).
+//
 // It has no database dependency and compiles to WASM.
 package sdl
 
@@ -89,14 +104,62 @@ type Node struct {
 	Fields []*Field
 }
 
+// Interface is a GraphQL interface implemented by @node types. It maps the
+// tables of all its implementors to one queryable position (SPEC.md §7 → M4).
+type Interface struct {
+	// TypeName is the GraphQL interface name (e.g. "Actor").
+	TypeName string
+	// Label is the shared graph label when the interface carries @node(label:) —
+	// every implementor's vertex table exposes it. It is empty for an
+	// unlabelled interface, which is matched by label alternation instead.
+	Label string
+	// RootField is this interface's query root-field name: the pluralized
+	// label, or the pluralized lowercased type name when unlabelled.
+	RootField string
+	// Fields are the interface's fields in declaration order. Every implementor
+	// declares each of them (GraphQL enforces it), so they are projectable and
+	// traversable wherever the interface is matched.
+	Fields []*Field
+	// Implementors are the @node types implementing it, in stable (type-name)
+	// order.
+	Implementors []*Node
+}
+
+// Target is a queryable vertex position: a @node type or an interface. It
+// carries exactly what the compiler needs to emit a vertex pattern.
+type Target struct {
+	// TypeName is the GraphQL type at this position.
+	TypeName string
+	// Labels are the alternatives of the label expression to emit: one label
+	// for a @node type or a shared-label interface, several — joined with `|` —
+	// for an interface matched by alternation. Sorted, so emitted SQL is
+	// deterministic.
+	Labels []string
+	// Fields are the fields projectable and traversable at this position.
+	Fields []*Field
+	// Tables are the physical tables a vertex bound here can come from. Two
+	// positions whose table sets intersect could bind the same row, which is
+	// where an isomorphism guard is required (SPEC.md §2.2). Sorted.
+	Tables []string
+}
+
 // Document is the typed mapping model built from an SDL source: the set of
-// @node types with their resolved labels, table names and relationships.
+// @node types with their resolved labels, table names and relationships, plus
+// the interfaces spanning them.
 type Document struct {
 	// Nodes are the @node types in a stable (type-name) order.
 	Nodes []*Node
+	// Interfaces are the interfaces implemented by @node types, in a stable
+	// (type-name) order.
+	Interfaces []*Interface
 
 	byType  map[string]*Node
 	byTable map[string]*Node
+	byIface map[string]*Interface
+	// targets and roots resolve a GraphQL type name and a query root-field name
+	// respectively to the vertex position they select.
+	targets map[string]*Target
+	roots   map[string]*Target
 	// Raw is the validated gqlparser schema, retained for callers that need
 	// the underlying AST (SPEC.md §4: "*ast.Schema + directive model").
 	Raw *ast.Schema
@@ -109,9 +172,31 @@ func (d *Document) NodeByType(name string) *Node { return d.byType[name] }
 // Query root fields resolve to nodes by table name (SPEC.md §7 → M1).
 func (d *Document) NodeByTable(name string) *Node { return d.byTable[name] }
 
+// InterfaceByType returns the interface for a GraphQL type name, or nil.
+func (d *Document) InterfaceByType(name string) *Interface { return d.byIface[name] }
+
+// RootTarget resolves a query root-field name to the vertex position it
+// selects, or nil when no @node table and no interface answers to that name.
+func (d *Document) RootTarget(field string) *Target { return d.roots[field] }
+
+// TargetForType resolves a GraphQL type name — a @node type or an interface —
+// to the vertex position a selection of that type occupies, or nil.
+func (d *Document) TargetForType(name string) *Target { return d.targets[name] }
+
+// RootFields lists every queryable root-field name, sorted. It exists so a
+// compile error can tell the caller what *is* queryable.
+func (d *Document) RootFields() []string {
+	out := make([]string, 0, len(d.roots))
+	for name := range d.roots {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // prelude declares the gopgql directive vocabulary and custom scalars so
 // gqlparser recognises and validates them. It is the M1 subset of SPEC.md §5.
-const prelude = `directive @node(label: String!, table: String) on OBJECT
+const prelude = `directive @node(label: String!, table: String) on OBJECT | INTERFACE
 directive @relationship(type: String!, direction: RelDirection, table: String) on FIELD_DEFINITION
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @ignore on FIELD_DEFINITION
@@ -137,18 +222,25 @@ func Parse(src string) (*Document, error) {
 	doc := &Document{
 		byType:  map[string]*Node{},
 		byTable: map[string]*Node{},
+		byIface: map[string]*Interface{},
+		targets: map[string]*Target{},
+		roots:   map[string]*Target{},
 		Raw:     schema,
 	}
 
+	var ifaceDefs []*ast.Definition
 	for _, def := range schema.Types {
-		if def.Kind != ast.Object || def.BuiltIn {
+		if def.BuiltIn {
 			continue
 		}
-		nodeDir := def.Directives.ForName("node")
-		if nodeDir == nil {
-			continue
+		switch def.Kind {
+		case ast.Object:
+			if nodeDir := def.Directives.ForName("node"); nodeDir != nil {
+				doc.Nodes = append(doc.Nodes, buildNode(def, nodeDir))
+			}
+		case ast.Interface:
+			ifaceDefs = append(ifaceDefs, def)
 		}
-		doc.Nodes = append(doc.Nodes, buildNode(def, nodeDir))
 	}
 
 	if len(doc.Nodes) == 0 {
@@ -167,10 +259,100 @@ func Parse(src string) (*Document, error) {
 		doc.byTable[n.Table] = n
 	}
 
+	if err := doc.buildInterfaces(schema, ifaceDefs); err != nil {
+		return nil, err
+	}
+
 	if err := doc.validate(); err != nil {
 		return nil, err
 	}
+	if err := doc.buildTargets(); err != nil {
+		return nil, err
+	}
 	return doc, nil
+}
+
+// buildInterfaces reads every interface an @node type implements into the
+// mapping model. An interface implemented by no @node type is ignored — it is
+// GraphQL-only, like an @ignore field.
+func (d *Document) buildInterfaces(schema *ast.Schema, defs []*ast.Definition) error {
+	implementors := map[string][]*Node{}
+	for _, n := range d.Nodes {
+		def := schema.Types[n.TypeName]
+		for _, name := range def.Interfaces {
+			implementors[name] = append(implementors[name], n)
+		}
+	}
+
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
+	for _, def := range defs {
+		impls := implementors[def.Name]
+		if len(impls) == 0 {
+			continue
+		}
+		// Every possible type of the interface must be a mapped @node; a plain
+		// object implementing it would have no table to contribute.
+		for _, pt := range schema.PossibleTypes[def.Name] {
+			if d.byType[pt.Name] == nil {
+				return fmt.Errorf("sdl: interface %s is implemented by %s, which is not a `type ... @node(...)`; "+
+					"every implementor must map to a table", def.Name, pt.Name)
+			}
+		}
+
+		iface := &Interface{TypeName: def.Name, Fields: buildFields(def), Implementors: impls}
+		if nodeDir := def.Directives.ForName("node"); nodeDir != nil {
+			iface.Label = argString(nodeDir, "label")
+			iface.RootField = pluralize(iface.Label)
+		} else {
+			iface.RootField = pluralize(strings.ToLower(def.Name))
+		}
+		d.Interfaces = append(d.Interfaces, iface)
+		d.byIface[iface.TypeName] = iface
+	}
+	return nil
+}
+
+// buildTargets resolves every queryable vertex position: one per @node type and
+// one per interface, indexed by GraphQL type name and by query root-field name.
+func (d *Document) buildTargets() error {
+	claim := func(field, owner string, t *Target) error {
+		if prev, dup := d.roots[field]; dup {
+			return fmt.Errorf("sdl: %s and %s both answer to the root field %q; "+
+				"disambiguate with @node(table:) or @node(label:)", prev.TypeName, owner, field)
+		}
+		d.roots[field] = t
+		return nil
+	}
+
+	for _, n := range d.Nodes {
+		t := &Target{TypeName: n.TypeName, Labels: []string{n.Label}, Fields: n.Fields, Tables: []string{n.Table}}
+		d.targets[n.TypeName] = t
+		if err := claim(n.Table, n.TypeName, t); err != nil {
+			return err
+		}
+	}
+
+	for _, iface := range d.Interfaces {
+		t := &Target{TypeName: iface.TypeName, Fields: iface.Fields}
+		for _, impl := range iface.Implementors {
+			t.Tables = append(t.Tables, impl.Table)
+			if iface.Label == "" {
+				// Unlabelled: matched by alternation over the implementors'
+				// own labels.
+				t.Labels = append(t.Labels, impl.Label)
+			}
+		}
+		if iface.Label != "" {
+			t.Labels = []string{iface.Label}
+		}
+		sort.Strings(t.Labels)
+		sort.Strings(t.Tables)
+		d.targets[iface.TypeName] = t
+		if err := claim(iface.RootField, iface.TypeName, t); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func buildNode(def *ast.Definition, nodeDir *ast.Directive) *Node {
@@ -181,8 +363,13 @@ func buildNode(def *ast.Definition, nodeDir *ast.Directive) *Node {
 	if table == "" {
 		table = pluralize(label)
 	}
-	n := &Node{TypeName: def.Name, Label: label, Table: table}
+	return &Node{TypeName: def.Name, Label: label, Table: table, Fields: buildFields(def)}
+}
 
+// buildFields reads a type's (or interface's) fields into the mapping model,
+// skipping GraphQL introspection meta-fields.
+func buildFields(def *ast.Definition) []*Field {
+	var fields []*Field
 	for _, fd := range def.Fields {
 		if strings.HasPrefix(fd.Name, "__") {
 			continue // introspection meta-fields
@@ -210,58 +397,131 @@ func buildNode(def *ast.Definition, nodeDir *ast.Directive) *Node {
 			}
 			f.Rel = rel
 		}
-		n.Fields = append(n.Fields, f)
+		fields = append(fields, f)
 	}
-	return n
+	return fields
 }
 
-// validate enforces gopgql's M1 semantic rules beyond GraphQL well-formedness.
+// validate enforces gopgql's semantic rules beyond GraphQL well-formedness.
 func (d *Document) validate() error {
 	for _, n := range d.Nodes {
 		if pgident.NeedsQuote(n.Table) {
 			// Allowed, but the table name will be quoted in DDL; nothing to do.
 			_ = n.Table
 		}
-		if err := validateKey(n); err != nil {
+		if err := validateKey(n.TypeName, "type", n.Fields); err != nil {
 			return err
 		}
 		for _, f := range n.Fields {
-			if f.Rel == nil {
-				continue
+			if err := d.validateRelField(n.TypeName, f); err != nil {
+				return err
 			}
-			if f.Rel.Type == "" {
-				return fmt.Errorf("sdl: %s.%s: @relationship requires a non-empty type", n.TypeName, f.Name)
-			}
-			if !f.List {
-				return fmt.Errorf("sdl: %s.%s: @relationship fields must be list types (e.g. [%s!]!)",
-					n.TypeName, f.Name, f.TypeName)
-			}
-			if d.NodeByType(f.TypeName) == nil {
-				return fmt.Errorf("sdl: %s.%s: relationship targets %q, which is not a @node type",
-					n.TypeName, f.Name, f.TypeName)
-			}
-			if f.Rel.HasInverse != "" {
+			if f.Rel != nil && f.Rel.HasInverse != "" {
 				if err := validateInverse(d, n, f); err != nil {
 					return err
 				}
 			}
 		}
 	}
+
+	for _, iface := range d.Interfaces {
+		if err := validateKey(iface.TypeName, "interface", iface.Fields); err != nil {
+			return err
+		}
+		for _, f := range iface.Fields {
+			if err := d.validateRelField(iface.TypeName, f); err != nil {
+				return err
+			}
+			if err := validateImplementors(iface, f); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
-// validateKey requires the M1 surrogate key: `id: ID!`.
-func validateKey(n *Node) error {
-	for _, f := range n.Fields {
+// validateRelField checks a @relationship field's shape: a non-empty edge type,
+// a list type, and a @node target. Relationships targeting an interface would
+// need one edge table per implementor joined by a comma-separated pattern,
+// which is M5's multi-pattern workaround — so they are rejected here rather
+// than silently mis-generated (SPEC.md §10).
+func (d *Document) validateRelField(owner string, f *Field) error {
+	if f.Rel == nil {
+		return nil
+	}
+	if f.Rel.Type == "" {
+		return fmt.Errorf("sdl: %s.%s: @relationship requires a non-empty type", owner, f.Name)
+	}
+	if !f.List {
+		return fmt.Errorf("sdl: %s.%s: @relationship fields must be list types (e.g. [%s!]!)",
+			owner, f.Name, f.TypeName)
+	}
+	if d.NodeByType(f.TypeName) != nil {
+		return nil
+	}
+	if d.InterfaceByType(f.TypeName) != nil {
+		return fmt.Errorf("sdl: %s.%s: relationship targets the interface %q; an interface-typed relationship "+
+			"needs one edge table per implementor, which arrives in M5", owner, f.Name, f.TypeName)
+	}
+	return fmt.Errorf("sdl: %s.%s: relationship targets %q, which is not a @node type",
+		owner, f.Name, f.TypeName)
+}
+
+// validateImplementors checks that every implementor maps an interface field the
+// same way the interface does. GraphQL already guarantees each implementor
+// *declares* the field with a compatible type, but directives are not inherited:
+// a mismatched @relationship on an implementor would make one label expression
+// stand for two different traversals.
+func validateImplementors(iface *Interface, f *Field) error {
+	for _, impl := range iface.Implementors {
+		var got *Field
+		for _, cand := range impl.Fields {
+			if cand.Name == f.Name {
+				got = cand
+				break
+			}
+		}
+		if got == nil {
+			// GraphQL validation already rejects this; guard defensively so a
+			// nil field can never reach the generator.
+			return fmt.Errorf("sdl: %s implements %s but declares no field %q",
+				impl.TypeName, iface.TypeName, f.Name)
+		}
+		switch {
+		case f.Rel == nil && got.Rel == nil:
+			// Both plain columns; GraphQL has already aligned their types.
+		case f.Rel == nil || got.Rel == nil:
+			return fmt.Errorf("sdl: %s.%s and %s.%s disagree: one is a @relationship and the other is a column",
+				iface.TypeName, f.Name, impl.TypeName, f.Name)
+		case f.Rel.Type != got.Rel.Type:
+			return fmt.Errorf("sdl: %s.%s and %s.%s must share the same @relationship(type:) (%q vs %q)",
+				iface.TypeName, f.Name, impl.TypeName, f.Name, f.Rel.Type, got.Rel.Type)
+		case f.Rel.Direction != got.Rel.Direction:
+			return fmt.Errorf("sdl: %s.%s and %s.%s must share the same @relationship(direction:) (%s vs %s)",
+				iface.TypeName, f.Name, impl.TypeName, f.Name, f.Rel.Direction, got.Rel.Direction)
+		}
+		if f.Ignore != got.Ignore {
+			return fmt.Errorf("sdl: %s.%s and %s.%s disagree about @ignore",
+				iface.TypeName, f.Name, impl.TypeName, f.Name)
+		}
+	}
+	return nil
+}
+
+// validateKey requires the surrogate key `id: ID!`. Interfaces need it too: the
+// compiler projects it as every level's hidden key column and compares it
+// between vertex positions to exclude self-matches.
+func validateKey(typeName, kind string, fields []*Field) error {
+	for _, f := range fields {
 		if f.Name != "id" {
 			continue
 		}
 		if f.TypeName == "ID" && f.NonNull && !f.List {
 			return nil
 		}
-		return fmt.Errorf("sdl: %s.id must be `ID!` (M1 supports surrogate uuid keys only)", n.TypeName)
+		return fmt.Errorf("sdl: %s.id must be `ID!` (surrogate uuid keys only)", typeName)
 	}
-	return fmt.Errorf("sdl: type %s (@node) must declare a surrogate key field `id: ID!`", n.TypeName)
+	return fmt.Errorf("sdl: %s %s must declare a surrogate key field `id: ID!`", kind, typeName)
 }
 
 // validateInverse checks that a @hasInverse field points at a real field on the

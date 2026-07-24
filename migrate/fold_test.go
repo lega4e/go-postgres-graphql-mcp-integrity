@@ -3,6 +3,7 @@ package migrate_test
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/lega4e/gopgql/generator"
@@ -121,5 +122,51 @@ func TestFoldEmptyIsNil(t *testing.T) {
 	folded, err := migrate.FoldContent(nil)
 	if err == nil {
 		t.Fatalf("folding no migrations should error (no graph), got %+v", folded)
+	}
+}
+
+// TestFoldInterfaceLabelsRoundTrip covers the M4 addition to the emitter /
+// interpreter contract: a vertex table carrying a shared interface label must
+// fold back with that label intact, or a delta would drop and recreate the graph
+// without it.
+func TestFoldInterfaceLabelsRoundTrip(t *testing.T) {
+	const src = `interface Actor @node(label: "actor") {
+  id: ID!
+  name: String!
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Person implements Actor @node(label: "person") {
+  id: ID!
+  name: String!
+  email: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Bot implements Actor @node(label: "bot") {
+  id: ID!
+  name: String!
+  vendor: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT, table: "bot_follows")
+}`
+	m := mustSchema(t, src)
+	folded, err := migrate.FoldContent([]string{migrate.Init(m)})
+	if err != nil {
+		t.Fatalf("FoldContent: %v", err)
+	}
+	if !reflect.DeepEqual(folded, m) {
+		t.Errorf("folded schema != original\n--- folded ---\n%s\n--- original ---\n%s",
+			generator.DDL(folded), generator.DDL(m))
+	}
+
+	// Adding a column to an interface-bearing schema still produces a delta that
+	// recreates the graph with both labels.
+	revised := strings.Replace(src, "  vendor: String\n", "  vendor: String\n  rank: Int\n", 1)
+	up, _, changed := migrate.Delta(folded, mustSchema(t, revised))
+	if !changed {
+		t.Fatal("adding a column must produce a delta")
+	}
+	if !strings.Contains(up, "LABEL actor PROPERTIES (id, name)") {
+		t.Errorf("delta must recreate the graph with the shared label:\n%s", up)
 	}
 }

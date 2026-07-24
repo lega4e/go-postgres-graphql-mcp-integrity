@@ -82,9 +82,20 @@ type CreatePropertyGraphStmt struct {
 }
 
 // VertexTableDef is one entry in VERTEX TABLES: "<table> LABEL <label>
-// PROPERTIES ( <properties> )".
+// PROPERTIES ( <properties> )", optionally followed by further LABEL clauses.
+// Label and Properties are the first clause; ExtraLabels holds the rest.
 type VertexTableDef struct {
 	Table      string
+	Label      string
+	Properties []string
+	// ExtraLabels are any further "LABEL <label> PROPERTIES (...)" clauses on
+	// the same table. A table carrying more than one label is how gopgql maps a
+	// GraphQL interface to a label shared across tables (SPEC.md §7 → M4).
+	ExtraLabels []LabelDef
+}
+
+// LabelDef is one "LABEL <label> PROPERTIES ( <properties> )" clause.
+type LabelDef struct {
 	Label      string
 	Properties []string
 }
