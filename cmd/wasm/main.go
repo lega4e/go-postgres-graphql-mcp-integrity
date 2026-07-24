@@ -22,10 +22,14 @@ import (
 func main() {
 	js.Global().Set("gopgqlGenerate", js.FuncOf(generate))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
+	js.Global().Set("gopgqlNested", js.FuncOf(nested))
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlRevisedExampleQuery", js.ValueOf(playground.RevisedExampleQuery))
+	js.Global().Set("gopgqlNestedExampleQuery", js.ValueOf(playground.NestedExampleQuery))
+	js.Global().Set("gopgqlNestedExampleVarName", js.ValueOf(playground.NestedExampleVarName))
+	js.Global().Set("gopgqlNestedExampleVarValue", js.ValueOf(playground.NestedExampleVarValue))
 	// Signal to the page that the WASM module is ready.
 	if cb := js.Global().Get("onGopgqlReady"); cb.Type() == js.TypeFunction {
 		cb.Invoke()
@@ -70,5 +74,28 @@ func delta(_ js.Value, args []js.Value) any {
 	result["init"] = out.Init
 	result["delta"] = out.Delta
 	result["sql"] = out.SQL
+	return js.ValueOf(result)
+}
+
+// nested is the js.Func bound to window.gopgqlNested. It expects three string
+// arguments: the SDL document, the nested GraphQL query, and the value bound to
+// the query's variable. It returns {"sql", "params", "json", "error"} — the M3
+// demo showing the ordered $n placeholder and the shaped nested JSON.
+func nested(_ js.Value, args []js.Value) any {
+	result := map[string]any{"sql": "", "params": "", "json": "", "error": ""}
+	if len(args) < 3 || args[0].Type() != js.TypeString ||
+		args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
+		result["error"] = "gopgqlNested expects (sdl, query, varValue) string arguments"
+		return js.ValueOf(result)
+	}
+	vars := map[string]any{playground.NestedExampleVarName: args[2].String()}
+	out, err := playground.RunNested(args[0].String(), args[1].String(), vars)
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["sql"] = out.SQL
+	result["params"] = out.Params
+	result["json"] = out.JSON
 	return js.ValueOf(result)
 }

@@ -8,10 +8,14 @@
 package playground
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/sdl"
+	"github.com/lega4e/gopgql/shape"
 )
 
 // ExampleSDL is the worked example from SPEC.md §5.2, loaded as the playground's
@@ -43,6 +47,17 @@ const RevisedExampleSDL = `type Person @node(label: "person") {
 
 // RevisedExampleQuery projects the new field to show the delta is queryable.
 const RevisedExampleQuery = `{ persons { name age } }`
+
+// NestedExampleQuery is the M3 exit query (SPEC.md §7 → M3): a one-hop traversal
+// filtered by a bound variable. The playground compiles it — showing the ordered
+// $1 placeholder — and shapes sample rows into the nested response.
+const NestedExampleQuery = `{ persons(name: $n) { name follows { name } } }`
+
+// NestedExampleVarName is the variable the nested query filters on.
+const NestedExampleVarName = "n"
+
+// NestedExampleVarValue is the value bound to the nested query's variable.
+const NestedExampleVarValue = "Alice"
 
 // Result is the output of Run: the initial goose migration and the compiled
 // GRAPH_TABLE query.
@@ -141,4 +156,104 @@ func RunDelta(oldSDL, newSDL, query string) (DeltaResult, error) {
 		res.SQL = sql
 	}
 	return res, nil
+}
+
+// NestedResult is the output of RunNested: the compiled one-hop query, the
+// ordered bind parameters it carries, and the nested JSON response shaped from
+// sample rows.
+type NestedResult struct {
+	// SQL is the compiled GRAPH_TABLE query, including the $1 placeholder for the
+	// bound variable.
+	SQL string
+	// Params is a human-readable rendering of the ordered bind parameters, e.g.
+	// "$1 = Alice".
+	Params string
+	// JSON is the pretty-printed nested response produced by the real shape
+	// package from the sample rows.
+	JSON string
+}
+
+// RunNested demonstrates M3 end to end with no database (SPEC.md §7 → M3 demo
+// criterion): it compiles the nested query with a bound variable against the
+// example SDL — proving the ordered $n placeholder — then feeds sample flat rows
+// keyed by the compiled projection's own columns through the real shape package,
+// rendering the deduplicated nested JSON. It runs the actual compiled Go, no
+// stubs.
+func RunNested(sdlSrc, query string, vars map[string]any) (NestedResult, error) {
+	doc, err := sdl.Parse(sdlSrc)
+	if err != nil {
+		return NestedResult{}, err
+	}
+	cq, err := compiler.New(doc).CompileQuery(query, vars)
+	if err != nil {
+		return NestedResult{}, err
+	}
+
+	shaped := shape.Rows(cq.Projection, sampleRows(cq.Projection))
+	jsonBytes, err := json.MarshalIndent(shaped, "", "  ")
+	if err != nil {
+		return NestedResult{}, err
+	}
+
+	return NestedResult{
+		SQL:    cq.SQL,
+		Params: renderParams(cq.Args),
+		JSON:   string(jsonBytes),
+	}, nil
+}
+
+// renderParams formats ordered bind parameters as "$1 = v1, $2 = v2".
+func renderParams(args []any) string {
+	if len(args) == 0 {
+		return "(no bind parameters)"
+	}
+	parts := make([]string, len(args))
+	for i, a := range args {
+		parts[i] = fmt.Sprintf("$%d = %v", i+1, a)
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += ", " + p
+	}
+	return out
+}
+
+// sampleRows synthesises flat rows for the nested example directly from the
+// compiled projection, so the shaping demo consumes the compiler's real output
+// column names. It models the one parent the query's bound filter selects
+// (Alice) fanning out to two children (Bob, Carol): two flat rows that shape
+// must collapse into a single parent with two nested children — the M3
+// no-duplicate-parents property, made visible.
+func sampleRows(proj compiler.Projection) []map[string]any {
+	root := proj.Root
+	if len(root.Children) == 0 {
+		// No traversal to demonstrate; emit one row per the projection's key.
+		row := map[string]any{root.KeyColumn: "a"}
+		fillFields(row, root.Fields, NestedExampleVarValue)
+		return []map[string]any{row}
+	}
+	child := root.Children[0]
+	mk := func(childID, childName string) map[string]any {
+		row := map[string]any{root.KeyColumn: "alice", child.KeyColumn: childID}
+		fillFields(row, root.Fields, NestedExampleVarValue)
+		fillFields(row, child.Fields, childName)
+		return row
+	}
+	return []map[string]any{
+		mk("bob", "Bob"),
+		mk("carol", "Carol"),
+	}
+}
+
+// fillFields populates every projected scalar column of a level with a sample
+// value. The first field (typically name) gets the given label; any others get a
+// stable placeholder so the demo stays readable.
+func fillFields(row map[string]any, fields []compiler.ProjectedField, label string) {
+	for i, f := range fields {
+		if i == 0 {
+			row[f.Column] = label
+		} else {
+			row[f.Column] = fmt.Sprintf("%s-%s", label, f.ResponseKey)
+		}
+	}
 }

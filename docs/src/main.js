@@ -8,6 +8,10 @@ const deltaEl = document.getElementById('delta')
 const queryEl = document.getElementById('query')
 const runEl = document.getElementById('run')
 const statusEl = document.getElementById('status')
+const nestedQueryEl = document.getElementById('nestedQuery')
+const nestedParamsEl = document.getElementById('nestedParams')
+const nestedSqlEl = document.getElementById('nestedSql')
+const nestedJsonEl = document.getElementById('nestedJson')
 
 // Load a classic script relative to the document (not the module bundle), so
 // it resolves correctly under the PR-preview subpath.
@@ -36,6 +40,25 @@ function render() {
   queryEl.textContent = result.sql
   statusEl.textContent = 'generated'
   statusEl.className = 'status ok'
+  renderNested()
+}
+
+// renderNested compiles the M3 one-hop query with a bound variable against the
+// current (revision 2) SDL and shapes sample rows into the nested JSON response.
+function renderNested() {
+  const query = globalThis.gopgqlNestedExampleQuery
+  const varValue = globalThis.gopgqlNestedExampleVarValue
+  nestedQueryEl.textContent = query
+  const result = globalThis.gopgqlNested(sdl2El.value, query, varValue)
+  if (result.error) {
+    nestedParamsEl.textContent = ''
+    nestedSqlEl.textContent = ''
+    nestedJsonEl.textContent = result.error
+    return
+  }
+  nestedParamsEl.textContent = result.params
+  nestedSqlEl.textContent = result.sql
+  nestedJsonEl.textContent = result.json
 }
 
 async function boot() {

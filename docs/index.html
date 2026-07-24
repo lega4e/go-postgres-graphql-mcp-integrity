@@ -11,15 +11,17 @@
         <h1>gopgql</h1>
         <p class="tagline">
           One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ.
-          This is <strong>M2</strong>: edit the two SDL revisions below and
-          gopgql generates the initial <code>goose</code> migration for the
-          first, then <em>folds</em> it back into a schema and diffs it against
-          the second to emit a <strong>delta migration</strong>
-          (<code>ALTER TABLE</code> plus a recreated property graph). The query
-          compiles to a <code>GRAPH_TABLE</code> statement against the revised
-          SDL. It all runs entirely in your browser as compiled Go
-          (WebAssembly) — the real
-          <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>
+          This is <strong>M3</strong>: the two SDL revisions still drive
+          the <em>folded</em> <strong>delta migration</strong>
+          (<code>ALTER TABLE</code> plus a recreated property graph), and the
+          new <strong>one-hop query</strong> panel below compiles a
+          <em>nested</em> GraphQL query with a <strong>bound variable</strong>
+          to a single <code>GRAPH_TABLE</code> MATCH — showing the ordered
+          <code>$1</code> placeholder — then shapes sample rows into the
+          nested JSON response, deduplicating the parent across the
+          one-to-many fan-out. It all runs entirely in your browser as
+          compiled Go (WebAssembly) — the real
+          <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>+<code>shape</code>
           packages, no server and no JavaScript re-implementation.
         </p>
       </header>
@@ -45,6 +47,26 @@
           <pre id="delta" class="output"></pre>
           <label for="query">Compiled <code>GRAPH_TABLE</code> query</label>
           <pre id="query" class="output"></pre>
+        </div>
+      </section>
+
+      <section class="io m3">
+        <div class="pane">
+          <label for="nestedQuery">
+            One-hop nested query (M3) — <code>$n</code> is bound, never
+            interpolated
+          </label>
+          <pre id="nestedQuery" class="output"></pre>
+          <label for="nestedParams">Ordered bind parameters</label>
+          <pre id="nestedParams" class="output"></pre>
+        </div>
+        <div class="pane">
+          <label for="nestedSql">Compiled one-hop <code>GRAPH_TABLE</code></label>
+          <pre id="nestedSql" class="output"></pre>
+          <label for="nestedJson">
+            Shaped nested JSON from sample rows (parent deduplicated)
+          </label>
+          <pre id="nestedJson" class="output"></pre>
         </div>
       </section>
 
