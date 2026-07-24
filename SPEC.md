@@ -135,8 +135,8 @@ Single Go module, `github.com/<owner>/gopgql`:
 Directives are introduced progressively (§7). This is the full destination surface.
 
 ```graphql
-# --- M1: graph structure ---
-directive @node(label: String!, table: String) on OBJECT
+# --- M1: graph structure (widened to INTERFACE in M4) ---
+directive @node(label: String!, table: String) on OBJECT | INTERFACE
 directive @relationship(
   type: String!          # edge label
   direction: OUT | IN    # relative to the declaring type
@@ -223,7 +223,7 @@ The generator must guarantee, and the test suite must assert:
 1. Every edge table has an index on its destination key column.
 1. Labels and identifiers colliding with SQL keywords are double-quoted.
 1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias.
-1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed.
+1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed. (Reached in M4; interface fields carry identical names and types across implementors by GraphQL's own rules, so no rename is needed for that case.)
 
 -----
 
@@ -244,6 +244,24 @@ Pure: no database contact. Mirrors `neo4j-graphql-java`’s `(cypher, params)` s
 - **Identifiers are never parameters.** Graph names, labels, and property names are validated against the loaded schema (allowlist) and quoted via `pgx.Identifier{...}.Sanitize()`.
 - **Depth limit.** Selection nesting beyond `MaxDepth` (default 3) returns a typed `*DepthExceededError` at compile time.
 - **Multi-pattern workaround.** Where a query would need comma-separated patterns, emit separate `GRAPH_TABLE` calls joined on projected IDs in the outer query.
+- **Isomorphism guards.** PostgreSQL enforces neither vertex nor edge isomorphism (§2.2), so the compiler emits `vi.id <> vj.id` for every pair of vertex positions whose underlying tables intersect — the only pairs that can bind the same row. Positions over disjoint tables get none.
+
+### 6.4 Interfaces (resolved in M4)
+
+A GraphQL interface implemented by `@node` types makes their tables one queryable position. Two mappings, chosen by whether the interface itself carries `@node`:
+
+|Interface                   |Graph mapping                                                                                                        |Emitted pattern       |
+|----------------------------|---------------------------------------------------------------------------------------------------------------------|----------------------|
+|`interface A @node(label:)`|**Shared label** — every implementor's vertex table carries that label with an aligned property list (§5.3 invariant 5).|`(v0 IS actor)`       |
+|`interface A` (unlabelled)  |**Label alternation** over the implementors' own labels.                                                              |`(v0 IS bot|person)`  |
+
+Both were verified against `postgres:19beta2` in M4:
+
+- A vertex table may carry several `LABEL ... PROPERTIES (...)` clauses, and one label may span several tables. PostgreSQL rejects a graph whose tables disagree about a label's properties (`mismatching number of properties` / `mismatching property names`) and further requires **one type per property name across the whole graph**. The generator checks both, turning a migration-time database error into a generate-time one.
+- Only the properties exposed under the matched label are readable: `v.email` under `(v IS actor)` errors with `property "email" for element variable "v" not found`. The compiler therefore projects only the interface's own fields at an interface position.
+- The same edge label may span several edge tables, so one `-[e IS follows]->` traverses them all — which is what lets an interface position sit at either end of a hop.
+
+Relationships *targeting* an interface would need one edge table per implementor joined by a comma-separated pattern; they are rejected at parse time pointing at M5, not silently mis-generated.
 
 ### 6.3 Spike — bind parameters inside `GRAPH_TABLE` (resolved in M1)
 
@@ -470,7 +488,7 @@ Carried forward, to be resolved before or during the milestone that needs them:
 1. **Rename hint ergonomics** — `@renamedFrom` is proposed; an alternative is an explicit rename manifest consumed by `migrate diff`.
 1. **Table naming convention** — pluralisation rules for deriving table names from type names, and whether `@node(table:)` is required or optional.
 1. **Goose embedding** — whether `gopgql` embeds `goose` as a library for a `migrate up` convenience command, or only emits files.
-1. **Default `MaxDepth`** — proposed 3; needs validation against the join cost of a 3-hop pattern (7-way join).
+1. **Default `MaxDepth`** — **resolved in M4: 3.** A 3-hop pattern rewrites to a 7-way join, which the M4 suite executes against `postgres:19beta2` well inside the scenario budget. The ceiling is per-`Compiler` configuration (`compiler.WithMaxDepth`), so a deployment can lower it without a code change; 4 hops remains rejected by default.
 
 -----
 

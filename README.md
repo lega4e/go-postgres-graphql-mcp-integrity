@@ -10,6 +10,40 @@ See [`SPEC.md`](./SPEC.md) for the full design and milestone plan.
 
 ## Status
 
+**M4 — Multi-hop, depth limit, label alternation.** The compiler stops being
+one-hop ([`SPEC.md` §7](./SPEC.md) → M4):
+
+- **Multi-hop `MATCH` chains.** Nested selections keep extending one pattern, so
+  a three-hop query is still a single `GRAPH_TABLE` — N+1 is avoided by
+  construction ([`SPEC.md` §6.2](./SPEC.md)).
+- **A depth ceiling that rejects rather than truncates.** A selection nested past
+  `MaxDepth` (default 3, configurable with `compiler.WithMaxDepth`) fails
+  compilation with a typed `*compiler.DepthExceededError`. SQL/PGQ has no
+  variable-length paths, so there is nothing honest to emit — and because the
+  failure is at compile time, no statement ever reaches the database
+  ([`SPEC.md` §3](./SPEC.md) decision 3).
+- **Interfaces spanning several tables.** A GraphQL interface makes its
+  implementors' tables one queryable position. Carrying `@node(label:)` it
+  becomes a *shared label* every implementor's vertex table exposes with an
+  aligned property list — `(v0 IS actor)`; without it, the compiler emits *label
+  alternation* over the implementors' own labels — `(v0 IS bot|person)`.
+- **Edge-isomorphism guards.** PostgreSQL does not enforce isomorphism
+  ([`SPEC.md` §2.2](./SPEC.md)), so a pattern will bind one row to two positions:
+  a self-follow satisfies `(a)-[follows]->(b)`, and a three-hop chain walks back
+  to where it started. Wherever two positions could bind the same row — decided
+  by whether their tables intersect — the compiler emits `vi.id <> vj.id`.
+
+The M4 godog scenarios execute a three-hop query against the container and
+assert on the returned rows; assert that a four-hop selection fails with the
+typed error and that a pgx query tracer counted **zero** statements afterwards;
+and traverse an interface spanning two tables, with the self-match exclusion
+verified against seeded data that contains both a self-loop and a cycle.
+
+This builds on **M3** (nesting and arguments): a nested relationship extends the
+`MATCH` with an edge (`direction: IN` emits `<-[]-`), field arguments and GraphQL
+variables become ordered `$n` bind parameters, and **`shape`** regroups the flat
+rows into the nested response with no duplicate parents across the fan-out.
+
 **M2 — Migration fold and delta generation.** The generator stops being
 one-shot. gopgql now folds its own earlier migrations back into a schema model
 and emits a delta migration against a widened SDL — no database and no sidecar
@@ -55,7 +89,10 @@ apply of the same final schema and asserts the resulting schemas are identical.
 The **WASM playground** (`cmd/wasm` + `docs/`) runs the real
 `sdl`+`generator`+`migrate`+`compiler` in the browser as compiled Go — paste two
 SDL revisions and a query, see the initial migration, the folded-and-diffed
-**delta migration**, and the emitted `GRAPH_TABLE`.
+**delta migration**, and the emitted `GRAPH_TABLE`. Its *Depth limit* tab
+compiles a four-hop query and surfaces the typed `*DepthExceededError`; its
+*Interfaces* tab shows the shared `LABEL` clauses in the generated
+`CREATE PROPERTY GRAPH` and both interface mappings in the compiled pattern.
 
 ## Layout
 
