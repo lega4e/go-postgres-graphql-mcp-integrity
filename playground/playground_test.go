@@ -7,78 +7,94 @@ import (
 	"github.com/lega4e/gopgql/playground"
 )
 
-func TestRunExample(t *testing.T) {
-	res, err := playground.Run(playground.ExampleSDL, playground.ExampleQuery)
+func TestMigration(t *testing.T) {
+	mig, err := playground.Migration(playground.ExampleSDL)
 	if err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("Migration: %v", err)
 	}
-	if !strings.HasPrefix(res.Migration, "-- +goose Up\n") {
+	if !strings.HasPrefix(mig, "-- +goose Up\n") {
 		t.Error("migration must be goose-formatted")
 	}
-	if !strings.Contains(res.Migration, "CREATE PROPERTY GRAPH app_graph") {
+	if !strings.Contains(mig, "CREATE PROPERTY GRAPH app_graph") {
 		t.Error("migration must create the property graph")
-	}
-	if !strings.Contains(res.SQL, "GRAPH_TABLE") || !strings.Contains(res.SQL, "MATCH (v IS person)") {
-		t.Errorf("compiled SQL unexpected:\n%s", res.SQL)
 	}
 }
 
-func TestRunSDLError(t *testing.T) {
-	if _, err := playground.Run(`type Person { id: ID! }`, playground.ExampleQuery); err == nil {
+func TestMigrationError(t *testing.T) {
+	if _, err := playground.Migration(`type Person { id: ID! }`); err == nil {
 		t.Error("expected error for SDL without @node")
 	}
 }
 
-func TestRunQueryError(t *testing.T) {
-	if _, err := playground.Run(playground.ExampleSDL, `{ persons { bogus } }`); err == nil {
+func TestCompileNestedWithVariable(t *testing.T) {
+	vars := map[string]any{"n": "Alice"}
+	out, err := playground.Compile(playground.ExampleSDL, playground.ExampleQuery, vars)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	// A one-hop MATCH with an outgoing edge and a bound predicate.
+	if !strings.Contains(out.SQL, "-[e0 IS follows]->") {
+		t.Errorf("compiled SQL must traverse the follows edge:\n%s", out.SQL)
+	}
+	if !strings.Contains(out.SQL, "WHERE v0.name = $1") {
+		t.Errorf("compiled SQL must bind the variable as $1:\n%s", out.SQL)
+	}
+	if !strings.Contains(out.Params, "$1 = Alice") {
+		t.Errorf("params must report the ordered bind value, got %q", out.Params)
+	}
+}
+
+func TestCompileNoParams(t *testing.T) {
+	out, err := playground.Compile(playground.ExampleSDL, `{ persons { name } }`, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if strings.Contains(out.Params, "$") {
+		t.Errorf("expected no bind params, got %q", out.Params)
+	}
+}
+
+func TestCompileQueryError(t *testing.T) {
+	if _, err := playground.Compile(playground.ExampleSDL, `{ persons { bogus } }`, nil); err == nil {
 		t.Error("expected error for unknown field")
 	}
 }
 
-func TestRunNoQuery(t *testing.T) {
-	res, err := playground.Run(playground.ExampleSDL, "")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.SQL != "" {
-		t.Errorf("expected no SQL without a query, got %q", res.SQL)
+func TestCompileMissingVariable(t *testing.T) {
+	// The query references $n but no value is supplied.
+	if _, err := playground.Compile(playground.ExampleSDL, playground.ExampleQuery, nil); err == nil {
+		t.Error("expected error for a missing variable value")
 	}
 }
 
-func TestRunDeltaExample(t *testing.T) {
-	res, err := playground.RunDelta(playground.ExampleSDL, playground.RevisedExampleSDL, playground.RevisedExampleQuery)
+func TestDeltaAddsColumn(t *testing.T) {
+	delta, changed, err := playground.Delta(playground.ExampleSDL, playground.RevisedExampleSDL)
 	if err != nil {
-		t.Fatalf("RunDelta: %v", err)
+		t.Fatalf("Delta: %v", err)
 	}
-	if !strings.HasPrefix(res.Init, "-- +goose Up\n") {
-		t.Error("init migration must be goose-formatted")
+	if !changed {
+		t.Fatal("adding a field must produce a delta")
 	}
-	if !res.Changed {
-		t.Error("adding a field must produce a delta")
+	if !strings.Contains(delta, "ALTER TABLE persons ADD COLUMN age integer;") {
+		t.Errorf("delta must add the new column:\n%s", delta)
 	}
-	if !strings.Contains(res.Delta, "ALTER TABLE persons ADD COLUMN age integer;") {
-		t.Errorf("delta must add the new column:\n%s", res.Delta)
-	}
-	if !strings.Contains(res.Delta, "CREATE PROPERTY GRAPH app_graph") {
-		t.Errorf("delta must recreate the property graph:\n%s", res.Delta)
-	}
-	if !strings.Contains(res.SQL, "v.age AS age") {
-		t.Errorf("compiled SQL must project the new field:\n%s", res.SQL)
+	if !strings.Contains(delta, "CREATE PROPERTY GRAPH app_graph") {
+		t.Errorf("delta must recreate the property graph:\n%s", delta)
 	}
 }
 
-func TestRunDeltaNoChange(t *testing.T) {
-	res, err := playground.RunDelta(playground.ExampleSDL, playground.ExampleSDL, "")
+func TestDeltaNoChange(t *testing.T) {
+	_, changed, err := playground.Delta(playground.ExampleSDL, playground.ExampleSDL)
 	if err != nil {
-		t.Fatalf("RunDelta: %v", err)
+		t.Fatalf("Delta: %v", err)
 	}
-	if res.Changed {
+	if changed {
 		t.Error("identical SDL revisions must not produce a delta")
 	}
 }
 
-func TestRunDeltaError(t *testing.T) {
-	if _, err := playground.RunDelta(`type Person { id: ID! }`, playground.RevisedExampleSDL, ""); err == nil {
+func TestDeltaError(t *testing.T) {
+	if _, _, err := playground.Delta(`type Person { id: ID! }`, playground.RevisedExampleSDL); err == nil {
 		t.Error("expected error for invalid prior SDL")
 	}
 }

@@ -85,10 +85,13 @@ make vuln         # govulncheck
 make docs         # build the WASM playground + docs site into docs/dist
 ```
 
-Run the harness without the container (compile check only):
+Compile the packages and run the unit tests without booting a container
+(the integration suites under `./test/...` always require Docker and have no
+skip path — SPEC.md §10):
 
 ```sh
-GOPGQL_SKIP_INTEGRATION=1 go test ./...
+go build ./... && go vet ./...
+go test ./compiler/... ./shape/... ./sdl/... ./generator/... ./migrate/... ./playground/... ./internal/...
 ```
 
 ## Playground locally

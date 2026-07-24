@@ -8,7 +8,7 @@ vet:
 	go vet ./...
 
 # Integration tests. Requires Docker; boots postgres:19beta2 via testcontainers.
-# Set GOPGQL_SKIP_INTEGRATION=1 to skip the container-backed suite.
+# The container-backed suite always runs — there is no skip path (SPEC.md §10).
 test:
 	go test -v -timeout 20m ./...
 

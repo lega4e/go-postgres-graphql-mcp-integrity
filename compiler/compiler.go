@@ -2,16 +2,28 @@
 // plus ordered bind parameters. Compilation is pure — it never contacts a
 // database (SPEC.md §6.1) — so it compiles to WASM.
 //
-// M1 handles a single root field with no nesting: it resolves the root field to
-// a @node type, projects the requested scalar fields, and emits one GRAPH_TABLE
-// with a single vertex pattern and an enumerated COLUMNS list (SPEC.md §7 → M1).
-// Nested selections, field arguments and query variables are rejected with a
-// clear error rather than silently dropped (SPEC.md §10: no silent fallbacks);
-// they arrive from M3 onward.
+// M3 extends the M1 single-vertex compiler with one-hop traversal, field
+// arguments and query variables (SPEC.md §7 → M3):
+//
+//   - A nested relationship selection extends the MATCH pattern with a single
+//     edge — one GRAPH_TABLE, never a second query (SPEC.md §6.2). An OUT
+//     relationship emits `-[IS type]->`; an IN relationship emits `<-[IS type]-`.
+//   - Field arguments become predicates in the pattern WHERE, always as bind
+//     parameters — never interpolated (SPEC.md §6.2). GraphQL variables resolve
+//     against the vars map; literal argument values are bound just the same.
+//   - Every projected level also selects its `id` as a hidden key column so the
+//     shape package can regroup the flat rows and deduplicate parents across a
+//     one-to-many fan-out.
+//
+// Multi-hop traversal (a second edge) is rejected with a clear error pointing at
+// M4, and a selection that needs comma-separated patterns (more than one
+// relationship at a level) is rejected pointing at M5 — no silent fallbacks
+// (SPEC.md §10).
 package compiler
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/vektah/gqlparser/v2/ast"
@@ -46,30 +58,52 @@ func New(doc *sdl.Document, opts ...Option) *Compiler {
 	return c
 }
 
-// ProjectedField is one column of the response: the GraphQL response key and
-// the graph property it reads.
+// ProjectedField is one scalar column of the response: the GraphQL response key
+// and the graph property it reads.
 type ProjectedField struct {
 	// ResponseKey is the GraphQL alias (or field name) — the key in the JSON
-	// response and the output column name.
+	// response.
 	ResponseKey string
 	// Property is the vertex property / column name read from the graph.
 	Property string
+	// Column is the unique SQL output-column name this field is projected as
+	// (the AS alias) and the key it appears under in each flat result row. It is
+	// distinct from ResponseKey so the same field name at two nesting levels does
+	// not collide.
+	Column string
 }
 
-// Projection describes the shape of a compiled query's result: the root field
-// under which rows nest, and the projected fields in selection order.
-type Projection struct {
-	// ResponseKey is the root field's response key (alias or name).
+// Selection is one vertex level of the projected result tree: its scalar fields,
+// the hidden column that uniquely identifies a row at this level (used by shape
+// to deduplicate parents), and any nested relationship level.
+type Selection struct {
+	// ResponseKey is this level's key in the JSON response — the root field's
+	// response key at the top, or a relationship field's response key when
+	// nested.
 	ResponseKey string
+	// Alias is the vertex's SQL alias in the MATCH pattern (v0, v1, …).
+	Alias string
+	// KeyColumn is the SQL output-column name under which this level's identifying
+	// value (its `id`) appears in each flat row. shape groups rows by it.
+	KeyColumn string
 	// Fields are the projected scalar fields in selection order.
 	Fields []ProjectedField
+	// Children are nested relationship levels (at most one in M3).
+	Children []*Selection
+}
+
+// Projection describes how to shape a compiled query's flat rows into the nested
+// GraphQL response: the root selection tree.
+type Projection struct {
+	// Root is the top-level (root-field) selection.
+	Root *Selection
 }
 
 // Compiled is the result of compiling an operation.
 type Compiled struct {
 	// SQL is the GRAPH_TABLE query.
 	SQL string
-	// Args are the ordered bind parameters (empty in M1).
+	// Args are the ordered bind parameters ($1, $2, … in emission order).
 	Args []any
 	// Projection describes how to shape the returned rows into the GraphQL
 	// response.
@@ -77,7 +111,7 @@ type Compiled struct {
 }
 
 // Compile matches the SPEC.md §6.1 contract: it returns the SQL and ordered
-// bind parameters for an operation.
+// bind parameters for an operation, resolving variables against vars.
 func (c *Compiler) Compile(op string, vars map[string]any) (sql string, args []any, err error) {
 	cq, err := c.CompileQuery(op, vars)
 	if err != nil {
@@ -100,13 +134,10 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 	if operation.Operation != ast.Query {
 		return nil, fmt.Errorf("compiler: only query operations are supported (SQL/PGQ graphs are read-only)")
 	}
-	if len(operation.VariableDefinitions) > 0 || len(vars) > 0 {
-		return nil, fmt.Errorf("compiler: query variables are not supported until M3")
-	}
 
 	roots := fieldSelections(operation.SelectionSet)
 	if len(roots) != 1 {
-		return nil, fmt.Errorf("compiler: exactly one root field is supported in M1, got %d", len(roots))
+		return nil, fmt.Errorf("compiler: exactly one root field is supported, got %d", len(roots))
 	}
 	root := roots[0]
 
@@ -114,69 +145,228 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 	if node == nil {
 		return nil, fmt.Errorf("compiler: unknown root field %q; no @node maps to table %q", root.Name, root.Name)
 	}
-	if len(root.Arguments) > 0 {
-		return nil, fmt.Errorf("compiler: field arguments are not supported until M3")
+
+	varDefs := map[string]*ast.VariableDefinition{}
+	for _, vd := range operation.VariableDefinitions {
+		varDefs[vd.Variable] = vd
 	}
 
-	proj, err := c.projection(node, root)
+	b := &builder{doc: c.doc, vars: vars, varDefs: varDefs}
+	rootSel, err := b.vertex(node, root, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	sql := c.render(node, proj)
-	return &Compiled{SQL: sql, Args: nil, Projection: proj}, nil
+	sql := b.render(c.graphName)
+	return &Compiled{SQL: sql, Args: b.args, Projection: Projection{Root: rootSel}}, nil
 }
 
-// projection resolves the root field's selection set into an ordered list of
-// scalar properties, validating each against the node's allowlist.
-func (c *Compiler) projection(node *sdl.Node, root *ast.Field) (Projection, error) {
-	proj := Projection{ResponseKey: responseKey(root)}
-	if len(root.SelectionSet) == 0 {
-		return proj, fmt.Errorf("compiler: root field %q must select at least one field", root.Name)
+// builder accumulates the MATCH pattern, projected columns, WHERE predicates and
+// bind parameters while walking a single root field's selection tree.
+type builder struct {
+	doc     *sdl.Document
+	vars    map[string]any
+	varDefs map[string]*ast.VariableDefinition
+
+	aliasN  int
+	edgeN   int
+	match   strings.Builder // the MATCH path, e.g. "(v0 IS person) -[e0 IS follows]-> (v1 IS person)"
+	columns []string        // COLUMNS entries, e.g. "v0.name AS v0_c0"
+	outs    []string        // SELECT output names, e.g. "v0_c0"
+	preds   []string        // WHERE predicates, e.g. "v0.name = $1"
+	args    []any           // bind parameters in $-order
+}
+
+// vertex walks one vertex level: it writes the vertex pattern, projects the
+// hidden key column and the requested scalar fields, turns field arguments into
+// bind-parameter predicates, and recurses into a single nested relationship.
+// depth is the current traversal depth (0 at the root); one edge is allowed
+// (depth 0 → 1), a second is rejected pointing at M4.
+func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selection, error) {
+	if len(field.SelectionSet) == 0 {
+		return nil, fmt.Errorf("compiler: %s (%q) must select at least one field", node.TypeName, responseKey(field))
 	}
-	for _, sel := range root.SelectionSet {
-		f, ok := sel.(*ast.Field)
+
+	alias := b.newAlias()
+	b.writeVertex(alias, node.Label)
+
+	sel := &Selection{ResponseKey: responseKey(field), Alias: alias}
+
+	// Hidden key column: every level projects its id so shape can regroup rows
+	// and deduplicate parents across the fan-out.
+	keyCol := alias + "_k"
+	b.addColumn(alias, "id", keyCol)
+	sel.KeyColumn = keyCol
+
+	// Field arguments become predicates on this vertex, bound as parameters.
+	for _, arg := range field.Arguments {
+		if err := b.predicate(node, alias, arg); err != nil {
+			return nil, err
+		}
+	}
+
+	var relField *ast.Field
+	var relDef *sdl.Field
+	for _, s := range field.SelectionSet {
+		f, ok := s.(*ast.Field)
 		if !ok {
-			return proj, fmt.Errorf("compiler: fragments are not supported until a later milestone")
+			return nil, fmt.Errorf("compiler: fragments are not supported until a later milestone")
 		}
-		if len(f.SelectionSet) > 0 {
-			return proj, fmt.Errorf("compiler: nested selection %q.%q requires traversal, which arrives in M3",
+		def := findField(node, f.Name)
+		if def == nil {
+			return nil, fmt.Errorf("compiler: %s has no field %q", node.TypeName, f.Name)
+		}
+		switch {
+		case def.IsScalarColumn():
+			if len(f.SelectionSet) > 0 {
+				return nil, fmt.Errorf("compiler: %s.%s is a scalar and cannot have a subselection", node.TypeName, f.Name)
+			}
+			if len(f.Arguments) > 0 {
+				return nil, fmt.Errorf("compiler: arguments on scalar field %s.%s are not supported", node.TypeName, f.Name)
+			}
+			col := fmt.Sprintf("%s_c%d", alias, len(sel.Fields))
+			b.addColumn(alias, def.Name, col)
+			sel.Fields = append(sel.Fields, ProjectedField{ResponseKey: responseKey(f), Property: def.Name, Column: col})
+		case def.Rel != nil:
+			if relField != nil {
+				return nil, fmt.Errorf(
+					"compiler: %s selects more than one relationship (%q and %q); comma-separated patterns arrive in M5",
+					node.TypeName, relField.Name, f.Name)
+			}
+			relField, relDef = f, def
+		default:
+			// @ignore fields have no column and no relationship.
+			return nil, fmt.Errorf("compiler: %s.%s is not queryable (it maps to no column or relationship)",
 				node.TypeName, f.Name)
 		}
-		if len(f.Arguments) > 0 {
-			return proj, fmt.Errorf("compiler: field arguments are not supported until M3")
-		}
-		field := findField(node, f.Name)
-		if field == nil {
-			return proj, fmt.Errorf("compiler: %s has no field %q", node.TypeName, f.Name)
-		}
-		if !field.IsScalarColumn() {
-			return proj, fmt.Errorf("compiler: %s.%s is not a scalar property (relationships are not supported in M1)",
-				node.TypeName, f.Name)
-		}
-		proj.Fields = append(proj.Fields, ProjectedField{ResponseKey: responseKey(f), Property: field.Name})
 	}
-	return proj, nil
+
+	if relField != nil {
+		if depth >= 1 {
+			return nil, fmt.Errorf(
+				"compiler: %s.%s is a second traversal hop; multi-hop MATCH chains arrive in M4",
+				node.TypeName, relField.Name)
+		}
+		target := b.doc.NodeByType(relDef.TypeName)
+		if target == nil {
+			return nil, fmt.Errorf("compiler: %s.%s targets %q, which is not a @node type",
+				node.TypeName, relField.Name, relDef.TypeName)
+		}
+		b.writeEdge(relDef.Rel)
+		child, err := b.vertex(target, relField, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		sel.Children = append(sel.Children, child)
+	}
+
+	return sel, nil
 }
 
-// render emits the GRAPH_TABLE SQL for a single vertex projection.
-func (c *Compiler) render(node *sdl.Node, proj Projection) string {
-	const alias = "v"
-	cols := make([]string, len(proj.Fields))
-	outs := make([]string, len(proj.Fields))
-	for i, f := range proj.Fields {
-		out := pgident.Quote(f.ResponseKey)
-		cols[i] = fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(f.Property), out)
-		outs[i] = out
+// predicate resolves a field argument to a bind parameter and records the
+// WHERE predicate `alias.property = $n`. The argument name must be a scalar
+// property of node (validated against the allowlist); the value is bound, never
+// interpolated (SPEC.md §6.2).
+func (b *builder) predicate(node *sdl.Node, alias string, arg *ast.Argument) error {
+	def := findField(node, arg.Name)
+	if def == nil {
+		return fmt.Errorf("compiler: %s has no field %q to filter on", node.TypeName, arg.Name)
 	}
-	return fmt.Sprintf(
-		"SELECT %s\nFROM GRAPH_TABLE (%s\n  MATCH (%s IS %s)\n  COLUMNS (%s)\n)",
-		strings.Join(outs, ", "),
-		pgident.Quote(c.graphName),
-		alias,
-		pgident.Quote(node.Label),
-		strings.Join(cols, ", "),
-	)
+	if !def.IsScalarColumn() {
+		return fmt.Errorf("compiler: argument %s.%s must be a scalar property (relationship filters are not supported)",
+			node.TypeName, arg.Name)
+	}
+	val, err := b.value(arg.Value)
+	if err != nil {
+		return err
+	}
+	b.args = append(b.args, val)
+	b.preds = append(b.preds, fmt.Sprintf("%s.%s = $%d", alias, pgident.Quote(def.Name), len(b.args)))
+	return nil
+}
+
+// value resolves a GraphQL argument value to its Go bind value. Variables are
+// looked up in the vars map; literals are converted by kind.
+func (b *builder) value(v *ast.Value) (any, error) {
+	if v == nil {
+		return nil, fmt.Errorf("compiler: missing argument value")
+	}
+	switch v.Kind {
+	case ast.Variable:
+		if val, ok := b.vars[v.Raw]; ok {
+			return val, nil
+		}
+		if def := b.varDefs[v.Raw]; def != nil && def.DefaultValue != nil {
+			return b.value(def.DefaultValue)
+		}
+		return nil, fmt.Errorf("compiler: no value supplied for variable $%s", v.Raw)
+	case ast.IntValue:
+		n, err := strconv.ParseInt(v.Raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("compiler: invalid Int literal %q: %w", v.Raw, err)
+		}
+		return n, nil
+	case ast.FloatValue:
+		f, err := strconv.ParseFloat(v.Raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("compiler: invalid Float literal %q: %w", v.Raw, err)
+		}
+		return f, nil
+	case ast.StringValue, ast.BlockValue, ast.EnumValue:
+		return v.Raw, nil
+	case ast.BooleanValue:
+		return v.Raw == "true", nil
+	case ast.NullValue:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("compiler: unsupported argument value of kind %v", v.Kind)
+	}
+}
+
+// writeVertex appends a vertex pattern `(alias IS label)` to the MATCH path.
+func (b *builder) writeVertex(alias, label string) {
+	fmt.Fprintf(&b.match, "(%s IS %s)", alias, pgident.Quote(label))
+}
+
+// writeEdge appends a single directed edge pattern to the MATCH path. An OUT
+// relationship (declaring type is the source) points right; an IN relationship
+// (declaring type is the destination) points left (SPEC.md §7 → M3). The edge
+// carries an explicit variable (e0, e1, …) matching the form proven against
+// postgres:19beta2 in the M0 harness.
+func (b *builder) writeEdge(rel *sdl.Relationship) {
+	edge := "e" + strconv.Itoa(b.edgeN)
+	b.edgeN++
+	label := pgident.Quote(rel.Type)
+	if rel.Direction == sdl.In {
+		fmt.Fprintf(&b.match, " <-[%s IS %s]- ", edge, label)
+	} else {
+		fmt.Fprintf(&b.match, " -[%s IS %s]-> ", edge, label)
+	}
+}
+
+// addColumn records one projected column: its COLUMNS entry and SELECT output
+// name.
+func (b *builder) addColumn(alias, property, out string) {
+	b.columns = append(b.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(property), out))
+	b.outs = append(b.outs, out)
+}
+
+// render assembles the final GRAPH_TABLE statement.
+func (b *builder) render(graphName string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "SELECT %s\nFROM GRAPH_TABLE (%s\n  MATCH %s\n",
+		strings.Join(b.outs, ", "), pgident.Quote(graphName), b.match.String())
+	if len(b.preds) > 0 {
+		fmt.Fprintf(&sb, "  WHERE %s\n", strings.Join(b.preds, " AND "))
+	}
+	fmt.Fprintf(&sb, "  COLUMNS (%s)\n)", strings.Join(b.columns, ", "))
+	return sb.String()
+}
+
+func (b *builder) newAlias() string {
+	a := "v" + strconv.Itoa(b.aliasN)
+	b.aliasN++
+	return a
 }
 
 // fieldSelections filters a selection set down to concrete fields.

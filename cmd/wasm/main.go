@@ -4,28 +4,33 @@
 //
 // It is compiled with GOOS=js GOARCH=wasm and loaded by the docs site. The
 // playground calls the real compiled Go — sdl, generator, migrate and compiler
-// — with no JavaScript re-implementation (SPEC.md §7 → M1/M2 demo criteria).
+// — with no JavaScript re-implementation and no database. Every value it
+// returns is generated from the editable inputs (SDL, query, variables); it
+// never fabricates query results, which would require rows from PostgreSQL
+// (SPEC.md §4).
 //
-// Two functions are exported. gopgqlGenerate takes an SDL string and a GraphQL
-// query and returns {"migration", "sql", "error"} (the M1 demo). gopgqlDelta
-// takes two SDL revisions and a query and returns {"init", "delta", "sql",
-// "error"} — the M2 demo showing the delta migration folded and diffed between
-// the revisions.
+// Three functions are exported:
+//
+//   - gopgqlMigration(sdl) -> {migration, error}
+//   - gopgqlCompile(sdl, query, varsJSON) -> {sql, params, error}
+//   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
 package main
 
 import (
+	"encoding/json"
 	"syscall/js"
 
 	"github.com/lega4e/gopgql/playground"
 )
 
 func main() {
-	js.Global().Set("gopgqlGenerate", js.FuncOf(generate))
+	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
+	js.Global().Set("gopgqlCompile", js.FuncOf(compile))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
+	js.Global().Set("gopgqlExampleVars", js.ValueOf(playground.ExampleVars))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
-	js.Global().Set("gopgqlRevisedExampleQuery", js.ValueOf(playground.RevisedExampleQuery))
 	// Signal to the page that the WASM module is ready.
 	if cb := js.Global().Get("onGopgqlReady"); cb.Type() == js.TypeFunction {
 		cb.Invoke()
@@ -34,41 +39,81 @@ func main() {
 	select {}
 }
 
-// generate is the js.Func bound to window.gopgqlGenerate. It expects two string
-// arguments: the SDL document and the GraphQL query.
-func generate(_ js.Value, args []js.Value) any {
-	result := map[string]any{"migration": "", "sql": "", "error": ""}
-	if len(args) < 2 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
-		result["error"] = "gopgqlGenerate expects (sdl, query) string arguments"
+// migration is bound to window.gopgqlMigration. It expects one string argument:
+// the SDL document.
+func migration(_ js.Value, args []js.Value) any {
+	result := map[string]any{"migration": "", "error": ""}
+	if len(args) < 1 || args[0].Type() != js.TypeString {
+		result["error"] = "gopgqlMigration expects (sdl) a string argument"
 		return js.ValueOf(result)
 	}
-	out, err := playground.Run(args[0].String(), args[1].String())
+	out, err := playground.Migration(args[0].String())
 	if err != nil {
 		result["error"] = err.Error()
 		return js.ValueOf(result)
 	}
-	result["migration"] = out.Migration
-	result["sql"] = out.SQL
+	result["migration"] = out
 	return js.ValueOf(result)
 }
 
-// delta is the js.Func bound to window.gopgqlDelta. It expects three string
-// arguments: the prior SDL, the revised SDL, and a GraphQL query against the
-// revised SDL.
-func delta(_ js.Value, args []js.Value) any {
-	result := map[string]any{"init": "", "delta": "", "sql": "", "error": ""}
+// compile is bound to window.gopgqlCompile. It expects three string arguments:
+// the SDL, the GraphQL query, and a variables document as JSON (may be empty).
+func compile(_ js.Value, args []js.Value) any {
+	result := map[string]any{"sql": "", "params": "", "error": ""}
 	if len(args) < 3 || args[0].Type() != js.TypeString ||
 		args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
-		result["error"] = "gopgqlDelta expects (oldSDL, newSDL, query) string arguments"
+		result["error"] = "gopgqlCompile expects (sdl, query, varsJSON) string arguments"
 		return js.ValueOf(result)
 	}
-	out, err := playground.RunDelta(args[0].String(), args[1].String(), args[2].String())
+	vars, err := parseVars(args[2].String())
+	if err != nil {
+		result["error"] = "variables: " + err.Error()
+		return js.ValueOf(result)
+	}
+	out, err := playground.Compile(args[0].String(), args[1].String(), vars)
 	if err != nil {
 		result["error"] = err.Error()
 		return js.ValueOf(result)
 	}
-	result["init"] = out.Init
-	result["delta"] = out.Delta
 	result["sql"] = out.SQL
+	result["params"] = out.Params
 	return js.ValueOf(result)
+}
+
+// delta is bound to window.gopgqlDelta. It expects two string arguments: the
+// prior SDL and the revised SDL.
+func delta(_ js.Value, args []js.Value) any {
+	result := map[string]any{"delta": "", "changed": false, "error": ""}
+	if len(args) < 2 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString {
+		result["error"] = "gopgqlDelta expects (oldSDL, newSDL) string arguments"
+		return js.ValueOf(result)
+	}
+	out, changed, err := playground.Delta(args[0].String(), args[1].String())
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["delta"] = out
+	result["changed"] = changed
+	return js.ValueOf(result)
+}
+
+// parseVars decodes a variables document. An empty or whitespace-only string is
+// treated as "no variables".
+func parseVars(s string) (map[string]any, error) {
+	trimmed := ""
+	for _, r := range s {
+		if r != ' ' && r != '\t' && r != '\n' && r != '\r' {
+			trimmed = s
+			break
+		}
+	}
+	if trimmed == "" {
+		return nil, nil
+	}
+	var vars map[string]any
+	if err := json.Unmarshal([]byte(s), &vars); err != nil {
+		return nil, err
+	}
+	return vars, nil
 }
