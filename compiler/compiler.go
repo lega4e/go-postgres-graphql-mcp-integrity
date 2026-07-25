@@ -33,8 +33,23 @@
 //     could bind the same row, the compiler emits `vi.id <> vj.id` (SPEC.md
 //     §2.2).
 //
-// A selection that needs comma-separated patterns (more than one relationship at
-// a level) is still rejected pointing at M5 — no silent fallbacks (SPEC.md §10).
+// M5 lifts the one-relationship-per-level restriction (SPEC.md §7 → M5). PG19
+// parses comma-separated path patterns in a single MATCH but does not execute
+// them (SPEC.md §2.2), so a level selecting several relationships is split into
+// **separate GRAPH_TABLE calls joined on projected IDs**:
+//
+//   - The chain up to the branching level stays one GRAPH_TABLE — the spine.
+//   - Each relationship branching off it becomes its own GRAPH_TABLE whose
+//     pattern re-binds the branch-point vertex by label and projects its id.
+//   - The outer query LEFT JOINs each branch onto the spine on that id, so a
+//     parent with no match on one branch keeps its other branches and shapes to
+//     an empty list rather than disappearing.
+//   - Isomorphism guards that would have spanned the split (a branch walking back
+//     to an ancestor) move to the join's ON clause, expressed over the projected
+//     id columns.
+//
+// Branching may itself nest: a branch that branches again splits further, each
+// sub-branch joining on its own branch point's id.
 package compiler
 
 import (
@@ -156,9 +171,9 @@ type Selection struct {
 	KeyColumn string
 	// Fields are the projected scalar fields in selection order.
 	Fields []ProjectedField
-	// Children are nested relationship levels. At most one per level until
-	// comma-separated patterns arrive in M5, but nesting may now run several
-	// levels deep (SPEC.md §7 → M4).
+	// Children are nested relationship levels, in selection order. More than one
+	// means the level branches: each child was compiled into its own GRAPH_TABLE
+	// joined on this level's KeyColumn (SPEC.md §7 → M5).
 	Children []*Selection
 }
 
@@ -222,7 +237,7 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		varDefs[vd.Variable] = vd
 	}
 
-	b := &builder{doc: c.doc, vars: vars, varDefs: varDefs, maxDepth: c.maxDepth}
+	b := newBuilder(c.doc, vars, varDefs, c.maxDepth)
 	rootSel, err := b.vertex(target, root, 0, nil)
 	if err != nil {
 		return nil, err
@@ -232,34 +247,82 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 	return &Compiled{SQL: sql, Args: b.args, Projection: Projection{Root: rootSel}}, nil
 }
 
-// builder accumulates the MATCH pattern, projected columns, WHERE predicates and
-// bind parameters while walking a single root field's selection tree.
+// builder walks a root field's selection tree, accumulating one or more query
+// fragments. A fragment is a single GRAPH_TABLE call; a second one appears only
+// where a level selects more than one relationship and the pattern has to be
+// split (SPEC.md §7 → M5).
+//
+// Alias, edge and bind-parameter numbering is global across fragments, so every
+// projected column name is unique in the outer query and `$n` order follows
+// fragment order.
 type builder struct {
 	doc      *sdl.Document
 	vars     map[string]any
 	varDefs  map[string]*ast.VariableDefinition
 	maxDepth int
 
-	aliasN  int
-	edgeN   int
-	match   strings.Builder // the MATCH path, e.g. "(v0 IS person) -[e0 IS follows]-> (v1 IS person)"
-	columns []string        // COLUMNS entries, e.g. "v0.name AS v0_c0"
-	outs    []string        // SELECT output names, e.g. "v0_c0"
-	preds   []string        // WHERE predicates, e.g. "v0.name = $1"
-	args    []any           // bind parameters in $-order
-	verts   []vertexPos     // every vertex position, for the isomorphism guards
+	aliasN int
+	edgeN  int
+	args   []any // bind parameters in $-order
+
+	frags []*fragment // fragment 0 is the spine; the rest are branches
+	cur   *fragment   // the fragment currently being written
+	path  []vertexPos // ancestor positions on the walk, root first
 }
 
-// vertexPos is one vertex position in the emitted pattern: its alias and the
-// tables a row bound there can come from.
+// fragment is one GRAPH_TABLE call plus how it attaches to its parent fragment.
+type fragment struct {
+	name    string          // outer-query alias: q0, q1, …
+	match   strings.Builder // the MATCH path
+	columns []string        // COLUMNS entries, e.g. "v0.name AS v0_c0"
+	outs    []string        // columns the outer SELECT exposes (projection-visible)
+	preds   []string        // WHERE predicates inside this GRAPH_TABLE
+	verts   []vertexPos     // this fragment's vertex positions, for its own guards
+
+	// Branch wiring — empty on the spine.
+	parent    *fragment // fragment holding the branch point
+	joinKey   string    // this fragment's projected branch-point id column
+	parentKey string    // the parent fragment's key column it joins against
+	onGuards  []string  // isomorphism guards that span the split, for the ON clause
+}
+
+// vertexPos is one vertex position in an emitted pattern: its alias, the tables a
+// row bound there can come from, the fragment it lives in, and the output column
+// its id is projected as.
 type vertexPos struct {
 	alias  string
 	tables []string
+	frag   *fragment
+	key    string
+}
+
+func newBuilder(doc *sdl.Document, vars map[string]any, varDefs map[string]*ast.VariableDefinition, maxDepth int) *builder {
+	spine := &fragment{name: "q0"}
+	return &builder{
+		doc:      doc,
+		vars:     vars,
+		varDefs:  varDefs,
+		maxDepth: maxDepth,
+		frags:    []*fragment{spine},
+		cur:      spine,
+	}
+}
+
+// relSelection is one nested relationship selected at a level: the queried field
+// and its SDL definition.
+type relSelection struct {
+	field *ast.Field
+	def   *sdl.Field
 }
 
 // vertex walks one vertex level: it writes the vertex pattern, projects the
 // hidden key column and the requested scalar fields, turns field arguments into
-// bind-parameter predicates, and recurses into a single nested relationship.
+// bind-parameter predicates, and recurses into the nested relationships.
+//
+// One nested relationship extends the current pattern. Several split it: the
+// first continues the current fragment only if it is alone, otherwise every
+// relationship becomes its own GRAPH_TABLE joined on this level's id (SPEC.md
+// §6.2, §7 → M5).
 //
 // depth is the current traversal depth in hops from the root field (0 at the
 // root); path is the response-key trail to this level, used to name the
@@ -271,7 +334,6 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 
 	alias := b.newAlias()
 	b.writeVertex(alias, t.Labels)
-	b.verts = append(b.verts, vertexPos{alias: alias, tables: t.Tables})
 	path = append(append([]string{}, path...), responseKey(field))
 
 	sel := &Selection{ResponseKey: responseKey(field), Alias: alias}
@@ -282,6 +344,11 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 	b.addColumn(alias, "id", keyCol)
 	sel.KeyColumn = keyCol
 
+	pos := vertexPos{alias: alias, tables: t.Tables, frag: b.cur, key: keyCol}
+	b.addPosition(pos)
+	b.path = append(b.path, pos)
+	defer func() { b.path = b.path[:len(b.path)-1] }()
+
 	// Field arguments become predicates on this vertex, bound as parameters.
 	for _, arg := range field.Arguments {
 		if err := b.predicate(t, alias, arg); err != nil {
@@ -289,8 +356,7 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 		}
 	}
 
-	var relField *ast.Field
-	var relDef *sdl.Field
+	var rels []relSelection
 	for _, s := range field.SelectionSet {
 		f, ok := s.(*ast.Field)
 		if !ok {
@@ -312,12 +378,7 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 			b.addColumn(alias, def.Name, col)
 			sel.Fields = append(sel.Fields, ProjectedField{ResponseKey: responseKey(f), Property: def.Name, Column: col})
 		case def.Rel != nil:
-			if relField != nil {
-				return nil, fmt.Errorf(
-					"compiler: %s selects more than one relationship (%q and %q); comma-separated patterns arrive in M5",
-					t.TypeName, relField.Name, f.Name)
-			}
-			relField, relDef = f, def
+			rels = append(rels, relSelection{field: f, def: def})
 		default:
 			// @ignore fields have no column and no relationship.
 			return nil, fmt.Errorf("compiler: %s.%s is not queryable (it maps to no column or relationship)",
@@ -325,30 +386,93 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 		}
 	}
 
-	if relField != nil {
+	// The depth ceiling applies to every branch, and is checked before any
+	// fragment is created so a rejection still emits no SQL at all.
+	for _, rel := range rels {
 		if depth+1 > b.maxDepth {
 			return nil, &DepthExceededError{
 				MaxDepth: b.maxDepth,
 				Depth:    depth + 1,
-				Path:     append(append([]string{}, path...), responseKey(relField)),
+				Path:     append(append([]string{}, path...), responseKey(rel.field)),
 				TypeName: t.TypeName,
-				Field:    relField.Name,
+				Field:    rel.field.Name,
 			}
 		}
-		child := b.doc.TargetForType(relDef.TypeName)
+	}
+
+	split := len(rels) > 1
+	for _, rel := range rels {
+		child := b.doc.TargetForType(rel.def.TypeName)
 		if child == nil {
 			return nil, fmt.Errorf("compiler: %s.%s targets %q, which is not a @node type",
-				t.TypeName, relField.Name, relDef.TypeName)
+				t.TypeName, rel.field.Name, rel.def.TypeName)
 		}
-		b.writeEdge(relDef.Rel)
-		childSel, err := b.vertex(child, relField, depth+1, path)
+
+		here := b.cur
+		if split {
+			// Comma-separated patterns parse but do not execute on PG19, so this
+			// relationship gets its own GRAPH_TABLE, re-binding the branch-point
+			// vertex by label and joining on its projected id.
+			b.cur = b.branch(t, pos)
+		}
+		b.writeEdge(rel.def.Rel)
+		childSel, err := b.vertex(child, rel.field, depth+1, path)
 		if err != nil {
 			return nil, err
 		}
+		b.cur = here
 		sel.Children = append(sel.Children, childSel)
 	}
 
 	return sel, nil
+}
+
+// branch starts a new fragment for one relationship of a branching level. Its
+// pattern begins by re-binding the branch-point vertex — same labels, a fresh
+// alias — and projects that vertex's id as the join key, which the outer query
+// matches against the branch point's own key column.
+func (b *builder) branch(t *sdl.Target, at vertexPos) *fragment {
+	f := &fragment{
+		name:      "q" + strconv.Itoa(len(b.frags)),
+		parent:    at.frag,
+		parentKey: at.key,
+	}
+	b.frags = append(b.frags, f)
+
+	alias := b.newAlias()
+	prev := b.cur
+	b.cur = f
+	b.writeVertex(alias, t.Labels)
+	// The join key is projected but not exposed to the outer SELECT: it repeats
+	// the branch point's id, which the parent fragment already carries.
+	f.joinKey = alias + "_j"
+	f.columns = append(f.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote("id"), f.joinKey))
+	b.cur = prev
+
+	// The re-bound vertex is the branch point, so it needs no guard against it;
+	// its own descendants are guarded within this fragment as usual.
+	f.verts = append(f.verts, vertexPos{alias: alias, tables: t.Tables, frag: f, key: f.joinKey})
+	return f
+}
+
+// addPosition records a vertex position for the isomorphism guards. Positions in
+// the same fragment are guarded inside its WHERE; a position whose ancestor sits
+// in another fragment is guarded in the join's ON clause, over the projected id
+// columns — the guard has to survive the split (SPEC.md §2.2).
+func (b *builder) addPosition(pos vertexPos) {
+	b.cur.verts = append(b.cur.verts, pos)
+	for _, anc := range b.path {
+		if anc.frag == pos.frag || !overlaps(anc.tables, pos.tables) {
+			continue
+		}
+		// The branch point itself is re-bound as this fragment's first position
+		// and joined on its id, so the fragment's own guards already cover it.
+		if anc.frag == pos.frag.parent && anc.key == pos.frag.parentKey {
+			continue
+		}
+		pos.frag.onGuards = append(pos.frag.onGuards, fmt.Sprintf("%s.%s <> %s.%s",
+			pos.frag.name, pos.key, anc.frag.name, anc.key))
+	}
 }
 
 // predicate resolves a field argument to a bind parameter and records the
@@ -369,7 +493,7 @@ func (b *builder) predicate(t *sdl.Target, alias string, arg *ast.Argument) erro
 		return err
 	}
 	b.args = append(b.args, val)
-	b.preds = append(b.preds, fmt.Sprintf("%s.%s = $%d", alias, pgident.Quote(def.Name), len(b.args)))
+	b.cur.preds = append(b.cur.preds, fmt.Sprintf("%s.%s = $%d", alias, pgident.Quote(def.Name), len(b.args)))
 	return nil
 }
 
@@ -419,7 +543,7 @@ func (b *builder) writeVertex(alias string, labels []string) {
 	for i, l := range labels {
 		quoted[i] = pgident.Quote(l)
 	}
-	fmt.Fprintf(&b.match, "(%s IS %s)", alias, strings.Join(quoted, "|"))
+	fmt.Fprintf(&b.cur.match, "(%s IS %s)", alias, strings.Join(quoted, "|"))
 }
 
 // writeEdge appends a single directed edge pattern to the MATCH path. An OUT
@@ -432,17 +556,17 @@ func (b *builder) writeEdge(rel *sdl.Relationship) {
 	b.edgeN++
 	label := pgident.Quote(rel.Type)
 	if rel.Direction == sdl.In {
-		fmt.Fprintf(&b.match, " <-[%s IS %s]- ", edge, label)
+		fmt.Fprintf(&b.cur.match, " <-[%s IS %s]- ", edge, label)
 	} else {
-		fmt.Fprintf(&b.match, " -[%s IS %s]-> ", edge, label)
+		fmt.Fprintf(&b.cur.match, " -[%s IS %s]-> ", edge, label)
 	}
 }
 
-// addColumn records one projected column: its COLUMNS entry and SELECT output
-// name.
+// addColumn records one projected column on the current fragment: its COLUMNS
+// entry and the name the outer SELECT exposes it under.
 func (b *builder) addColumn(alias, property, out string) {
-	b.columns = append(b.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(property), out))
-	b.outs = append(b.outs, out)
+	b.cur.columns = append(b.cur.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(property), out))
+	b.cur.outs = append(b.cur.outs, out)
 }
 
 // isomorphismGuards returns the `vi.id <> vj.id` predicates that exclude a
@@ -453,15 +577,15 @@ func (b *builder) addColumn(alias, property, out string) {
 // happily walks back to the vertex it started from. A guard is emitted for each
 // pair of positions whose tables intersect — the only pairs that *can* bind the
 // same row; positions over disjoint tables need none.
-func (b *builder) isomorphismGuards() []string {
+func (f *fragment) isomorphismGuards() []string {
 	var out []string
 	id := pgident.Quote("id")
-	for i := range b.verts {
-		for j := i + 1; j < len(b.verts); j++ {
-			if !overlaps(b.verts[i].tables, b.verts[j].tables) {
+	for i := range f.verts {
+		for j := i + 1; j < len(f.verts); j++ {
+			if !overlaps(f.verts[i].tables, f.verts[j].tables) {
 				continue
 			}
-			out = append(out, fmt.Sprintf("%s.%s <> %s.%s", b.verts[i].alias, id, b.verts[j].alias, id))
+			out = append(out, fmt.Sprintf("%s.%s <> %s.%s", f.verts[i].alias, id, f.verts[j].alias, id))
 		}
 	}
 	return out
@@ -479,17 +603,45 @@ func overlaps(a, c []string) bool {
 	return false
 }
 
-// render assembles the final GRAPH_TABLE statement. Argument predicates come
-// first so the emitted $n order matches the args slice; the isomorphism guards,
-// which bind nothing, follow.
+// render assembles the final statement. A single fragment renders as the bare
+// GRAPH_TABLE query M1–M4 always emitted; several render as the spine LEFT
+// JOINed with each branch on the projected ids (SPEC.md §6.2 → multi-pattern
+// workaround).
 func (b *builder) render(graphName string) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "SELECT %s\nFROM GRAPH_TABLE (%s\n  MATCH %s\n",
-		strings.Join(b.outs, ", "), pgident.Quote(graphName), b.match.String())
-	if where := append(append([]string{}, b.preds...), b.isomorphismGuards()...); len(where) > 0 {
-		fmt.Fprintf(&sb, "  WHERE %s\n", strings.Join(where, " AND "))
+	if len(b.frags) == 1 {
+		f := b.frags[0]
+		return fmt.Sprintf("SELECT %s\nFROM %s", strings.Join(f.outs, ", "), f.graphTable(graphName, ""))
 	}
-	fmt.Fprintf(&sb, "  COLUMNS (%s)\n)", strings.Join(b.columns, ", "))
+
+	var outs []string
+	for _, f := range b.frags {
+		for _, o := range f.outs {
+			outs = append(outs, f.name+"."+o)
+		}
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "SELECT %s\nFROM %s AS %s",
+		strings.Join(outs, ", "), b.frags[0].graphTable(graphName, "  "), b.frags[0].name)
+	for _, f := range b.frags[1:] {
+		on := append([]string{fmt.Sprintf("%s.%s = %s.%s", f.name, f.joinKey, f.parent.name, f.parentKey)}, f.onGuards...)
+		fmt.Fprintf(&sb, "\nLEFT JOIN %s AS %s ON %s",
+			f.graphTable(graphName, "  "), f.name, strings.Join(on, " AND "))
+	}
+	return sb.String()
+}
+
+// graphTable renders one fragment as a GRAPH_TABLE call. Argument predicates come
+// first so the emitted $n order matches the args slice; the isomorphism guards,
+// which bind nothing, follow. indent prefixes the inner lines when the call is
+// nested inside an outer query.
+func (f *fragment) graphTable(graphName, indent string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "GRAPH_TABLE (%s\n%s  MATCH %s\n", pgident.Quote(graphName), indent, f.match.String())
+	if where := append(append([]string{}, f.preds...), f.isomorphismGuards()...); len(where) > 0 {
+		fmt.Fprintf(&sb, "%s  WHERE %s\n", indent, strings.Join(where, " AND "))
+	}
+	fmt.Fprintf(&sb, "%s  COLUMNS (%s)\n%s)", indent, strings.Join(f.columns, ", "), indent)
 	return sb.String()
 }
 

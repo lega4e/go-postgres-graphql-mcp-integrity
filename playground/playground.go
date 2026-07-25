@@ -39,6 +39,12 @@ const ExampleSDL = `type Person @node(label: "person") {
 // editable in the playground.
 const ExampleQuery = `{ persons(name: $n) { name follows { name follows { name follows { name } } } } }`
 
+// ExampleMultiPatternQuery selects two relationships at one level, the shape
+// that would need comma-separated path patterns — which PG19 parses but does not
+// execute. It compiles to the M5 workaround instead: one GRAPH_TABLE per branch,
+// LEFT JOINed on the projected root id (SPEC.md §6.2, §7 → M5).
+const ExampleMultiPatternQuery = `{ persons(name: $n) { name follows { name } followedBy { name } } }`
+
 // ExampleDeepQuery is one hop past the default MaxDepth. It compiles to a typed
 // *compiler.DepthExceededError rather than a truncated pattern: SQL/PGQ has no
 // variable-length paths, so gopgql rejects (SPEC.md §3, decision 3).

@@ -52,6 +52,7 @@ func main() {
 	js.Global().Set("gopgqlExampleVars", js.ValueOf(playground.ExampleVars))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
+	js.Global().Set("gopgqlExampleMultiQuery", js.ValueOf(playground.ExampleMultiPatternQuery))
 	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
 	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
 	js.Global().Set("gopgqlMaxDepth", js.ValueOf(playground.MaxDepth()))
