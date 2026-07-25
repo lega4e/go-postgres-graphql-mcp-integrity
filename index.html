@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-BTJFZBgU.js"></script>
+    <script type="module" crossorigin src="./assets/index-COU9DUEj.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-qTqsWIqk.css">
   </head>
   <body class="ga-theme">
@@ -33,7 +33,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -114,6 +114,47 @@
               <ga-code id="d-schema"></ga-code>
               <label>Database query</label>
               <ga-code id="d-sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Multi-pattern: the M5 split into joined GRAPH_TABLE calls. -->
+        <div slot="multipattern">
+          <p class="panel-hint">
+            Selecting two relationships at one level would need comma-separated
+            path patterns in a single <code>MATCH</code> — PG19 parses those but
+            will not execute them. gopgql splits instead: the chain up to the
+            branching level stays one <code>GRAPH_TABLE</code>, each branch
+            becomes its own, and the outer query <code>LEFT JOIN</code>s them on
+            the projected ids. Guards that would have spanned the split move to
+            the <code>ON</code> clause, so a branch still cannot walk back to a
+            vertex an ancestor bound.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="p-sdl">GraphQL SDL — schema</label>
+              <textarea id="p-sdl" class="code-input" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="p-query">GraphQL query</label>
+              <textarea id="p-query" class="code-input" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="p-vars">Variables (JSON)</label>
+              <textarea id="p-vars" class="code-input" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="multipattern" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="p-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="p-schema"></ga-code>
+              <label>Database query</label>
+              <ga-code id="p-sql"></ga-code>
+              <label>Bind parameters</label>
+              <ga-code id="p-params"></ga-code>
             </div>
           </div>
         </div>
