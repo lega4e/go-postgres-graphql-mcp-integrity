@@ -1,4 +1,4 @@
-var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configurable:!0,writable:!0,value:t}):i[e]=t;var o=(i,e,t)=>K(i,typeof e!="symbol"?e+"":e,t);(function(){const e=document.createElement("link").relList;if(e&&e.supports&&e.supports("modulepreload"))return;for(const r of document.querySelectorAll('link[rel="modulepreload"]'))a(r);new MutationObserver(r=>{for(const s of r)if(s.type==="childList")for(const l of s.addedNodes)l.tagName==="LINK"&&l.rel==="modulepreload"&&a(l)}).observe(document,{childList:!0,subtree:!0});function t(r){const s={};return r.integrity&&(s.integrity=r.integrity),r.referrerPolicy&&(s.referrerPolicy=r.referrerPolicy),r.crossOrigin==="use-credentials"?s.credentials="include":r.crossOrigin==="anonymous"?s.credentials="omit":s.credentials="same-origin",s}function a(r){if(r.ep)return;r.ep=!0;const s=t(r);fetch(r.href,s)}})();const X=`
+var B=Object.defineProperty;var J=(r,e,t)=>e in r?B(r,e,{enumerable:!0,configurable:!0,writable:!0,value:t}):r[e]=t;var i=(r,e,t)=>J(r,typeof e!="symbol"?e+"":e,t);(function(){const e=document.createElement("link").relList;if(e&&e.supports&&e.supports("modulepreload"))return;for(const s of document.querySelectorAll('link[rel="modulepreload"]'))a(s);new MutationObserver(s=>{for(const o of s)if(o.type==="childList")for(const l of o.addedNodes)l.tagName==="LINK"&&l.rel==="modulepreload"&&a(l)}).observe(document,{childList:!0,subtree:!0});function t(s){const o={};return s.integrity&&(o.integrity=s.integrity),s.referrerPolicy&&(o.referrerPolicy=s.referrerPolicy),s.crossOrigin==="use-credentials"?o.credentials="include":s.crossOrigin==="anonymous"?o.credentials="omit":o.credentials="same-origin",o}function a(s){if(s.ep)return;s.ep=!0;const o=t(s);fetch(s.href,o)}})();const Q=`
   :host {
     box-sizing: border-box;
     font-family: var(--ga-font-sans, ui-sans-serif, system-ui, sans-serif);
@@ -8,14 +8,14 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
   @media (prefers-reduced-motion: reduce) {
     * { transition-duration: 0.001ms !important; animation-duration: 0.001ms !important; }
   }
-`;class d extends HTMLElement{static get observedAttributes(){return this.observed}static get _css(){return Object.prototype.hasOwnProperty.call(this,"_cssCache")||(this._cssCache=X+(this.styles||"")),this._cssCache}constructor(){super(),this.attachShadow({mode:"open",delegatesFocus:!0}),this._mounted=!1}connectedCallback(){this._mounted=!0,this.render()}attributeChangedCallback(){this._mounted&&this.render()}template(){return""}render(){this.shadowRoot.innerHTML="<style>"+this.constructor._css+"</style>"+this.template()}$(e){return this.shadowRoot.querySelector(e)}emit(e,t){this.dispatchEvent(new CustomEvent(e,{detail:t,bubbles:!0,composed:!0}))}hasFlag(e){return this.hasAttribute(e)}attr(e,t=""){return this.getAttribute(e)??t}}o(d,"styles",""),o(d,"observed",[]);function c(i,e){customElements.get(i)||customElements.define(i,e)}function n(i){return String(i??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}class _ extends d{constructor(){super(...arguments);o(this,"_guard",t=>{(this.hasFlag("disabled")||this.hasFlag("loading"))&&(t.stopImmediatePropagation(),t.preventDefault())})}connectedCallback(){super.connectedCallback(),this.addEventListener("click",this._guard,!0)}disconnectedCallback(){this.removeEventListener("click",this._guard,!0)}_pass(t,a=t){return this.hasAttribute(t)?` ${a}="${n(this.getAttribute(t))}"`:""}template(){const t=this.attr("href"),a=t?"a":"button",r=this._pass("aria-label"),s=t?`href="${n(t)}"`+this._pass("download")+this._pass("target")+this._pass("rel")+r:`type="${n(this.attr("type","button"))}"`+this._pass("name")+r+(this.hasFlag("disabled")?" disabled":""),l=this.hasFlag("loading")?'<span class="spinner" aria-hidden="true"></span>':"";return`
-      <${a} class="btn" part="button" ${s}>
+`;class d extends HTMLElement{static get observedAttributes(){return this.observed}static get _css(){return Object.prototype.hasOwnProperty.call(this,"_cssCache")||(this._cssCache=Q+(this.styles||"")),this._cssCache}constructor(){super(),this.attachShadow({mode:"open",delegatesFocus:!0}),this._mounted=!1}connectedCallback(){this._mounted=!0,this.render()}attributeChangedCallback(){this._mounted&&this.render()}template(){return""}render(){this.shadowRoot.innerHTML="<style>"+this.constructor._css+"</style>"+this.template()}$(e){return this.shadowRoot.querySelector(e)}emit(e,t){this.dispatchEvent(new CustomEvent(e,{detail:t,bubbles:!0,composed:!0}))}hasFlag(e){return this.hasAttribute(e)}attr(e,t=""){return this.getAttribute(e)??t}}i(d,"styles",""),i(d,"observed",[]);function c(r,e){customElements.get(r)||customElements.define(r,e)}function n(r){return String(r??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}class w extends d{constructor(){super(...arguments);i(this,"_guard",t=>{(this.hasFlag("disabled")||this.hasFlag("loading"))&&(t.stopImmediatePropagation(),t.preventDefault())})}connectedCallback(){super.connectedCallback(),this.addEventListener("click",this._guard,!0)}disconnectedCallback(){this.removeEventListener("click",this._guard,!0)}_pass(t,a=t){return this.hasAttribute(t)?` ${a}="${n(this.getAttribute(t))}"`:""}template(){const t=this.attr("href"),a=t?"a":"button",s=this._pass("aria-label"),o=t?`href="${n(t)}"`+this._pass("download")+this._pass("target")+this._pass("rel")+s:`type="${n(this.attr("type","button"))}"`+this._pass("name")+s+(this.hasFlag("disabled")?" disabled":""),l=this.hasFlag("loading")?'<span class="spinner" aria-hidden="true"></span>':"";return`
+      <${a} class="btn" part="button" ${o}>
         <slot name="start"></slot>
         ${l}
         <slot></slot>
         <slot name="end"></slot>
       </${a}>
-    `}}o(_,"observed",["variant","size","href","download","target","rel","type","name","aria-label","disabled","loading","block"]),o(_,"styles",`
+    `}}i(w,"observed",["variant","size","href","download","target","rel","type","name","aria-label","disabled","loading","block"]),i(w,"styles",`
     :host { display: inline-block; }
     :host([block]) { display: block; }
 
@@ -97,12 +97,12 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     @keyframes spin { to { transform: rotate(360deg); } }
 
     ::slotted([slot="start"]), ::slotted([slot="end"]) { display: inline-flex; }
-  `);c("ga-button",_);class b extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var r;const e=this._parse(),t=this.attr("value")||((r=e[0])==null?void 0:r.id);return`<div class="group" part="group" role="radiogroup">${e.map(s=>{const l=s.id===t,g=l?"0":"-1";return s.href?`<a class="item" part="item" data-id="${n(s.id)}"
-          href="${n(s.href)}" role="radio"
+  `);c("ga-button",w);class f extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var s;const e=this._parse(),t=this.attr("value")||((s=e[0])==null?void 0:s.id);return`<div class="group" part="group" role="radiogroup">${e.map(o=>{const l=o.id===t,u=l?"0":"-1";return o.href?`<a class="item" part="item" data-id="${n(o.id)}"
+          href="${n(o.href)}" role="radio"
           aria-checked="${l}"
           ${l?'aria-current="page"':""}
-          tabindex="${g}">${n(s.label)}</a>`:`<button class="item" part="item" type="button" data-id="${n(s.id)}"
-        role="radio" aria-checked="${l}" tabindex="${g}">${n(s.label)}</button>`}).join("")}</div>`}render(){var t;super.render(),(t=this._internals)==null||t.setFormValue(this.value);const e=[...this.shadowRoot.querySelectorAll(".item")];e.forEach(a=>{a.tagName==="BUTTON"&&a.addEventListener("click",()=>this._select(a.dataset.id)),a.addEventListener("keydown",r=>this._onKey(r,e))})}_onKey(e,t){const a={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(!a)return;e.preventDefault();const r=t.indexOf(e.currentTarget),s=t[(r+a+t.length)%t.length];s&&(s.focus(),s.tagName==="BUTTON"&&this._select(s.dataset.id))}_select(e){e==null||e===this.attr("value")||(this.setAttribute("value",e),this.emit("change",{value:e}))}get value(){var e;return this.attr("value")||((e=this._parse()[0])==null?void 0:e.id)||""}set value(e){this.setAttribute("value",e)}}o(b,"formAssociated",!0),o(b,"observed",["items","value"]),o(b,"styles",`
+          tabindex="${u}">${n(o.label)}</a>`:`<button class="item" part="item" type="button" data-id="${n(o.id)}"
+        role="radio" aria-checked="${l}" tabindex="${u}">${n(o.label)}</button>`}).join("")}</div>`}render(){var t;super.render(),(t=this._internals)==null||t.setFormValue(this.value);const e=[...this.shadowRoot.querySelectorAll(".item")];e.forEach(a=>{a.tagName==="BUTTON"&&a.addEventListener("click",()=>this._select(a.dataset.id)),a.addEventListener("keydown",s=>this._onKey(s,e))})}_onKey(e,t){const a={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(!a)return;e.preventDefault();const s=t.indexOf(e.currentTarget),o=t[(s+a+t.length)%t.length];o&&(o.focus(),o.tagName==="BUTTON"&&this._select(o.dataset.id))}_select(e){e==null||e===this.attr("value")||(this.setAttribute("value",e),this.emit("change",{value:e}))}get value(){var e;return this.attr("value")||((e=this._parse()[0])==null?void 0:e.id)||""}set value(e){this.setAttribute("value",e)}}i(f,"formAssociated",!0),i(f,"observed",["items","value"]),i(f,"styles",`
     :host { display: inline-block; }
     .group {
       display: inline-flex;
@@ -144,22 +144,22 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       outline: none;
       box-shadow: var(--ga-ring, 0 0 0 2px #000, 0 0 0 4px #54a2ff);
     }
-  `);c("ga-radio-group",b);class $ extends d{_pass(e,t=e){return this.hasAttribute(e)?` ${t}="${n(this.getAttribute(e))}"`:""}template(){const e=this.attr("href"),t=this.attr("prompt"),a=t?`<span class="prompt" part="prompt" aria-hidden="true">${n(t)}</span>`:"",r='<code class="text" part="text"><slot></slot></code>';return e?`
+  `);c("ga-radio-group",f);class k extends d{_pass(e,t=e){return this.hasAttribute(e)?` ${t}="${n(this.getAttribute(e))}"`:""}template(){const e=this.attr("href"),t=this.attr("prompt"),a=t?`<span class="prompt" part="prompt" aria-hidden="true">${n(t)}</span>`:"",s='<code class="text" part="text"><slot></slot></code>';return e?`
         <a class="block" part="block"
           href="${n(e)}"${this._pass("target")}${this._pass("rel")}>
           ${a}
-          ${r}
-          <span class="arrow" part="arrow" aria-hidden="true">${Q}</span>
+          ${s}
+          <span class="arrow" part="arrow" aria-hidden="true">${X}</span>
         </a>
       `:`
       <div class="block" part="block">
         ${a}
-        ${r}
+        ${s}
         <button class="action" part="copy" type="button" aria-label="Copy to clipboard">
-          <span class="ico">${I}</span>
+          <span class="ico">${V}</span>
         </button>
       </div>
-    `}render(){super.render();const e=this.$("button.action");e==null||e.addEventListener("click",()=>this._copy(e))}_copy(e){var r;const t=(this.textContent||"").trim(),a=()=>{e.classList.add("copied"),e.querySelector(".ico").innerHTML=W,this.emit("copy",{text:t}),clearTimeout(this._t),this._t=setTimeout(()=>{e.classList.remove("copied");const s=e.querySelector(".ico");s&&(s.innerHTML=I)},1500)};(r=navigator.clipboard)!=null&&r.writeText?navigator.clipboard.writeText(t).then(a).catch(()=>{}):a()}disconnectedCallback(){clearTimeout(this._t)}}o($,"observed",["prompt","href","target","rel"]),o($,"styles",`
+    `}render(){super.render();const e=this.$("button.action");e==null||e.addEventListener("click",()=>this._copy(e))}_copy(e){var s;const t=(this.textContent||"").trim(),a=()=>{e.classList.add("copied"),e.querySelector(".ico").innerHTML=K,this.emit("copy",{text:t}),clearTimeout(this._t),this._t=setTimeout(()=>{e.classList.remove("copied");const o=e.querySelector(".ico");o&&(o.innerHTML=V)},1500)};(s=navigator.clipboard)!=null&&s.writeText?navigator.clipboard.writeText(t).then(a).catch(()=>{}):a()}disconnectedCallback(){clearTimeout(this._t)}}i(k,"observed",["prompt","href","target","rel"]),i(k,"styles",`
     :host { display: block; }
     .block {
       display: flex;
@@ -216,14 +216,14 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     .action.copied { color: var(--ga-green, #00c758); }
     .arrow { flex: none; color: var(--ga-muted, #878787); }
     svg { display: block; }
-  `);const I=`<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+  `);const V=`<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <rect x="9" y="9" width="13" height="13" rx="2"></rect>
-  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,W=`<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`,K=`<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M20 6 9 17l-5-5"></path></svg>`,Q=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+  <path d="M20 6 9 17l-5-5"></path></svg>`,X=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7 17 17 7"></path><path d="M7 7h10v10"></path></svg>`;c("ga-code",$);class E extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.length-1;return`<nav aria-label="Breadcrumb" part="nav"><ol part="list">${e.map((r,s)=>{const l=s>0?'<span class="sep" part="separator" aria-hidden="true">/</span>':"",g=s===t,Y=n(r.label),U=!g&&r.href?`<a part="link" href="${n(r.href)}">${Y}</a>`:`<span class="current" part="current" ${g?'aria-current="page"':""}>${Y}</span>`;return`<li>${l}${U}</li>`}).join("")}</ol></nav>`}}o(E,"observed",["items"]),o(E,"styles",`
+  <path d="M7 17 17 7"></path><path d="M7 7h10v10"></path></svg>`;c("ga-code",k);class _ extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.length-1;return`<nav aria-label="Breadcrumb" part="nav"><ol part="list">${e.map((s,o)=>{const l=o>0?'<span class="sep" part="separator" aria-hidden="true">/</span>':"",u=o===t,R=n(s.label),U=!u&&s.href?`<a part="link" href="${n(s.href)}">${R}</a>`:`<span class="current" part="current" ${u?'aria-current="page"':""}>${R}</span>`;return`<li>${l}${U}</li>`}).join("")}</ol></nav>`}}i(_,"observed",["items"]),i(_,"styles",`
     :host { display: block; }
     ol {
       display: flex;
@@ -250,13 +250,13 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     }
     .current { color: var(--ga-fg, #ededed); }
     .sep { color: var(--ga-dim, #454545); user-select: none; }
-  `);c("ga-breadcrumbs",E);let Z=0;class z extends d{connectedCallback(){this._scope="ga-table-"+Z++,this.setAttribute("data-ga-scope",this._scope),super.connectedCallback()}disconnectedCallback(){var e;(e=this._sheet)==null||e.remove(),this._sheet=null}_parse(){try{return JSON.parse(this.attr("columns","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.map(r=>r.width||"minmax(0, 1fr)").join(" ")||"1fr";this.style.setProperty("--ga-table-cols",t);const a=e.map(r=>{const s="cell"+(r.mono?" mono":""),l=r.align?`text-align:${n(r.align)}`:"";return`<span class="${s}" part="head-cell" style="${l}">${n(r.label??"")}</span>`}).join("");return this._applyCellRules(e),`
+  `);c("ga-breadcrumbs",_);let W=0;class $ extends d{connectedCallback(){this._scope="ga-table-"+W++,this.setAttribute("data-ga-scope",this._scope),super.connectedCallback()}disconnectedCallback(){var e;(e=this._sheet)==null||e.remove(),this._sheet=null}_parse(){try{return JSON.parse(this.attr("columns","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.map(s=>s.width||"minmax(0, 1fr)").join(" ")||"1fr";this.style.setProperty("--ga-table-cols",t);const a=e.map(s=>{const o="cell"+(s.mono?" mono":""),l=s.align?`text-align:${n(s.align)}`:"";return`<span class="${o}" part="head-cell" style="${l}">${n(s.label??"")}</span>`}).join("");return this._applyCellRules(e),`
       <div class="table" part="table">
         <div class="head" part="header" role="row">${a}</div>
         <slot part="body"></slot>
       </div>
-    `}_applyCellRules(e){const t=e.map((a,r)=>{const s=[];return a.align&&s.push(`text-align:${a.align}`),a.mono&&s.push("font-family:var(--ga-font-mono, ui-monospace, monospace);font-variant-numeric:tabular-nums"),s.length?`ga-table[data-ga-scope="${this._scope}"] > *:not([slot]) > :nth-child(${r+1}){${s.join(";")}}`:""}).filter(Boolean).join(`
-`);this._sheet||(this._sheet=document.createElement("style"),document.head.appendChild(this._sheet)),this._sheet.textContent=t}}o(z,"observed",["columns"]),o(z,"styles",`
+    `}_applyCellRules(e){const t=e.map((a,s)=>{const o=[];return a.align&&o.push(`text-align:${a.align}`),a.mono&&o.push("font-family:var(--ga-font-mono, ui-monospace, monospace);font-variant-numeric:tabular-nums"),o.length?`ga-table[data-ga-scope="${this._scope}"] > *:not([slot]) > :nth-child(${s+1}){${o.join(";")}}`:""}).filter(Boolean).join(`
+`);this._sheet||(this._sheet=document.createElement("style"),document.head.appendChild(this._sheet)),this._sheet.textContent=t}}i($,"observed",["columns"]),i($,"styles",`
     :host { display: block; }
     .table {
       border: 1px solid var(--ga-border, #1a1a1a);
@@ -298,7 +298,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       outline: none;
       box-shadow: var(--ga-ring, 0 0 0 2px #000, 0 0 0 4px #54a2ff);
     }
-  `);c("ga-table",z);class C extends d{template(){return'<span class="badge" part="badge"><slot></slot></span>'}}o(C,"observed",["color","solid","size"]),o(C,"styles",`
+  `);c("ga-table",$);class z extends d{template(){return'<span class="badge" part="badge"><slot></slot></span>'}}i(z,"observed",["color","solid","size"]),i(z,"styles",`
     :host { display: inline-block; }
     .badge {
       --_c: var(--ga-muted, #878787);
@@ -337,13 +337,13 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       color: var(--ga-accent-contrast, #000);
       border-color: var(--_c);
     }
-  `);c("ga-badge",C);class L extends d{connectedCallback(){super.connectedCallback(),this._sync=()=>this._toggleSlots(),this.shadowRoot.addEventListener("slotchange",this._sync)}_toggleSlots(){for(const e of["header","footer"]){const t=this.$(`slot[name="${e}"]`),a=this.$(`.${e}`);t&&a&&a.classList.toggle("show",t.assignedNodes().length>0)}}template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${e}"`:"";return`
+  `);c("ga-badge",z);class E extends d{connectedCallback(){super.connectedCallback(),this._sync=()=>this._toggleSlots(),this.shadowRoot.addEventListener("slotchange",this._sync)}_toggleSlots(){for(const e of["header","footer"]){const t=this.$(`slot[name="${e}"]`),a=this.$(`.${e}`);t&&a&&a.classList.toggle("show",t.assignedNodes().length>0)}}template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${e}"`:"";return`
       <${t} class="card" part="card" ${a}>
         <div class="header" part="header"><slot name="header"></slot></div>
         <div class="body" part="body"><slot></slot></div>
         <div class="footer" part="footer"><slot name="footer"></slot></div>
       </${t}>
-    `}}o(L,"observed",["interactive","href","padding"]),o(L,"styles",`
+    `}}i(E,"observed",["interactive","href","padding"]),i(E,"styles",`
     :host { display: block; }
     .card {
       display: flex;
@@ -397,7 +397,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     }
     /* Collapse the gap when only the body is present. */
     .card:not(:has(.header.show)):not(:has(.footer.show)) { gap: 0; }
-  `);c("ga-card",L);class A extends d{_initials(e){return e.trim().split(/\s+/).slice(0,2).map(a=>{var r;return((r=a[0])==null?void 0:r.toUpperCase())??""}).join("")||"?"}template(){const e=this.attr("src"),t=this.attr("name",""),a=e?`<img src="${n(e)}" alt="${n(t)}" loading="lazy" />`:`<span aria-hidden="true">${n(this._initials(t))}</span>`;return`<div class="avatar" part="avatar" role="img" aria-label="${n(t)}">${a}</div>`}}o(A,"observed",["src","name","size","square"]),o(A,"styles",`
+  `);c("ga-card",E);class q extends d{_initials(e){return e.trim().split(/\s+/).slice(0,2).map(a=>{var s;return((s=a[0])==null?void 0:s.toUpperCase())??""}).join("")||"?"}template(){const e=this.attr("src"),t=this.attr("name",""),a=e?`<img src="${n(e)}" alt="${n(t)}" loading="lazy" />`:`<span aria-hidden="true">${n(this._initials(t))}</span>`;return`<div class="avatar" part="avatar" role="img" aria-label="${n(t)}">${a}</div>`}}i(q,"observed",["src","name","size","square"]),i(q,"styles",`
     :host { display: inline-block; }
     .avatar {
       display: inline-flex;
@@ -418,9 +418,9 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     :host([size="sm"]) .avatar { width: 28px; height: 28px; font-size: 11px; }
     :host([size="lg"]) .avatar { width: 64px; height: 64px; font-size: var(--ga-fs-lg, 20px); }
     img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  `);c("ga-avatar",A);class v extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("error"),a=this.attr("hint"),r=this.hasFlag("required")?'<span class="req">*</span>':"";return`
+  `);c("ga-avatar",q);class x extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("error"),a=this.attr("hint"),s=this.hasFlag("required")?'<span class="req">*</span>':"";return`
       <div class="field">
-        ${e?`<label part="label">${n(e)}${r}</label>`:""}
+        ${e?`<label part="label">${n(e)}${s}</label>`:""}
         <input
           part="input"
           type="${n(this.attr("type","text"))}"
@@ -432,7 +432,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
         />
         ${t?`<span class="error" part="error">${n(t)}</span>`:a?`<span class="hint" part="hint">${n(a)}</span>`:""}
       </div>
-    `}render(){super.render();const e=this.$("input");e&&(e.addEventListener("input",()=>{var t;this._value=e.value,(t=this._internals)==null||t.setFormValue(e.value),this.emit("input",{value:e.value})}),e.addEventListener("change",()=>this.emit("change",{value:e.value})))}get value(){var e;return((e=this.$("input"))==null?void 0:e.value)??this._value??this.attr("value")}set value(e){this._value=e,this.setAttribute("value",e)}}o(v,"formAssociated",!0),o(v,"observed",["label","placeholder","type","value","name","hint","error","disabled","required"]),o(v,"styles",`
+    `}render(){super.render();const e=this.$("input");e&&(e.addEventListener("input",()=>{var t;this._value=e.value,(t=this._internals)==null||t.setFormValue(e.value),this.emit("input",{value:e.value})}),e.addEventListener("change",()=>this.emit("change",{value:e.value})))}get value(){var e;return((e=this.$("input"))==null?void 0:e.value)??this._value??this.attr("value")}set value(e){this._value=e,this.setAttribute("value",e)}}i(x,"formAssociated",!0),i(x,"observed",["label","placeholder","type","value","name","hint","error","disabled","required"]),i(x,"styles",`
     :host { display: block; }
     .field { display: flex; flex-direction: column; gap: 6px; }
     label {
@@ -464,7 +464,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     .hint { font-size: var(--ga-fs-xs, 12px); color: var(--ga-muted, #878787); }
     .error { font-size: var(--ga-fs-xs, 12px); color: var(--ga-red, #ff6568); }
     :host([error]) input { border-color: var(--ga-red, #ff6568); }
-  `);c("ga-input",v);class f extends d{template(){const e=this.hasFlag("checked"),t=this.attr("label");return`
+  `);c("ga-input",x);class m extends d{template(){const e=this.hasFlag("checked"),t=this.attr("label");return`
       <label class="wrap">
         <button
           part="track"
@@ -475,7 +475,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
         ><span class="knob" part="knob"></span></button>
         ${t?`<span class="label">${n(t)}</span>`:""}
       </label>
-    `}render(){var e;super.render(),(e=this.$("button"))==null||e.addEventListener("click",()=>this.toggle())}toggle(){if(this.hasFlag("disabled"))return;const e=!this.hasFlag("checked");this.toggleAttribute("checked",e),this.emit("change",{checked:e})}get checked(){return this.hasFlag("checked")}set checked(e){this.toggleAttribute("checked",!!e)}}o(f,"formAssociated",!0),o(f,"observed",["checked","disabled","label"]),o(f,"styles",`
+    `}render(){var e;super.render(),(e=this.$("button"))==null||e.addEventListener("click",()=>this.toggle())}toggle(){if(this.hasFlag("disabled"))return;const e=!this.hasFlag("checked");this.toggleAttribute("checked",e),this.emit("change",{checked:e})}get checked(){return this.hasFlag("checked")}set checked(e){this.toggleAttribute("checked",!!e)}}i(m,"formAssociated",!0),i(m,"observed",["checked","disabled","label"]),i(m,"styles",`
     :host { display: inline-block; }
     .wrap {
       display: inline-flex;
@@ -519,7 +519,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       background: var(--ga-accent-contrast, #000);
     }
     .label { font-size: var(--ga-fs-sm, 14px); color: var(--ga-fg, #ededed); }
-  `);c("ga-switch",f);class q extends d{template(){return'<div class="spinner" part="spinner" role="status" aria-label="Loading"></div>'}}o(q,"observed",["size","color"]),o(q,"styles",`
+  `);c("ga-switch",m);class L extends d{template(){return'<div class="spinner" part="spinner" role="status" aria-label="Loading"></div>'}}i(L,"observed",["size","color"]),i(L,"styles",`
     :host { display: inline-flex; }
     .spinner {
       width: 20px; height: 20px;
@@ -537,7 +537,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     :host([color="red"])    .spinner { color: var(--ga-red, #ff6568); }
     :host([color="fg"])     .spinner { color: var(--ga-fg, #ededed); }
     @keyframes spin { to { transform: rotate(360deg); } }
-  `);c("ga-spinner",q);class M extends d{template(){const e=this.attr("title"),t=this.hasFlag("dismissible")?'<button class="close" part="close" aria-label="Dismiss">&times;</button>':"";return`
+  `);c("ga-spinner",L);class C extends d{template(){const e=this.attr("title"),t=this.hasFlag("dismissible")?'<button class="close" part="close" aria-label="Dismiss">&times;</button>':"";return`
       <div class="alert" part="alert" role="alert">
         <span class="dot" aria-hidden="true"></span>
         <div class="content">
@@ -546,7 +546,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
         </div>
         ${t}
       </div>
-    `}render(){var e;super.render(),(e=this.$(".close"))==null||e.addEventListener("click",()=>{this.emit("dismiss"),this.remove()})}}o(M,"observed",["tone","title","dismissible"]),o(M,"styles",`
+    `}render(){var e;super.render(),(e=this.$(".close"))==null||e.addEventListener("click",()=>{this.emit("dismiss"),this.remove()})}}i(C,"observed",["tone","title","dismissible"]),i(C,"styles",`
     :host { display: block; }
     .alert {
       --_c: var(--ga-muted, #878787);
@@ -577,7 +577,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       transition: color var(--ga-transition, 0.18s ease);
     }
     .close:hover { color: var(--ga-fg, #ededed); }
-  `);c("ga-alert",M);class D extends d{template(){return'<kbd part="kbd"><slot></slot></kbd>'}}o(D,"styles",`
+  `);c("ga-alert",C);class I extends d{template(){return'<kbd part="kbd"><slot></slot></kbd>'}}i(I,"styles",`
     :host { display: inline-block; }
     kbd {
       display: inline-block;
@@ -593,17 +593,17 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       min-width: 1em;
       text-align: center;
     }
-  `);c("ga-kbd",D);class T extends d{_parse(){try{return JSON.parse(this.attr("tabs","[]"))}catch{return[]}}template(){var s;const e=this._parse(),t=this.attr("active")||((s=e[0])==null?void 0:s.id),a=e.map(l=>`
+  `);c("ga-kbd",I);class A extends d{_parse(){try{return JSON.parse(this.attr("tabs","[]"))}catch{return[]}}template(){var o;const e=this._parse(),t=this.attr("active")||((o=e[0])==null?void 0:o.id),a=e.map(l=>`
       <button class="tab" part="tab" role="tab" data-id="${n(l.id)}"
         aria-selected="${l.id===t}" tabindex="${l.id===t?"0":"-1"}">
         ${n(l.label)}
-      </button>`).join(""),r=e.map(l=>`
+      </button>`).join(""),s=e.map(l=>`
       <div role="tabpanel" ${l.id===t?"":"hidden"}>
         <slot name="${n(l.id)}"></slot>
       </div>`).join("");return`
       <div class="list" part="list" role="tablist">${a}</div>
-      <div class="panels" part="panels">${r}</div>
-    `}render(){super.render(),this.shadowRoot.querySelectorAll(".tab").forEach(e=>{e.addEventListener("click",()=>this._select(e.dataset.id))})}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}o(T,"observed",["tabs","active"]),o(T,"styles",`
+      <div class="panels" part="panels">${s}</div>
+    `}render(){super.render(),this.shadowRoot.querySelectorAll(".tab").forEach(e=>{e.addEventListener("click",()=>this._select(e.dataset.id))})}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}i(A,"observed",["tabs","active"]),i(A,"styles",`
     :host { display: block; }
     .list {
       display: flex;
@@ -638,12 +638,12 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       border-radius: var(--ga-radius, 6px);
     }
     .panels { padding-top: var(--ga-space-4, 16px); }
-  `);c("ga-tabs",T);class j extends d{template(){const e=this.attr("title");return`
+  `);c("ga-tabs",A);class T extends d{template(){const e=this.attr("title");return`
       <div class="note" part="note">
         ${e?`<div class="title" part="title">${n(e)}</div>`:""}
         <slot></slot>
       </div>
-    `}}o(j,"observed",["tone","title"]),o(j,"styles",`
+    `}}i(T,"observed",["tone","title"]),i(T,"styles",`
     :host { display: block; }
     .note {
       --_c: var(--ga-accent, #54a2ff);
@@ -665,21 +665,21 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     :host([tone="danger"])  .note { --_c: var(--ga-red, #ff6568); }
 
     .title { margin: 0 0 3px; font-size: 14px; font-weight: 600; color: var(--ga-fg, #ededed); }
-  `);c("ga-note",j);const G={compass:'<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',bookmark:'<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',heart:'<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',plus:'<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',minus:'<line x1="5" y1="12" x2="19" y2="12"/>',check:'<polyline points="20 6 9 17 4 12"/>',x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',trash:'<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',bell:'<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',user:'<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',home:'<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',settings:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',menu:'<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>',"chevron-right":'<polyline points="9 18 15 12 9 6"/>',"chevron-down":'<polyline points="6 9 12 15 18 9"/>',"arrow-right":'<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',"external-link":'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',upload:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',image:'<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',info:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',layers:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',sun:'<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>',moon:'<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',github:'<path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>'};class F extends d{template(){const e=G[this.attr("name")]||"",t=Number(this.attr("size"))||20;return`<svg viewBox="0 0 24 24" width="${t}" height="${t}" part="svg" aria-hidden="true">${e}</svg>`}}o(F,"observed",["name","size"]),o(F,"styles",`
+  `);c("ga-note",T);const Z={compass:'<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',bookmark:'<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>',star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',heart:'<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>',plus:'<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',minus:'<line x1="5" y1="12" x2="19" y2="12"/>',check:'<polyline points="20 6 9 17 4 12"/>',x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',trash:'<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',bell:'<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>',user:'<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',home:'<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',settings:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',menu:'<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>',"chevron-right":'<polyline points="9 18 15 12 9 6"/>',"chevron-down":'<polyline points="6 9 12 15 18 9"/>',"arrow-right":'<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',"external-link":'<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',upload:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>',download:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',image:'<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',info:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',layers:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',sun:'<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>',moon:'<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',github:'<path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>'};class M extends d{template(){const e=Z[this.attr("name")]||"",t=Number(this.attr("size"))||20;return`<svg viewBox="0 0 24 24" width="${t}" height="${t}" part="svg" aria-hidden="true">${e}</svg>`}}i(M,"observed",["name","size"]),i(M,"styles",`
     :host { display: inline-flex; line-height: 0; }
     svg {
       display: block;
       stroke: currentColor; fill: none;
       stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
     }
-  `);c("ga-icon",F);class O extends d{template(){const e=this.attr("label","Drop files here or click to browse");return`
+  `);c("ga-icon",M);class S extends d{template(){const e=this.attr("label","Drop files here or click to browse");return`
       <label class="drop" part="drop">
         <ga-icon class="icon" name="upload" size="24"></ga-icon>
         <span class="label">${n(e)}</span>
         <span class="hint"><slot></slot></span>
         <input type="file" ${this.hasFlag("multiple")?"multiple":""} accept="${n(this.attr("accept"))}" />
       </label>
-    `}render(){super.render();const e=this.$(".drop"),t=this.$("input");t.addEventListener("change",()=>this._emit(t.files)),["dragenter","dragover"].forEach(a=>e.addEventListener(a,r=>{r.preventDefault(),e.classList.add("dragging")})),["dragleave","dragend","drop"].forEach(a=>e.addEventListener(a,r=>{r.preventDefault(),e.classList.remove("dragging")})),e.addEventListener("drop",a=>{var r,s;(s=(r=a.dataTransfer)==null?void 0:r.files)!=null&&s.length&&this._emit(a.dataTransfer.files)})}_emit(e){e&&e.length&&this.emit("files",{files:Array.from(e)})}}o(O,"observed",["accept","multiple","label"]),o(O,"styles",`
+    `}render(){super.render();const e=this.$(".drop"),t=this.$("input");t.addEventListener("change",()=>this._emit(t.files)),["dragenter","dragover"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.add("dragging")})),["dragleave","dragend","drop"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.remove("dragging")})),e.addEventListener("drop",a=>{var s,o;(o=(s=a.dataTransfer)==null?void 0:s.files)!=null&&o.length&&this._emit(a.dataTransfer.files)})}_emit(e){e&&e.length&&this.emit("files",{files:Array.from(e)})}}i(S,"observed",["accept","multiple","label"]),i(S,"styles",`
     :host { display: block; }
     .drop {
       display: flex;
@@ -706,11 +706,11 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     .hint { font-size: var(--ga-fs-xs, 12px); color: var(--ga-dim, #454545); }
     .hint:empty { display: none; }
     input { display: none; }
-  `);c("ga-file-drop",O);class S extends d{template(){return`
+  `);c("ga-file-drop",S);class j extends d{template(){return`
       <button class="fab" part="fab" aria-label="${n(this.attr("label","Action"))}">
         <slot>+</slot>
       </button>
-    `}}o(S,"observed",["color","position","label"]),o(S,"styles",`
+    `}}i(j,"observed",["color","position","label"]),i(j,"styles",`
     :host { display: contents; }
     .fab {
       --_c: var(--ga-accent, #54a2ff);
@@ -745,7 +745,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     :host([color="amber"])  .fab { --_c: var(--ga-amber, #fcbb00); }
     :host([color="purple"]) .fab { --_c: var(--ga-purple, #ac4bff); }
     :host([color="red"])    .fab { --_c: var(--ga-red, #ff6568); }
-  `);c("ga-fab",S);class H extends d{template(){const e=this.attr("title");return`
+  `);c("ga-fab",j);class F extends d{template(){const e=this.attr("title");return`
       <div class="scrim" part="scrim"></div>
       <div class="panel" part="panel" role="dialog" aria-modal="true">
         <div class="head" part="header">
@@ -755,7 +755,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
         <div class="body" part="body"><slot></slot></div>
         <div class="foot" part="footer"><slot name="footer"></slot></div>
       </div>
-    `}connectedCallback(){super.connectedCallback(),this._key=e=>{e.key==="Escape"&&this.open&&this.close()},document.addEventListener("keydown",this._key),this.shadowRoot.addEventListener("slotchange",()=>this._syncFooter())}disconnectedCallback(){this._key&&document.removeEventListener("keydown",this._key)}render(){var e,t;super.render(),(e=this.$(".close"))==null||e.addEventListener("click",()=>this.close()),(t=this.$(".scrim"))==null||t.addEventListener("click",()=>this.close()),this._syncFooter()}_syncFooter(){const e=this.$('slot[name="footer"]'),t=this.$(".foot");e&&t&&t.classList.toggle("show",e.assignedNodes().length>0)}get open(){return this.hasFlag("open")}set open(e){this.toggleAttribute("open",!!e)}show(){this.open||(this.setAttribute("open",""),this.emit("open"))}close(){this.open&&(this.removeAttribute("open"),this.emit("close"))}toggle(){this.open?this.close():this.show()}}o(H,"observed",["open","side","title"]),o(H,"styles",`
+    `}connectedCallback(){super.connectedCallback(),this._key=e=>{e.key==="Escape"&&this.open&&this.close()},document.addEventListener("keydown",this._key),this.shadowRoot.addEventListener("slotchange",()=>this._syncFooter())}disconnectedCallback(){this._key&&document.removeEventListener("keydown",this._key)}render(){var e,t;super.render(),(e=this.$(".close"))==null||e.addEventListener("click",()=>this.close()),(t=this.$(".scrim"))==null||t.addEventListener("click",()=>this.close()),this._syncFooter()}_syncFooter(){const e=this.$('slot[name="footer"]'),t=this.$(".foot");e&&t&&t.classList.toggle("show",e.assignedNodes().length>0)}get open(){return this.hasFlag("open")}set open(e){this.toggleAttribute("open",!!e)}show(){this.open||(this.setAttribute("open",""),this.emit("open"))}close(){this.open&&(this.removeAttribute("open"),this.emit("close"))}toggle(){this.open?this.close():this.show()}}i(F,"observed",["open","side","title"]),i(F,"styles",`
     :host { display: contents; }
     .scrim {
       position: fixed; inset: 0; z-index: 49;
@@ -799,7 +799,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       transition: color var(--ga-transition, 0.18s ease);
     }
     .close:hover { color: var(--ga-fg, #ededed); }
-  `);c("ga-panel",H);class x extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("value","50");return`
+  `);c("ga-panel",F);class y extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("value","50");return`
       <div class="wrap">
         ${e?`<div class="top"><span class="label">${n(e)}</span><span class="val">${n(t)}</span></div>`:""}
         <input type="range"
@@ -809,7 +809,7 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
           value="${n(t)}"
           ${this.hasFlag("disabled")?"disabled":""} />
       </div>
-    `}render(){var a;super.render();const e=this.$("input"),t=this.$(".val");e&&((a=this._internals)==null||a.setFormValue(e.value),e.addEventListener("input",()=>{var r;this._value=e.value,t&&(t.textContent=e.value),(r=this._internals)==null||r.setFormValue(e.value),this.emit("input",{value:e.value})}),e.addEventListener("change",()=>this.emit("change",{value:e.value})))}get value(){var e;return((e=this.$("input"))==null?void 0:e.value)??this._value??this.attr("value")}set value(e){this._value=e,this.setAttribute("value",e)}}o(x,"formAssociated",!0),o(x,"observed",["min","max","step","value","label","disabled"]),o(x,"styles",`
+    `}render(){var a;super.render();const e=this.$("input"),t=this.$(".val");e&&((a=this._internals)==null||a.setFormValue(e.value),e.addEventListener("input",()=>{var s;this._value=e.value,t&&(t.textContent=e.value),(s=this._internals)==null||s.setFormValue(e.value),this.emit("input",{value:e.value})}),e.addEventListener("change",()=>this.emit("change",{value:e.value})))}get value(){var e;return((e=this.$("input"))==null?void 0:e.value)??this._value??this.attr("value")}set value(e){this._value=e,this.setAttribute("value",e)}}i(y,"formAssociated",!0),i(y,"observed",["min","max","step","value","label","disabled"]),i(y,"styles",`
     :host { display: block; }
     .wrap { display: flex; flex-direction: column; gap: 8px; }
     :host([disabled]) .wrap { opacity: 0.5; pointer-events: none; }
@@ -839,13 +839,13 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       background: var(--ga-accent, #54a2ff); cursor: pointer;
     }
     input[type="range"]::-moz-range-track { height: 6px; border-radius: 9999px; background: var(--ga-bg-elev-hover, #1f1f1f); }
-  `);c("ga-slider",x);class N extends d{template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${n(e)}"`:"";return`
+  `);c("ga-slider",y);class D extends d{template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${n(e)}"`:"";return`
       <header class="hdr" part="header">
         <${t} class="brand" part="brand" ${a}><slot name="brand">${n(this.attr("brand"))}</slot></${t}>
         <div class="spacer"></div>
         <nav class="actions" part="actions"><slot></slot></nav>
       </header>
-    `}}o(N,"observed",["brand","href","static"]),o(N,"styles",`
+    `}}i(D,"observed",["brand","href","static"]),i(D,"styles",`
     :host { display: block; }
     .hdr {
       position: sticky; top: 0; z-index: 50;
@@ -877,13 +877,13 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
       transition: color var(--ga-transition, 0.18s ease);
     }
     ::slotted(a:hover) { color: var(--ga-fg, #ededed) !important; }
-  `);c("ga-header",N);class R extends d{template(){return`
+  `);c("ga-header",D);class O extends d{template(){return`
       <div class="sheet" part="sheet">
         <div class="grip" part="handle"><span class="bar"></span></div>
         <div class="head" part="header"><slot name="header"></slot></div>
         <div class="body" part="body"><slot></slot></div>
       </div>
-    `}connectedCallback(){super.connectedCallback(),this._onResize=()=>this._apply(),window.addEventListener("resize",this._onResize),this._onMove=e=>this._move(e),this._onUp=()=>this._up(),window.addEventListener("pointermove",this._onMove),window.addEventListener("pointerup",this._onUp)}disconnectedCallback(){window.removeEventListener("resize",this._onResize),window.removeEventListener("pointermove",this._onMove),window.removeEventListener("pointerup",this._onUp)}attributeChangedCallback(){this._mounted&&this._apply()}render(){super.render();const e=this.$(".grip"),t=this.$(".head");for(const a of[e,t])a==null||a.addEventListener("pointerdown",r=>this._down(r));requestAnimationFrame(()=>this._apply())}get open(){return this.hasFlag("open")}get snap(){return this.attr("snap","half")}show(e){e&&this.setAttribute("snap",e),this.setAttribute("open",""),this._apply(),this.emit("open")}close(){this.removeAttribute("open"),this._apply(),this.emit("close")}snapTo(e){this.setAttribute("snap",e),this._apply(),this.emit("snapchange",{snap:e})}_snaps(){var a;const e=((a=this.$(".sheet"))==null?void 0:a.offsetHeight)||window.innerHeight*.88,t=window.innerHeight;return{full:0,half:Math.max(0,e-t*.45),peek:Math.max(0,e-128),closed:e}}_currentY(){var t;const e=/translateY\(([-0-9.]+)px\)/.exec(((t=this.$(".sheet"))==null?void 0:t.style.transform)||"");return e?parseFloat(e[1]):this._snaps().closed}_apply(){const e=this.$(".sheet");if(!e)return;const t=this._snaps(),a=this.open?t[this.snap]??t.half:t.closed;e.style.transform=`translateY(${a}px)`}_down(e){var t;this._dragging=!0,this._startY=e.clientY,this._startTf=this._currentY(),(t=this.$(".sheet"))==null||t.classList.add("dragging")}_move(e){if(!this._dragging)return;const t=this._snaps(),a=Math.min(t.closed,Math.max(0,this._startTf+(e.clientY-this._startY)));this.$(".sheet").style.transform=`translateY(${a}px)`}_up(){var r;if(!this._dragging)return;this._dragging=!1,(r=this.$(".sheet"))==null||r.classList.remove("dragging");const e=this._snaps(),t=this._currentY();if(t>e.peek+80){this.close();return}let a="full";for(const s of["full","half","peek"])Math.abs(e[s]-t)<Math.abs(e[a]-t)&&(a=s);a!==this.snap&&(this.setAttribute("snap",a),this.emit("snapchange",{snap:a})),this._apply()}}o(R,"observed",["open","snap"]),o(R,"styles",`
+    `}connectedCallback(){super.connectedCallback(),this._onResize=()=>this._apply(),window.addEventListener("resize",this._onResize),this._onMove=e=>this._move(e),this._onUp=()=>this._up(),window.addEventListener("pointermove",this._onMove),window.addEventListener("pointerup",this._onUp)}disconnectedCallback(){window.removeEventListener("resize",this._onResize),window.removeEventListener("pointermove",this._onMove),window.removeEventListener("pointerup",this._onUp)}attributeChangedCallback(){this._mounted&&this._apply()}render(){super.render();const e=this.$(".grip"),t=this.$(".head");for(const a of[e,t])a==null||a.addEventListener("pointerdown",s=>this._down(s));requestAnimationFrame(()=>this._apply())}get open(){return this.hasFlag("open")}get snap(){return this.attr("snap","half")}show(e){e&&this.setAttribute("snap",e),this.setAttribute("open",""),this._apply(),this.emit("open")}close(){this.removeAttribute("open"),this._apply(),this.emit("close")}snapTo(e){this.setAttribute("snap",e),this._apply(),this.emit("snapchange",{snap:e})}_snaps(){var a;const e=((a=this.$(".sheet"))==null?void 0:a.offsetHeight)||window.innerHeight*.88,t=window.innerHeight;return{full:0,half:Math.max(0,e-t*.45),peek:Math.max(0,e-128),closed:e}}_currentY(){var t;const e=/translateY\(([-0-9.]+)px\)/.exec(((t=this.$(".sheet"))==null?void 0:t.style.transform)||"");return e?parseFloat(e[1]):this._snaps().closed}_apply(){const e=this.$(".sheet");if(!e)return;const t=this._snaps(),a=this.open?t[this.snap]??t.half:t.closed;e.style.transform=`translateY(${a}px)`}_down(e){var t;this._dragging=!0,this._startY=e.clientY,this._startTf=this._currentY(),(t=this.$(".sheet"))==null||t.classList.add("dragging")}_move(e){if(!this._dragging)return;const t=this._snaps(),a=Math.min(t.closed,Math.max(0,this._startTf+(e.clientY-this._startY)));this.$(".sheet").style.transform=`translateY(${a}px)`}_up(){var s;if(!this._dragging)return;this._dragging=!1,(s=this.$(".sheet"))==null||s.classList.remove("dragging");const e=this._snaps(),t=this._currentY();if(t>e.peek+80){this.close();return}let a="full";for(const o of["full","half","peek"])Math.abs(e[o]-t)<Math.abs(e[a]-t)&&(a=o);a!==this.snap&&(this.setAttribute("snap",a),this.emit("snapchange",{snap:a})),this._apply()}}i(O,"observed",["open","snap"]),i(O,"styles",`
     :host { display: contents; }
     .sheet {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
@@ -908,12 +908,12 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     .head:empty { display: none; }
 
     .body { flex: 1; overflow-y: auto; padding: 0 20px 24px; color: var(--ga-muted, #878787); line-height: 1.55; }
-  `);c("ga-bottom-sheet",R);class B extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var r;const e=this._parse(),t=this.attr("active")||((r=e[0])==null?void 0:r.id);return`<nav class="nav" part="nav" role="navigation">${e.map(s=>{const l=s.icon||"",g=/^[a-z][a-z0-9-]*$/.test(l)?`<ga-icon class="icon" name="${n(l)}" size="22"></ga-icon>`:`<span class="icon" aria-hidden="true">${n(l||"•")}</span>`;return`
-      <button class="item" part="item" data-id="${n(s.id)}"
-        ${s.id===t?'aria-current="page"':""}>
-        ${g}
-        <span class="label">${n(s.label)}</span>
-      </button>`}).join("")}</nav>`}render(){super.render(),this.shadowRoot.querySelectorAll(".item").forEach(e=>e.addEventListener("click",()=>this._select(e.dataset.id)))}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}o(B,"observed",["items","active"]),o(B,"styles",`
+  `);c("ga-bottom-sheet",O);class N extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var s;const e=this._parse(),t=this.attr("active")||((s=e[0])==null?void 0:s.id);return`<nav class="nav" part="nav" role="navigation">${e.map(o=>{const l=o.icon||"",u=/^[a-z][a-z0-9-]*$/.test(l)?`<ga-icon class="icon" name="${n(l)}" size="22"></ga-icon>`:`<span class="icon" aria-hidden="true">${n(l||"•")}</span>`;return`
+      <button class="item" part="item" data-id="${n(o.id)}"
+        ${o.id===t?'aria-current="page"':""}>
+        ${u}
+        <span class="label">${n(o.label)}</span>
+      </button>`}).join("")}</nav>`}render(){super.render(),this.shadowRoot.querySelectorAll(".item").forEach(e=>e.addEventListener("click",()=>this._select(e.dataset.id)))}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}i(N,"observed",["items","active"]),i(N,"styles",`
     :host { display: block; }
     .nav {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
@@ -941,4 +941,8 @@ var J=Object.defineProperty;var K=(i,e,t)=>e in i?J(i,e,{enumerable:!0,configura
     .item:focus-visible { outline: none; box-shadow: var(--ga-ring, 0 0 0 2px #000, 0 0 0 4px #54a2ff); border-radius: var(--ga-radius, 6px); }
     .icon { font-size: 20px; line-height: 1; }
     .label { font-size: 11px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-  `);c("ga-bottom-nav",B);const m=document.getElementById("sdl"),y=document.getElementById("sdl2"),w=document.getElementById("gql"),k=document.getElementById("vars"),P=document.getElementById("run"),p=document.getElementById("status"),ee=document.getElementById("migration"),te=document.getElementById("sql"),ae=document.getElementById("params"),re=document.getElementById("delta");function se(i){return new Promise((e,t)=>{const a=document.createElement("script");a.src=i,a.onload=()=>e(),a.onerror=()=>t(new Error(`failed to load ${i}`)),document.head.appendChild(a)})}function u(i,e){i.textContent=e}let h=!0;function V(){h=!0;const i=m.value,e=w.value,t=k.value,a=y.value,r=globalThis.gopgqlMigration(i);u(ee,r.error||r.migration),r.error&&(h=!1);const s=globalThis.gopgqlCompile(i,e,t);u(te,s.error||s.sql),u(ae,s.error?"—":s.params),s.error&&(h=!1);const l=globalThis.gopgqlDelta(i,a);u(re,l.error||l.delta),l.error&&(h=!1),h?(p.textContent="generated",p.className="status ok"):(p.textContent="see errors below",p.className="status error")}async function oe(){try{await se("wasm_exec.js");const i=new globalThis.Go,e=await fetch("gopgql.wasm");if(!e.ok)throw new Error(`gopgql.wasm: HTTP ${e.status}`);const t=await e.arrayBuffer(),{instance:a}=await WebAssembly.instantiate(t,i.importObject);i.run(a),m.value=globalThis.gopgqlExampleSDL||m.value,w.value=globalThis.gopgqlExampleQuery||w.value,k.value=globalThis.gopgqlExampleVars||k.value,y.value=globalThis.gopgqlRevisedExampleSDL||y.value,P.removeAttribute("disabled"),p.textContent="ready",p.className="status ok",V()}catch(i){p.textContent=String(i),p.className="status error"}}P.addEventListener("click",V);for(const i of[m,w,k,y])i.addEventListener("input",()=>{globalThis.gopgqlMigration&&V()});oe();
+  `);c("ga-bottom-nav",N);const Y=2,p=r=>document.getElementById(r),v=p("boot"),G=p("maxdepth");function ee(r){return new Promise((e,t)=>{const a=document.createElement("script");a.src=r,a.onload=()=>e(),a.onerror=()=>t(new Error(`failed to load ${r}`)),document.head.appendChild(a)})}function h(r,e){p(r).textContent=e}function b(r,e,t){const a=p(r);a.textContent=t,a.className=e?"status ok":"status error"}function H(r,e){const t=globalThis.gopgqlSchema(e);return h(r,t.error||t.schema),!t.error}function te(){const r=p("t-sdl").value;let e=H("t-schema",r);const t=globalThis.gopgqlCompile(r,p("t-query").value,p("t-vars").value);h("t-sql",t.error||t.sql),h("t-params",t.error?"—":t.params),t.error&&(e=!1),b("t-status",e,e?"generated":"see errors")}function ae(){const r=Number.parseInt(p("d-max").value,10);return Number.isFinite(r)?Math.max(0,r):globalThis.gopgqlMaxDepth??3}function re(){const r=p("d-sdl").value,e=H("d-schema",r),t=globalThis.gopgqlCompile(r,p("d-query").value,p("d-vars").value,ae());if(t.depthExceeded){h("d-sql",`rejected at compile time — *compiler.DepthExceededError
+
+${t.error}
+
+MaxDepth = ${t.maxDepth}. No SQL was emitted, so nothing reached a database.`),b("d-status",e,e?"rejected, as designed":"see errors");return}h("d-sql",t.error||t.sql);const a=e&&!t.error;b("d-status",a,a?`compiled within MaxDepth ${t.maxDepth}`:"see errors")}function se(){const r=p("i-sdl").value;let e=H("i-schema",r);const t=globalThis.gopgqlCompile(r,p("i-query").value,"");h("i-sql",t.error||t.sql),t.error&&(e=!1),b("i-status",e,e?"generated":"see errors")}function oe(){const r=globalThis.gopgqlMigration(p("m-sdl").value);h("m-init",r.error||r.migration),b("m-status",!r.error,r.error?"see errors":"generated")}function ie(){const r=globalThis.gopgqlDelta(p("m-sdl").value,p("m-sdl2").value);if(h("m-delta",r.error||r.delta),r.error){b("m-status2",!1,"see errors");return}b("m-status2",!0,r.changed?"generated":"no schema change")}const P={traversal:{render:te,inputs:["t-sdl","t-query","t-vars"]},depth:{render:re,inputs:["d-sdl","d-query","d-vars","d-max"]},interfaces:{render:se,inputs:["i-sdl","i-query"]},migration:{render:oe,inputs:["m-sdl"]},delta:{render:ie,inputs:["m-sdl","m-sdl2"]}};function ne(){for(const r of Object.values(P))r.render()}function g(r,e){e&&(p(r).value=e)}async function le(){try{await ee("wasm_exec.js");const r=new globalThis.Go,e=await fetch("gopgql.wasm",{cache:"no-cache"});if(!e.ok)throw new Error(`gopgql.wasm: HTTP ${e.status}`);const t=await e.arrayBuffer(),{instance:a}=await WebAssembly.instantiate(t,r.importObject);r.run(a);const s=globalThis.gopgqlApiVersion??0;if(s!==Y)throw new Error(`gopgql.wasm is out of date: it exports API v${s||"(unknown)"}, this page needs v${Y}. Rebuild it with \`bash scripts/build-wasm.sh\`, then reload.`);g("t-sdl",globalThis.gopgqlExampleSDL),g("t-query",globalThis.gopgqlExampleQuery),g("t-vars",globalThis.gopgqlExampleVars),g("d-sdl",globalThis.gopgqlExampleSDL),g("d-query",globalThis.gopgqlExampleDeepQuery),g("d-vars",globalThis.gopgqlExampleVars),g("d-max",String(globalThis.gopgqlMaxDepth??3)),g("i-sdl",globalThis.gopgqlExampleInterfaceSDL),g("i-query",globalThis.gopgqlExampleInterfaceQuery),g("m-sdl",globalThis.gopgqlExampleSDL),g("m-sdl2",globalThis.gopgqlRevisedExampleSDL),G.textContent=String(globalThis.gopgqlMaxDepth??3);for(const o of document.querySelectorAll(".run"))o.removeAttribute("disabled");v.textContent="WebAssembly ready — every output below is generated from your input",v.className="status ok",ne()}catch(r){v.textContent=String(r),v.className="status error"}}for(const[r,e]of Object.entries(P)){for(const t of document.querySelectorAll(`.run[data-scenario="${r}"]`))t.addEventListener("click",e.render);for(const t of e.inputs)p(t).addEventListener("input",()=>{globalThis.gopgqlSchema&&e.render()})}le();
