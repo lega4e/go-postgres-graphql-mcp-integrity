@@ -14,6 +14,7 @@
 package playground
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/lega4e/gopgql/compiler"
@@ -33,9 +34,49 @@ const ExampleSDL = `type Person @node(label: "person") {
                          @hasInverse(field: "follows")
 }`
 
-// ExampleQuery is the M3 exit query (SPEC.md §7 → M3): a one-hop traversal
-// filtered by a bound variable. It is editable in the playground.
-const ExampleQuery = `{ persons(name: $n) { name follows { name } } }`
+// ExampleQuery is the M4 exit query (SPEC.md §7 → M4): a three-hop traversal
+// filtered by a bound variable, compiled to a single GRAPH_TABLE. It is
+// editable in the playground.
+const ExampleQuery = `{ persons(name: $n) { name follows { name follows { name follows { name } } } } }`
+
+// ExampleDeepQuery is one hop past the default MaxDepth. It compiles to a typed
+// *compiler.DepthExceededError rather than a truncated pattern: SQL/PGQ has no
+// variable-length paths, so gopgql rejects (SPEC.md §3, decision 3).
+const ExampleDeepQuery = `{ persons(name: $n) { follows { follows { follows { follows { name } } } } } }`
+
+// ExampleInterfaceSDL maps two vertex tables under one interface twice over
+// (SPEC.md §7 → M4). Actor carries @node, so persons and bots both expose the
+// shared `actor` label; Profile does not, so it is matched by label alternation
+// over the implementors' own labels.
+const ExampleInterfaceSDL = `interface Actor @node(label: "actor") {
+  id: ID!
+  name: String!
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+interface Profile {
+  id: ID!
+  name: String!
+}
+
+type Person implements Actor & Profile @node(label: "person") {
+  id: ID!
+  name: String!
+  email: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Bot implements Actor & Profile @node(label: "bot") {
+  id: ID!
+  name: String!
+  vendor: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT, table: "bot_follows")
+}`
+
+// ExampleInterfaceQuery traverses from the shared-label interface into a
+// concrete type. Because an actor may be a person, the two positions could bind
+// the same row, so the compiler emits the isomorphism guard (SPEC.md §2.2).
+const ExampleInterfaceQuery = `{ actors { name follows { name } } }`
 
 // ExampleVars is the initial variables document (JSON) bound to ExampleQuery.
 const ExampleVars = `{ "n": "Alice" }`
@@ -66,6 +107,25 @@ func Migration(sdlSrc string) (string, error) {
 	return migrate.Init(m), nil
 }
 
+// Schema parses and validates the SDL and returns the PostgreSQL DDL generated
+// from it: the vertex and edge tables, their indexes, and the
+// CREATE PROPERTY GRAPH that maps them.
+//
+// It is the same model Migration renders into a goose file, without the goose
+// framing — the schema a compiled query runs against, so the playground can show
+// the two side by side.
+func Schema(sdlSrc string) (string, error) {
+	doc, err := sdl.Parse(sdlSrc)
+	if err != nil {
+		return "", err
+	}
+	m, err := generator.Build(doc, "")
+	if err != nil {
+		return "", err
+	}
+	return generator.DDL(m), nil
+}
+
 // Compiled is the output of Compile: the GRAPH_TABLE SQL and a human-readable
 // rendering of its ordered bind parameters. Both are pure functions of the
 // inputs — no database is consulted (SPEC.md §6.1).
@@ -78,19 +138,47 @@ type Compiled struct {
 }
 
 // Compile parses the SDL and compiles the GraphQL query against it, resolving
-// any variables from vars. It returns the emitted SQL and the ordered bind
-// parameters — proving values travel as parameters, never interpolated
-// (SPEC.md §6.2). It never executes the query.
+// any variables from vars, at the compiler's default traversal-depth ceiling.
+// It returns the emitted SQL and the ordered bind parameters — proving values
+// travel as parameters, never interpolated (SPEC.md §6.2). It never executes the
+// query.
 func Compile(sdlSrc, query string, vars map[string]any) (Compiled, error) {
+	return CompileWithMaxDepth(sdlSrc, query, vars, MaxDepth())
+}
+
+// CompileWithMaxDepth is Compile with an explicit traversal-depth ceiling, in
+// hops from the root field. It exists because MaxDepth is per-Compiler
+// configuration rather than a constant (SPEC.md §6.2): letting a reader move the
+// limit and watch one query flip between compiling and being refused shows that
+// better than any prose. A negative ceiling is clamped to zero, which permits no
+// traversal at all.
+func CompileWithMaxDepth(sdlSrc, query string, vars map[string]any, maxDepth int) (Compiled, error) {
 	doc, err := sdl.Parse(sdlSrc)
 	if err != nil {
 		return Compiled{}, err
 	}
-	sql, args, err := compiler.New(doc).Compile(query, vars)
+	sql, args, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).Compile(query, vars)
 	if err != nil {
 		return Compiled{}, err
 	}
 	return Compiled{SQL: sql, Params: renderParams(args)}, nil
+}
+
+// MaxDepth reports the compiler's default traversal-depth ceiling: what the
+// playground starts at, and what it falls back to when no ceiling is given.
+func MaxDepth() int { return compiler.DefaultMaxDepth }
+
+// DepthExceeded classifies a Compile error: it reports whether the compiler
+// refused the query for nesting past its depth ceiling, and what that ceiling
+// was. It is what lets the playground present a depth rejection as the designed
+// outcome it is, rather than as a generic error (SPEC.md §10: depth limits
+// reject rather than truncate).
+func DepthExceeded(err error) (limit int, ok bool) {
+	var depthErr *compiler.DepthExceededError
+	if errors.As(err, &depthErr) {
+		return depthErr.MaxDepth, true
+	}
+	return 0, false
 }
 
 // Delta generates the delta migration between two SDL revisions. It builds the

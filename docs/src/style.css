@@ -13,7 +13,7 @@ body {
 }
 
 main {
-  max-width: 1180px;
+  max-width: 1320px;
   margin: 0 auto;
   padding: var(--ga-space-8, 32px) var(--ga-space-6, 24px) var(--ga-space-12, 48px);
 }
@@ -36,24 +36,54 @@ header ga-note {
   max-width: 68ch;
 }
 
-/* Two columns: editor on the left, tabbed outputs on the right. */
-.io {
+/* A scenario reads left to right: inputs, the button that runs them, results.
+   Each tab holds one (the Migration tab stacks two). */
+.scenario {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   gap: var(--ga-space-6, 24px);
   align-items: start;
 }
 
-@media (max-width: 860px) {
-  .io {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.editor {
+.inputs,
+.results {
   display: flex;
   flex-direction: column;
   gap: var(--ga-space-2, 8px);
+  min-width: 0;
+}
+
+/* The button sits between the two columns, vertically centred so it reads as
+   the step that turns one into the other. */
+.action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--ga-space-2, 8px);
+  align-self: center;
+  text-align: center;
+}
+
+/* Below the breakpoint the three columns become one flow: inputs, then the
+   button, then results. */
+@media (max-width: 900px) {
+  .scenario {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .action {
+    flex-direction: row;
+    justify-content: flex-start;
+    align-self: stretch;
+    text-align: left;
+  }
+}
+
+/* Separates the two stacked scenarios on the Migration tab. */
+.scenario-sep {
+  border: 0;
+  border-top: 1px solid var(--ga-border, #1a1a1a);
+  margin: var(--ga-space-8, 32px) 0 var(--ga-space-6, 24px);
 }
 
 label {
@@ -63,7 +93,8 @@ label {
   margin-top: var(--ga-space-3, 12px);
 }
 
-.editor > label:first-of-type {
+.inputs > label:first-of-type,
+.results > label:first-of-type {
   margin-top: 0;
 }
 
@@ -82,6 +113,13 @@ label {
     box-shadow var(--ga-transition, 0.18s ease);
 }
 
+/* A single number sitting among the code editors — same styling, sized to its
+   content rather than to the column. */
+.num-input {
+  max-width: 10rem;
+  resize: none;
+}
+
 .code-input::placeholder {
   color: var(--ga-dim, #454545);
 }
@@ -97,16 +135,13 @@ label {
     color-mix(in srgb, var(--ga-accent, #54a2ff) 25%, transparent);
 }
 
-.controls {
-  display: flex;
-  align-items: center;
-  gap: var(--ga-space-3, 12px);
-  margin-top: var(--ga-space-4, 16px);
-}
-
 .status {
   font-size: var(--ga-fs-sm, 14px);
   color: var(--ga-muted, #878787);
+}
+
+#boot {
+  margin: 0 0 var(--ga-space-6, 24px);
 }
 .status.ok {
   color: var(--ga-green, #00c758);
@@ -115,14 +150,9 @@ label {
   color: var(--ga-red, #ff6568);
 }
 
-.panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--ga-space-2, 8px);
-}
-
 .panel-hint {
-  margin: 0 0 var(--ga-space-2, 8px);
+  margin: 0 0 var(--ga-space-4, 16px);
+  max-width: 90ch;
   font-size: var(--ga-fs-sm, 14px);
   color: var(--ga-muted, #878787);
 }

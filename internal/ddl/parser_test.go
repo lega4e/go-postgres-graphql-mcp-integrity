@@ -268,3 +268,30 @@ func TestParseErrorMentionsOffset(t *testing.T) {
 		t.Fatalf("expected an error mentioning an offset, got %v", err)
 	}
 }
+
+// TestParsePropertyGraphMultipleLabels covers a vertex table carrying several
+// LABEL clauses — how gopgql maps a GraphQL interface to a label shared across
+// tables (SPEC.md §7 → M4). Fold must read back everything the generator writes.
+func TestParsePropertyGraphMultipleLabels(t *testing.T) {
+	src := `CREATE PROPERTY GRAPH app_graph
+	  VERTEX TABLES (
+	    bots LABEL bot PROPERTIES (id, name, vendor)
+	         LABEL actor PROPERTIES (id, name),
+	    persons LABEL person PROPERTIES (id, name, email)
+	            LABEL actor PROPERTIES (id, name)
+	  )`
+	g := parseOne(t, src).(*CreatePropertyGraphStmt)
+	want := []VertexTableDef{
+		{
+			Table: "bots", Label: "bot", Properties: []string{"id", "name", "vendor"},
+			ExtraLabels: []LabelDef{{Label: "actor", Properties: []string{"id", "name"}}},
+		},
+		{
+			Table: "persons", Label: "person", Properties: []string{"id", "name", "email"},
+			ExtraLabels: []LabelDef{{Label: "actor", Properties: []string{"id", "name"}}},
+		},
+	}
+	if !reflect.DeepEqual(g.Vertices, want) {
+		t.Errorf("vertices = %+v, want %+v", g.Vertices, want)
+	}
+}

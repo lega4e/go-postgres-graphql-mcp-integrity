@@ -2,7 +2,7 @@
 // plus ordered bind parameters. Compilation is pure — it never contacts a
 // database (SPEC.md §6.1) — so it compiles to WASM.
 //
-// M3 extends the M1 single-vertex compiler with one-hop traversal, field
+// M3 extended the M1 single-vertex compiler with one-hop traversal, field
 // arguments and query variables (SPEC.md §7 → M3):
 //
 //   - A nested relationship selection extends the MATCH pattern with a single
@@ -15,10 +15,26 @@
 //     shape package can regroup the flat rows and deduplicate parents across a
 //     one-to-many fan-out.
 //
-// Multi-hop traversal (a second edge) is rejected with a clear error pointing at
-// M4, and a selection that needs comma-separated patterns (more than one
-// relationship at a level) is rejected pointing at M5 — no silent fallbacks
-// (SPEC.md §10).
+// M4 lifts the one-hop restriction and adds the three things that come with
+// longer patterns (SPEC.md §7 → M4):
+//
+//   - Multi-hop MATCH chains. Nesting keeps extending one pattern, so a 3-hop
+//     query is still a single GRAPH_TABLE.
+//   - A depth ceiling. A selection nested deeper than MaxDepth (default 3)
+//     fails compilation with a typed *DepthExceededError and never reaches the
+//     database. PG19 has no variable-length paths, so gopgql rejects rather than
+//     truncates (SPEC.md §3, decision 3).
+//   - Interfaces. A vertex position may be an interface, matched either by the
+//     shared label its implementors carry or by label alternation over their own
+//     labels, `(v0 IS bot|person)`.
+//   - Edge-isomorphism guards. PostgreSQL does not enforce isomorphism, so a
+//     pattern will happily bind one row to two positions — a self-follow, or a
+//     three-hop path that walks back to where it started. Wherever two positions
+//     could bind the same row, the compiler emits `vi.id <> vj.id` (SPEC.md
+//     §2.2).
+//
+// A selection that needs comma-separated patterns (more than one relationship at
+// a level) is still rejected pointing at M5 — no silent fallbacks (SPEC.md §10).
 package compiler
 
 import (
@@ -34,10 +50,46 @@ import (
 	"github.com/lega4e/gopgql/sdl"
 )
 
+// DefaultMaxDepth is the traversal-depth ceiling applied when none is
+// configured: three hops from the root field (SPEC.md §6.2).
+const DefaultMaxDepth = 3
+
+// DepthExceededError reports a selection nested deeper than the compiler's
+// MaxDepth. It is returned at compile time — before any SQL is emitted and so
+// before anything is sent to the database.
+//
+// SQL/PGQ has no quantified or variable-length paths, so an unbounded traversal
+// cannot be expressed at all; gopgql rejects rather than silently truncating
+// the pattern (SPEC.md §3, decision 3, and §10).
+type DepthExceededError struct {
+	// MaxDepth is the configured ceiling, in hops from the root field.
+	MaxDepth int
+	// Depth is the hop count the offending selection would have required.
+	Depth int
+	// Path is the response-key path to the offending field, root first.
+	Path []string
+	// TypeName is the GraphQL type declaring the offending field.
+	TypeName string
+	// Field is the offending relationship field's name.
+	Field string
+}
+
+func (e *DepthExceededError) Error() string {
+	hops := "hops"
+	if e.Depth == 1 {
+		hops = "hop"
+	}
+	return fmt.Sprintf(
+		"compiler: %s.%s at %s is %d %s from the root, past MaxDepth %d; "+
+			"SQL/PGQ has no variable-length paths, so gopgql rejects rather than truncating",
+		e.TypeName, e.Field, strings.Join(e.Path, "."), e.Depth, hops, e.MaxDepth)
+}
+
 // Compiler compiles GraphQL operations against a fixed SDL document.
 type Compiler struct {
 	doc       *sdl.Document
 	graphName string
+	maxDepth  int
 }
 
 // Option configures a Compiler.
@@ -49,9 +101,25 @@ func WithGraphName(name string) Option {
 	return func(c *Compiler) { c.graphName = name }
 }
 
+// WithMaxDepth sets the traversal-depth ceiling, in hops from the root field
+// (DefaultMaxDepth by default). A selection past it fails compilation with a
+// *DepthExceededError. Zero permits no traversal at all; negatives are clamped
+// to zero.
+func WithMaxDepth(n int) Option {
+	return func(c *Compiler) {
+		if n < 0 {
+			n = 0
+		}
+		c.maxDepth = n
+	}
+}
+
+// MaxDepth reports the configured traversal-depth ceiling.
+func (c *Compiler) MaxDepth() int { return c.maxDepth }
+
 // New returns a Compiler for the given SDL document.
 func New(doc *sdl.Document, opts ...Option) *Compiler {
-	c := &Compiler{doc: doc, graphName: generator.DefaultGraphName}
+	c := &Compiler{doc: doc, graphName: generator.DefaultGraphName, maxDepth: DefaultMaxDepth}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -88,7 +156,9 @@ type Selection struct {
 	KeyColumn string
 	// Fields are the projected scalar fields in selection order.
 	Fields []ProjectedField
-	// Children are nested relationship levels (at most one in M3).
+	// Children are nested relationship levels. At most one per level until
+	// comma-separated patterns arrive in M5, but nesting may now run several
+	// levels deep (SPEC.md §7 → M4).
 	Children []*Selection
 }
 
@@ -141,9 +211,10 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 	}
 	root := roots[0]
 
-	node := c.doc.NodeByTable(root.Name)
-	if node == nil {
-		return nil, fmt.Errorf("compiler: unknown root field %q; no @node maps to table %q", root.Name, root.Name)
+	target := c.doc.RootTarget(root.Name)
+	if target == nil {
+		return nil, fmt.Errorf("compiler: unknown root field %q; queryable root fields are %s",
+			root.Name, strings.Join(c.doc.RootFields(), ", "))
 	}
 
 	varDefs := map[string]*ast.VariableDefinition{}
@@ -151,8 +222,8 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		varDefs[vd.Variable] = vd
 	}
 
-	b := &builder{doc: c.doc, vars: vars, varDefs: varDefs}
-	rootSel, err := b.vertex(node, root, 0)
+	b := &builder{doc: c.doc, vars: vars, varDefs: varDefs, maxDepth: c.maxDepth}
+	rootSel, err := b.vertex(target, root, 0, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -164,9 +235,10 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 // builder accumulates the MATCH pattern, projected columns, WHERE predicates and
 // bind parameters while walking a single root field's selection tree.
 type builder struct {
-	doc     *sdl.Document
-	vars    map[string]any
-	varDefs map[string]*ast.VariableDefinition
+	doc      *sdl.Document
+	vars     map[string]any
+	varDefs  map[string]*ast.VariableDefinition
+	maxDepth int
 
 	aliasN  int
 	edgeN   int
@@ -175,20 +247,32 @@ type builder struct {
 	outs    []string        // SELECT output names, e.g. "v0_c0"
 	preds   []string        // WHERE predicates, e.g. "v0.name = $1"
 	args    []any           // bind parameters in $-order
+	verts   []vertexPos     // every vertex position, for the isomorphism guards
+}
+
+// vertexPos is one vertex position in the emitted pattern: its alias and the
+// tables a row bound there can come from.
+type vertexPos struct {
+	alias  string
+	tables []string
 }
 
 // vertex walks one vertex level: it writes the vertex pattern, projects the
 // hidden key column and the requested scalar fields, turns field arguments into
 // bind-parameter predicates, and recurses into a single nested relationship.
-// depth is the current traversal depth (0 at the root); one edge is allowed
-// (depth 0 → 1), a second is rejected pointing at M4.
-func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selection, error) {
+//
+// depth is the current traversal depth in hops from the root field (0 at the
+// root); path is the response-key trail to this level, used to name the
+// offending selection when the depth ceiling is hit.
+func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []string) (*Selection, error) {
 	if len(field.SelectionSet) == 0 {
-		return nil, fmt.Errorf("compiler: %s (%q) must select at least one field", node.TypeName, responseKey(field))
+		return nil, fmt.Errorf("compiler: %s (%q) must select at least one field", t.TypeName, responseKey(field))
 	}
 
 	alias := b.newAlias()
-	b.writeVertex(alias, node.Label)
+	b.writeVertex(alias, t.Labels)
+	b.verts = append(b.verts, vertexPos{alias: alias, tables: t.Tables})
+	path = append(append([]string{}, path...), responseKey(field))
 
 	sel := &Selection{ResponseKey: responseKey(field), Alias: alias}
 
@@ -200,7 +284,7 @@ func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selectio
 
 	// Field arguments become predicates on this vertex, bound as parameters.
 	for _, arg := range field.Arguments {
-		if err := b.predicate(node, alias, arg); err != nil {
+		if err := b.predicate(t, alias, arg); err != nil {
 			return nil, err
 		}
 	}
@@ -212,17 +296,17 @@ func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selectio
 		if !ok {
 			return nil, fmt.Errorf("compiler: fragments are not supported until a later milestone")
 		}
-		def := findField(node, f.Name)
+		def := findField(t.Fields, f.Name)
 		if def == nil {
-			return nil, fmt.Errorf("compiler: %s has no field %q", node.TypeName, f.Name)
+			return nil, fmt.Errorf("compiler: %s has no field %q", t.TypeName, f.Name)
 		}
 		switch {
 		case def.IsScalarColumn():
 			if len(f.SelectionSet) > 0 {
-				return nil, fmt.Errorf("compiler: %s.%s is a scalar and cannot have a subselection", node.TypeName, f.Name)
+				return nil, fmt.Errorf("compiler: %s.%s is a scalar and cannot have a subselection", t.TypeName, f.Name)
 			}
 			if len(f.Arguments) > 0 {
-				return nil, fmt.Errorf("compiler: arguments on scalar field %s.%s are not supported", node.TypeName, f.Name)
+				return nil, fmt.Errorf("compiler: arguments on scalar field %s.%s are not supported", t.TypeName, f.Name)
 			}
 			col := fmt.Sprintf("%s_c%d", alias, len(sel.Fields))
 			b.addColumn(alias, def.Name, col)
@@ -231,33 +315,37 @@ func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selectio
 			if relField != nil {
 				return nil, fmt.Errorf(
 					"compiler: %s selects more than one relationship (%q and %q); comma-separated patterns arrive in M5",
-					node.TypeName, relField.Name, f.Name)
+					t.TypeName, relField.Name, f.Name)
 			}
 			relField, relDef = f, def
 		default:
 			// @ignore fields have no column and no relationship.
 			return nil, fmt.Errorf("compiler: %s.%s is not queryable (it maps to no column or relationship)",
-				node.TypeName, f.Name)
+				t.TypeName, f.Name)
 		}
 	}
 
 	if relField != nil {
-		if depth >= 1 {
-			return nil, fmt.Errorf(
-				"compiler: %s.%s is a second traversal hop; multi-hop MATCH chains arrive in M4",
-				node.TypeName, relField.Name)
+		if depth+1 > b.maxDepth {
+			return nil, &DepthExceededError{
+				MaxDepth: b.maxDepth,
+				Depth:    depth + 1,
+				Path:     append(append([]string{}, path...), responseKey(relField)),
+				TypeName: t.TypeName,
+				Field:    relField.Name,
+			}
 		}
-		target := b.doc.NodeByType(relDef.TypeName)
-		if target == nil {
+		child := b.doc.TargetForType(relDef.TypeName)
+		if child == nil {
 			return nil, fmt.Errorf("compiler: %s.%s targets %q, which is not a @node type",
-				node.TypeName, relField.Name, relDef.TypeName)
+				t.TypeName, relField.Name, relDef.TypeName)
 		}
 		b.writeEdge(relDef.Rel)
-		child, err := b.vertex(target, relField, depth+1)
+		childSel, err := b.vertex(child, relField, depth+1, path)
 		if err != nil {
 			return nil, err
 		}
-		sel.Children = append(sel.Children, child)
+		sel.Children = append(sel.Children, childSel)
 	}
 
 	return sel, nil
@@ -267,14 +355,14 @@ func (b *builder) vertex(node *sdl.Node, field *ast.Field, depth int) (*Selectio
 // WHERE predicate `alias.property = $n`. The argument name must be a scalar
 // property of node (validated against the allowlist); the value is bound, never
 // interpolated (SPEC.md §6.2).
-func (b *builder) predicate(node *sdl.Node, alias string, arg *ast.Argument) error {
-	def := findField(node, arg.Name)
+func (b *builder) predicate(t *sdl.Target, alias string, arg *ast.Argument) error {
+	def := findField(t.Fields, arg.Name)
 	if def == nil {
-		return fmt.Errorf("compiler: %s has no field %q to filter on", node.TypeName, arg.Name)
+		return fmt.Errorf("compiler: %s has no field %q to filter on", t.TypeName, arg.Name)
 	}
 	if !def.IsScalarColumn() {
 		return fmt.Errorf("compiler: argument %s.%s must be a scalar property (relationship filters are not supported)",
-			node.TypeName, arg.Name)
+			t.TypeName, arg.Name)
 	}
 	val, err := b.value(arg.Value)
 	if err != nil {
@@ -324,8 +412,14 @@ func (b *builder) value(v *ast.Value) (any, error) {
 }
 
 // writeVertex appends a vertex pattern `(alias IS label)` to the MATCH path.
-func (b *builder) writeVertex(alias, label string) {
-	fmt.Fprintf(&b.match, "(%s IS %s)", alias, pgident.Quote(label))
+// An interface matched by alternation contributes several labels, which are
+// joined with `|` into one label expression: `(v0 IS bot|person)`.
+func (b *builder) writeVertex(alias string, labels []string) {
+	quoted := make([]string, len(labels))
+	for i, l := range labels {
+		quoted[i] = pgident.Quote(l)
+	}
+	fmt.Fprintf(&b.match, "(%s IS %s)", alias, strings.Join(quoted, "|"))
 }
 
 // writeEdge appends a single directed edge pattern to the MATCH path. An OUT
@@ -351,13 +445,49 @@ func (b *builder) addColumn(alias, property, out string) {
 	b.outs = append(b.outs, out)
 }
 
-// render assembles the final GRAPH_TABLE statement.
+// isomorphismGuards returns the `vi.id <> vj.id` predicates that exclude a
+// pattern from binding one row to two positions.
+//
+// PostgreSQL does not enforce isomorphism (SPEC.md §2.2), so without these a
+// self-follow satisfies `(a)-[follows]->(b)` with a = b, and a three-hop chain
+// happily walks back to the vertex it started from. A guard is emitted for each
+// pair of positions whose tables intersect — the only pairs that *can* bind the
+// same row; positions over disjoint tables need none.
+func (b *builder) isomorphismGuards() []string {
+	var out []string
+	id := pgident.Quote("id")
+	for i := range b.verts {
+		for j := i + 1; j < len(b.verts); j++ {
+			if !overlaps(b.verts[i].tables, b.verts[j].tables) {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s.%s <> %s.%s", b.verts[i].alias, id, b.verts[j].alias, id))
+		}
+	}
+	return out
+}
+
+// overlaps reports whether two sorted table-name sets share a member.
+func overlaps(a, c []string) bool {
+	for _, x := range a {
+		for _, y := range c {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// render assembles the final GRAPH_TABLE statement. Argument predicates come
+// first so the emitted $n order matches the args slice; the isomorphism guards,
+// which bind nothing, follow.
 func (b *builder) render(graphName string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "SELECT %s\nFROM GRAPH_TABLE (%s\n  MATCH %s\n",
 		strings.Join(b.outs, ", "), pgident.Quote(graphName), b.match.String())
-	if len(b.preds) > 0 {
-		fmt.Fprintf(&sb, "  WHERE %s\n", strings.Join(b.preds, " AND "))
+	if where := append(append([]string{}, b.preds...), b.isomorphismGuards()...); len(where) > 0 {
+		fmt.Fprintf(&sb, "  WHERE %s\n", strings.Join(where, " AND "))
 	}
 	fmt.Fprintf(&sb, "  COLUMNS (%s)\n)", strings.Join(b.columns, ", "))
 	return sb.String()
@@ -388,8 +518,8 @@ func responseKey(f *ast.Field) string {
 	return f.Name
 }
 
-func findField(node *sdl.Node, name string) *sdl.Field {
-	for _, f := range node.Fields {
+func findField(fields []*sdl.Field, name string) *sdl.Field {
+	for _, f := range fields {
 		if f.Name == name {
 			return f
 		}

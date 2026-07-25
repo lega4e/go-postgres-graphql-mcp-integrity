@@ -250,11 +250,16 @@ func (f *folder) build() (*schema.Schema, error) {
 		if !ok {
 			return nil, fmt.Errorf("migrate: graph vertex table %q was never created", v.Table)
 		}
+		var extra []schema.LabelProperties
+		for _, l := range v.ExtraLabels {
+			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
+		}
 		m.VertexTables = append(m.VertexTables, schema.VertexTable{
-			Name:       v.Table,
-			Label:      v.Label,
-			Columns:    cols,
-			Properties: v.Properties,
+			Name:        v.Table,
+			Label:       v.Label,
+			Columns:     cols,
+			Properties:  v.Properties,
+			ExtraLabels: extra,
 		})
 	}
 	for _, e := range f.graph.Edges {

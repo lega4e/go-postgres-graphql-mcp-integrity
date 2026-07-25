@@ -23,8 +23,9 @@ vuln:
 wasm:
 	bash scripts/build-wasm.sh
 
-# Build the docs site (implies wasm).
-docs: wasm
+# Build the docs site. npm's prebuild hook stages the WASM module first, so the
+# site can never be built against a stale one.
+docs:
 	cd docs && npm ci && npm run build
 
 all: build vet lint test

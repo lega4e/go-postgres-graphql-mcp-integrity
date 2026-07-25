@@ -447,25 +447,46 @@ func (p *parser) createPropertyGraph() (Statement, error) {
 	return st, nil
 }
 
+// vertexTableDef parses one VERTEX TABLES entry. A vertex table carries at
+// least one LABEL clause and may carry several — the shared-label mapping of a
+// GraphQL interface puts one label on each implementor's table (SPEC.md §7 →
+// M4) — so every further clause is read into ExtraLabels.
 func (p *parser) vertexTableDef() (VertexTableDef, error) {
 	var v VertexTableDef
 	var err error
 	if v.Table, err = p.ident("vertex table"); err != nil {
 		return v, err
 	}
-	if err = p.expectKeyword("LABEL"); err != nil {
+	first, err := p.labelClause("vertex label")
+	if err != nil {
 		return v, err
 	}
-	if v.Label, err = p.ident("vertex label"); err != nil {
-		return v, err
-	}
-	if err = p.expectKeyword("PROPERTIES"); err != nil {
-		return v, err
-	}
-	if v.Properties, err = p.parenIdentList(); err != nil {
-		return v, err
+	v.Label, v.Properties = first.Label, first.Properties
+	for p.keywordAt(0, "LABEL") {
+		extra, err := p.labelClause("vertex label")
+		if err != nil {
+			return v, err
+		}
+		v.ExtraLabels = append(v.ExtraLabels, extra)
 	}
 	return v, nil
+}
+
+// labelClause parses "LABEL <label> PROPERTIES ( <properties> )".
+func (p *parser) labelClause(what string) (LabelDef, error) {
+	var l LabelDef
+	var err error
+	if err = p.expectKeyword("LABEL"); err != nil {
+		return l, err
+	}
+	if l.Label, err = p.ident(what); err != nil {
+		return l, err
+	}
+	if err = p.expectKeyword("PROPERTIES"); err != nil {
+		return l, err
+	}
+	l.Properties, err = p.parenIdentList()
+	return l, err
 }
 
 func (p *parser) edgeTableDef() (EdgeTableDef, error) {
@@ -480,18 +501,11 @@ func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 	if e.DestKey, e.DestTable, e.DestRef, err = p.keyReference("DESTINATION"); err != nil {
 		return e, err
 	}
-	if err = p.expectKeyword("LABEL"); err != nil {
+	label, err := p.labelClause("edge label")
+	if err != nil {
 		return e, err
 	}
-	if e.Label, err = p.ident("edge label"); err != nil {
-		return e, err
-	}
-	if err = p.expectKeyword("PROPERTIES"); err != nil {
-		return e, err
-	}
-	if e.Properties, err = p.parenIdentList(); err != nil {
-		return e, err
-	}
+	e.Label, e.Properties = label.Label, label.Properties
 	return e, nil
 }
 

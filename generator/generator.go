@@ -50,6 +50,10 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 		m.VertexTables = append(m.VertexTables, vt)
 	}
 
+	if err := attachInterfaceLabels(m, doc); err != nil {
+		return nil, err
+	}
+
 	edges := collectEdges(doc)
 	for _, e := range edges {
 		m.EdgeTables = append(m.EdgeTables, e)
@@ -91,6 +95,59 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 		vt.Properties = append(vt.Properties, f.Name)
 	}
 	return vt, nil
+}
+
+// attachInterfaceLabels gives every implementor's vertex table the shared label
+// of each interface it implements, exposing exactly the interface's own scalar
+// fields under it (SPEC.md §7 → M4).
+//
+// Because GraphQL requires an implementor to declare every interface field with
+// the same type, the property lists are aligned by count, name and type across
+// all the tables carrying that label — SPEC.md §5.3 invariant 5, which
+// PostgreSQL enforces when the graph is created. Unlabelled interfaces
+// contribute no label: they are matched by alternation over the implementors'
+// own labels instead.
+func attachInterfaceLabels(m *schema.Schema, doc *sdl.Document) error {
+	byTable := map[string]*schema.VertexTable{}
+	for i := range m.VertexTables {
+		byTable[m.VertexTables[i].Name] = &m.VertexTables[i]
+	}
+
+	for _, iface := range doc.Interfaces {
+		if iface.Label == "" {
+			continue
+		}
+		var props []string
+		for _, f := range iface.Fields {
+			if f.IsScalarColumn() {
+				props = append(props, f.Name)
+			}
+		}
+		if len(props) == 0 {
+			return fmt.Errorf("generator: interface %s (@node) exposes no columns; "+
+				"a shared label needs at least the key property", iface.TypeName)
+		}
+		for _, impl := range iface.Implementors {
+			vt, ok := byTable[impl.Table]
+			if !ok {
+				return fmt.Errorf("generator: interface %s is implemented by %s, whose table %q has no vertex table",
+					iface.TypeName, impl.TypeName, impl.Table)
+			}
+			if iface.Label == vt.Label {
+				return fmt.Errorf("generator: interface %s and type %s both claim the label %q",
+					iface.TypeName, impl.TypeName, iface.Label)
+			}
+			vt.ExtraLabels = append(vt.ExtraLabels, schema.LabelProperties{Label: iface.Label, Properties: props})
+		}
+	}
+
+	// Stable label order per table so generated DDL is deterministic.
+	for i := range m.VertexTables {
+		sort.SliceStable(m.VertexTables[i].ExtraLabels, func(a, b int) bool {
+			return m.VertexTables[i].ExtraLabels[a].Label < m.VertexTables[i].ExtraLabels[b].Label
+		})
+	}
+	return nil
 }
 
 // collectEdges builds one physical edge table per relationship label. An OUT
@@ -245,8 +302,16 @@ func GraphDDL(m *schema.Schema) string {
 	b.WriteString("  VERTEX TABLES (\n")
 	vlines := make([]string, len(m.VertexTables))
 	for i, vt := range m.VertexTables {
-		vlines[i] = fmt.Sprintf("    %s LABEL %s PROPERTIES (%s)",
+		var vb strings.Builder
+		fmt.Fprintf(&vb, "    %s LABEL %s PROPERTIES (%s)",
 			pgident.Quote(vt.Name), pgident.Quote(vt.Label), quoteList(vt.Properties))
+		// A shared label — one interface, several tables — is a further LABEL
+		// clause on the same table (SPEC.md §7 → M4).
+		for _, extra := range vt.ExtraLabels {
+			fmt.Fprintf(&vb, "\n            LABEL %s PROPERTIES (%s)",
+				pgident.Quote(extra.Label), quoteList(extra.Properties))
+		}
+		vlines[i] = vb.String()
 	}
 	b.WriteString(strings.Join(vlines, ",\n"))
 	b.WriteString("\n  )")
@@ -301,32 +366,118 @@ func validateInvariants(m *schema.Schema) error {
 			return fmt.Errorf("generator: edge %q has no index on destination key %q (invariant 2)", e.Name, e.DestKey)
 		}
 	}
-	// 4 & 5. Table names (aliases) are unique within the graph, and no label
-	// spans multiple tables (M1 is one table per label).
+	// 4. Table names (aliases) are unique within the graph.
 	tables := map[string]bool{}
-	vLabels := map[string]bool{}
-	eLabels := map[string]bool{}
 	for _, vt := range m.VertexTables {
 		if tables[vt.Name] {
 			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", vt.Name)
 		}
 		tables[vt.Name] = true
-		if vLabels[vt.Label] {
-			return fmt.Errorf("generator: vertex label %q spans multiple tables; unsupported in M1 (invariant 5)", vt.Label)
-		}
-		vLabels[vt.Label] = true
 	}
 	for _, e := range m.EdgeTables {
 		if tables[e.Name] {
 			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", e.Name)
 		}
 		tables[e.Name] = true
-		if eLabels[e.Label] {
-			return fmt.Errorf("generator: edge label %q spans multiple tables; unsupported in M1 (invariant 5)", e.Label)
+	}
+
+	// 5. A label may span several tables, but every table carrying it must
+	// expose the same properties under it.
+	return validateLabelAlignment(m)
+}
+
+// labelUse is one table's exposure of a label: the property list it publishes
+// under that label, and each property's PostgreSQL type.
+type labelUse struct {
+	table string
+	props []string
+	types map[string]string
+}
+
+// validateLabelAlignment enforces SPEC.md §5.3 invariant 5 and the graph-wide
+// property typing rule PostgreSQL applies.
+//
+// A label may be carried by several tables — that is how an interface is mapped
+// — but PostgreSQL rejects a graph whose tables disagree about that label's
+// properties ("mismatching number of properties" / "mismatching property
+// names"). It further requires one type per property name across the whole
+// graph. Checking both here turns a database error into a generate-time one.
+func validateLabelAlignment(m *schema.Schema) error {
+	uses := map[string][]labelUse{}
+	order := []string{}
+	add := func(label string, use labelUse) {
+		if _, seen := uses[label]; !seen {
+			order = append(order, label)
 		}
-		eLabels[e.Label] = true
+		uses[label] = append(uses[label], use)
+	}
+
+	for _, vt := range m.VertexTables {
+		types := columnTypes(vt.Columns)
+		add(vt.Label, labelUse{table: vt.Name, props: vt.Properties, types: types})
+		for _, extra := range vt.ExtraLabels {
+			add(extra.Label, labelUse{table: vt.Name, props: extra.Properties, types: types})
+		}
+	}
+	for _, e := range m.EdgeTables {
+		add(e.Label, labelUse{table: e.Name, props: e.Properties, types: columnTypes(e.Columns)})
+	}
+
+	// Per-label alignment: same count, same names in order, same types.
+	for _, label := range order {
+		group := uses[label]
+		first := group[0]
+		for _, use := range group[1:] {
+			if len(use.props) != len(first.props) {
+				return fmt.Errorf("generator: label %q exposes %d properties on %q but %d on %q; "+
+					"tables sharing a label must align (invariant 5)",
+					label, len(first.props), first.table, len(use.props), use.table)
+			}
+			for i, name := range first.props {
+				if use.props[i] != name {
+					return fmt.Errorf("generator: label %q exposes property %d as %q on %q but %q on %q; "+
+						"tables sharing a label must align (invariant 5)",
+						label, i+1, name, first.table, use.props[i], use.table)
+				}
+			}
+		}
+	}
+
+	// Graph-wide: one type per property name.
+	propType := map[string]string{}
+	propOwner := map[string]string{}
+	for _, label := range order {
+		for _, use := range uses[label] {
+			for _, name := range use.props {
+				typ, ok := use.types[name]
+				if !ok {
+					return fmt.Errorf("generator: label %q exposes property %q, which table %q has no column for",
+						label, name, use.table)
+				}
+				if prev, seen := propType[name]; seen && prev != typ {
+					return fmt.Errorf("generator: property %q is %s on %q but %s on %q; "+
+						"a property name has one type across the whole graph",
+						name, prev, propOwner[name], typ, use.table)
+				}
+				propType[name] = typ
+				propOwner[name] = use.table
+			}
+		}
 	}
 	return nil
+}
+
+// columnTypes maps a table's column names to their rendered PostgreSQL types.
+func columnTypes(cols []schema.Column) map[string]string {
+	out := make(map[string]string, len(cols))
+	for _, c := range cols {
+		typ := c.Type
+		if c.Array {
+			typ += "[]"
+		}
+		out[c.Name] = typ
+	}
+	return out
 }
 
 func hasDestIndex(m *schema.Schema, e schema.EdgeTable) bool {
