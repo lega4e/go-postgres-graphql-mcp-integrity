@@ -35,7 +35,11 @@ jobs:
           npm run build
         working-directory: docs
 
+      # keep_files preserves the pr-preview/pr-<N>/ directories that
+      # pr-preview.yml maintains on this same gh-pages branch; without it every
+      # push to main replaces the branch wholesale and wipes all open previews.
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs/dist
+          keep_files: true
