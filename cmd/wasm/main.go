@@ -9,8 +9,9 @@
 // never fabricates query results, which would require rows from PostgreSQL
 // (SPEC.md §4).
 //
-// Three functions are exported:
+// Four functions are exported:
 //
+//   - gopgqlSchema(sdl) -> {schema, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
 //   - gopgqlCompile(sdl, query, varsJSON) -> {sql, params, error, depthExceeded, maxDepth}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
@@ -29,6 +30,7 @@ import (
 )
 
 func main() {
+	js.Global().Set("gopgqlSchema", js.FuncOf(schemaDDL))
 	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
 	js.Global().Set("gopgqlCompile", js.FuncOf(compile))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
@@ -46,6 +48,24 @@ func main() {
 	}
 	// Block forever so the exported functions stay callable.
 	select {}
+}
+
+// schemaDDL is bound to window.gopgqlSchema. It expects one string argument:
+// the SDL document. It returns the DDL the schema generates — the tables and
+// property graph a compiled query runs against.
+func schemaDDL(_ js.Value, args []js.Value) any {
+	result := map[string]any{"schema": "", "error": ""}
+	if len(args) < 1 || args[0].Type() != js.TypeString {
+		result["error"] = "gopgqlSchema expects (sdl) a string argument"
+		return js.ValueOf(result)
+	}
+	out, err := playground.Schema(args[0].String())
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["schema"] = out
+	return js.ValueOf(result)
 }
 
 // migration is bound to window.gopgqlMigration. It expects one string argument:

@@ -87,12 +87,16 @@ gone; and a fold-correctness scenario applies the folded output and a direct
 apply of the same final schema and asserts the resulting schemas are identical.
 
 The **WASM playground** (`cmd/wasm` + `docs/`) runs the real
-`sdl`+`generator`+`migrate`+`compiler` in the browser as compiled Go — paste two
-SDL revisions and a query, see the initial migration, the folded-and-diffed
-**delta migration**, and the emitted `GRAPH_TABLE`. Its *Depth limit* tab
-compiles a four-hop query and surfaces the typed `*DepthExceededError`; its
-*Interfaces* tab shows the shared `LABEL` clauses in the generated
-`CREATE PROPERTY GRAPH` and both interface mappings in the compiled pattern.
+`sdl`+`generator`+`migrate`+`compiler` in the browser as compiled Go. Each tab is
+one complete, editable scenario — schema and query in on the left, **Generate**
+in the middle, generated database schema and compiled query on the right:
+
+| Tab           | Scenario                                                                                             |
+|---------------|------------------------------------------------------------------------------------------------------|
+| *Traversal*   | The three-hop exit query: one `GRAPH_TABLE`, bind parameters, isomorphism guards.                     |
+| *Depth limit* | A four-hop query refused with the typed `*DepthExceededError`; shorten it and it compiles.            |
+| *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
+| *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|
 
 ## Layout
 

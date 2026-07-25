@@ -20,6 +20,26 @@ func TestMigration(t *testing.T) {
 	}
 }
 
+// TestSchema covers the DDL each scenario shows beside its compiled query: the
+// same model Migration renders, without the goose framing.
+func TestSchema(t *testing.T) {
+	ddl, err := playground.Schema(playground.ExampleSDL)
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+	if strings.Contains(ddl, "goose") {
+		t.Errorf("Schema must not carry goose framing:\n%s", ddl)
+	}
+	for _, want := range []string{"CREATE TABLE persons (", "CREATE PROPERTY GRAPH app_graph"} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("expected schema DDL to contain %q:\n%s", want, ddl)
+		}
+	}
+	if _, err := playground.Schema(`type Person { id: ID! }`); err == nil {
+		t.Error("expected error for SDL without @node")
+	}
+}
+
 func TestMigrationError(t *testing.T) {
 	if _, err := playground.Migration(`type Person { id: ID! }`); err == nil {
 		t.Error("expected error for SDL without @node")

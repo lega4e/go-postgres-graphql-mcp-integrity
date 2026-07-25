@@ -107,6 +107,25 @@ func Migration(sdlSrc string) (string, error) {
 	return migrate.Init(m), nil
 }
 
+// Schema parses and validates the SDL and returns the PostgreSQL DDL generated
+// from it: the vertex and edge tables, their indexes, and the
+// CREATE PROPERTY GRAPH that maps them.
+//
+// It is the same model Migration renders into a goose file, without the goose
+// framing — the schema a compiled query runs against, so the playground can show
+// the two side by side.
+func Schema(sdlSrc string) (string, error) {
+	doc, err := sdl.Parse(sdlSrc)
+	if err != nil {
+		return "", err
+	}
+	m, err := generator.Build(doc, "")
+	if err != nil {
+		return "", err
+	}
+	return generator.DDL(m), nil
+}
+
 // Compiled is the output of Compile: the GRAPH_TABLE SQL and a human-readable
 // rendering of its ordered bind parameters. Both are pure functions of the
 // inputs — no database is consulted (SPEC.md §6.1).
