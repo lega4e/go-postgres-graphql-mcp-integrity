@@ -204,3 +204,68 @@ func hasColumn(m *schema.Schema, table, col string) bool {
 	}
 	return false
 }
+
+// TestDeltaConstraintsAndIndexes covers the M6 differ additions: a UNIQUE
+// constraint gained by an existing column, an index added, and an index whose
+// definition moved — each with its exact inverse in the Down section
+// (SPEC.md §7 → M6).
+func TestDeltaConstraintsAndIndexes(t *testing.T) {
+	before := `type Product @node(label: "product") {
+  id: ID!
+  sku: String!
+  category: String! @index(name: "products_category_idx")
+}`
+	after := `type Product @node(label: "product") {
+  id: ID!
+  sku: String! @unique
+  category: String! @index(name: "products_category_idx", using: "hash")
+  vendor: String @index
+}`
+
+	up, down, changed := migrate.Delta(mustSchema(t, before), mustSchema(t, after))
+	if !changed {
+		t.Fatal("the schemas differ; changed must be true")
+	}
+	for _, want := range []string{
+		"ALTER TABLE products ADD CONSTRAINT products_sku_key UNIQUE (sku);",
+		"CREATE INDEX products_vendor_idx ON products (vendor);",
+		"DROP INDEX IF EXISTS products_category_idx;",
+		"CREATE INDEX products_category_idx ON products USING hash (category);",
+	} {
+		if !strings.Contains(up, want) {
+			t.Errorf("Up is missing %q:\n%s", want, up)
+		}
+	}
+	for _, want := range []string{
+		"ALTER TABLE products DROP CONSTRAINT products_sku_key;",
+		"DROP INDEX IF EXISTS products_vendor_idx;",
+		"CREATE INDEX products_category_idx ON products (category);",
+	} {
+		if !strings.Contains(down, want) {
+			t.Errorf("Down is missing %q:\n%s", want, down)
+		}
+	}
+}
+
+// TestDeltaUniqueDropIsExactInverse proves losing @unique emits the drop, and
+// that the Down puts the same constraint back.
+func TestDeltaUniqueDropIsExactInverse(t *testing.T) {
+	with := `type Product @node(label: "product") {
+  id: ID!
+  sku: String! @unique
+}`
+	without := `type Product @node(label: "product") {
+  id: ID!
+  sku: String!
+}`
+	up, down, changed := migrate.Delta(mustSchema(t, with), mustSchema(t, without))
+	if !changed {
+		t.Fatal("dropping @unique is a change")
+	}
+	if !strings.Contains(up, "ALTER TABLE products DROP CONSTRAINT products_sku_key;") {
+		t.Errorf("Up does not drop the constraint:\n%s", up)
+	}
+	if !strings.Contains(down, "ALTER TABLE products ADD CONSTRAINT products_sku_key UNIQUE (sku);") {
+		t.Errorf("Down does not restore the constraint:\n%s", down)
+	}
+}

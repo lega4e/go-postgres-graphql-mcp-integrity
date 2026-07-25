@@ -31,7 +31,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -112,6 +112,45 @@
               <ga-code id="d-schema"></ga-code>
               <label>Database query</label>
               <ga-code id="d-sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Directives: the M6 column overrides, uniqueness and indexes. -->
+        <div slot="directives">
+          <p class="panel-hint">
+            <code>@column(name:)</code> renames the physical column — and with it
+            the property the graph exposes, which is why the compiled query below
+            projects <code>name</code> while the GraphQL field is still
+            <code>title</code>. <code>@column(type:)</code> overrides the default
+            scalar mapping, <code>@unique</code> makes the database itself reject
+            a duplicate, and <code>@index</code> adds a secondary index with an
+            optional access method — bare, the name is derived from the table and
+            column.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="c-sdl">GraphQL SDL — schema</label>
+              <textarea id="c-sdl" class="code-input" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-query">GraphQL query</label>
+              <textarea id="c-query" class="code-input" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-vars">Variables (JSON)</label>
+              <textarea id="c-vars" class="code-input" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="directives" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="c-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="c-schema"></ga-code>
+              <label>Database query</label>
+              <ga-code id="c-sql"></ga-code>
             </div>
           </div>
         </div>

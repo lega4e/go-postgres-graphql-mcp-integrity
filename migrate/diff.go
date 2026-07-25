@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/lega4e/gopgql/generator"
+	"github.com/lega4e/gopgql/internal/pgident"
 	"github.com/lega4e/gopgql/schema"
 )
 
@@ -48,12 +49,28 @@ type schemaDiff struct {
 
 	addedIndexes   []schema.Index // standalone index adds (table in both)
 	droppedIndexes []schema.Index // standalone index drops (table in both)
+
+	// UNIQUE constraints gained / lost by a column that exists in both schemas
+	// (SPEC.md §7 → M6). A column that is itself added or dropped carries its
+	// constraint with it, so it never appears here.
+	addedUniques   []uniqueChange
+	droppedUniques []uniqueChange
 }
+
+// uniqueChange is one column's UNIQUE constraint, named the way PostgreSQL names
+// an implicit one so the ADD and DROP paths agree.
+type uniqueChange struct {
+	Table  string
+	Column string
+}
+
+func (u uniqueChange) name() string { return schema.UniqueConstraintName(u.Table, u.Column) }
 
 func (d *schemaDiff) structural() bool {
 	return len(d.addedVertices) > 0 || len(d.droppedVertices) > 0 ||
 		len(d.addedEdges) > 0 || len(d.droppedEdges) > 0 ||
 		len(d.addedIndexes) > 0 || len(d.droppedIndexes) > 0 ||
+		len(d.addedUniques) > 0 || len(d.droppedUniques) > 0 ||
 		d.hasColumnChanges()
 }
 
@@ -97,6 +114,9 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 			d.addedColumns[vt.Name] = added
 			d.droppedColumns[vt.Name] = dropped
 		}
+		gained, lost := uniqueDiff(vt.Name, vt.Columns, toVT.Columns)
+		d.addedUniques = append(d.addedUniques, gained...)
+		d.droppedUniques = append(d.droppedUniques, lost...)
 	}
 
 	fromE := edgeIndex(from)
@@ -119,7 +139,11 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 	fromIdx := indexByName(from)
 	toIdx := indexByName(to)
 	for _, idx := range to.Indexes {
-		if _, ok := fromIdx[idx.Name]; ok {
+		prior, ok := fromIdx[idx.Name]
+		// An index whose definition moved — different columns or a different
+		// access method — is dropped and recreated: PostgreSQL has no ALTER for
+		// either (SPEC.md §7 → M6).
+		if ok && sameIndex(prior, idx) {
 			continue
 		}
 		if addedTables[idx.Table] {
@@ -128,7 +152,8 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 		d.addedIndexes = append(d.addedIndexes, idx)
 	}
 	for _, idx := range from.Indexes {
-		if _, ok := toIdx[idx.Name]; ok {
+		desired, ok := toIdx[idx.Name]
+		if ok && sameIndex(idx, desired) {
 			continue
 		}
 		if droppedTables[idx.Table] {
@@ -139,6 +164,41 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 	return d
 }
 
+// sameIndex reports whether two same-named indexes are identical in definition.
+func sameIndex(a, b schema.Index) bool {
+	if a.Table != b.Table || a.Method != b.Method || len(a.Columns) != len(b.Columns) {
+		return false
+	}
+	for i := range a.Columns {
+		if a.Columns[i] != b.Columns[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// uniqueDiff reports the UNIQUE constraints a table gains and loses on columns
+// present in both schemas.
+func uniqueDiff(table string, fromCols, toCols []schema.Column) (gained, lost []uniqueChange) {
+	prior := map[string]schema.Column{}
+	for _, c := range fromCols {
+		prior[c.Name] = c
+	}
+	for _, c := range toCols {
+		p, ok := prior[c.Name]
+		if !ok {
+			continue // a new column carries its own constraint in ADD COLUMN
+		}
+		switch {
+		case c.Unique && !p.Unique:
+			gained = append(gained, uniqueChange{Table: table, Column: c.Name})
+		case !c.Unique && p.Unique:
+			lost = append(lost, uniqueChange{Table: table, Column: c.Name})
+		}
+	}
+	return gained, lost
+}
+
 // upStatements renders the forward migration: prior → desired.
 func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	var s []string
@@ -147,6 +207,9 @@ func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	}
 	for _, idx := range d.droppedIndexes {
 		s = append(s, dropIndexStmt(idx.Name))
+	}
+	for _, u := range d.droppedUniques {
+		s = append(s, dropConstraintStmt(u))
 	}
 	for _, t := range d.commonVertices {
 		for _, c := range d.droppedColumns[t] {
@@ -169,6 +232,9 @@ func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 		for _, c := range d.addedColumns[t] {
 			s = append(s, addColumnStmt(t, c))
 		}
+	}
+	for _, u := range d.addedUniques {
+		s = append(s, addConstraintStmt(u))
 	}
 	for _, idx := range d.addedIndexes {
 		s = append(s, generator.IndexDDL(idx))
@@ -188,6 +254,9 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 	for _, idx := range d.addedIndexes {
 		s = append(s, dropIndexStmt(idx.Name))
 	}
+	for _, u := range d.addedUniques {
+		s = append(s, dropConstraintStmt(u))
+	}
 	for _, t := range d.commonVertices {
 		for _, c := range d.addedColumns[t] {
 			s = append(s, dropColumnStmt(t, c.Name))
@@ -209,6 +278,9 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 		for _, c := range d.droppedColumns[t] {
 			s = append(s, addColumnStmt(t, c))
 		}
+	}
+	for _, u := range d.droppedUniques {
+		s = append(s, addConstraintStmt(u))
 	}
 	for _, idx := range d.droppedIndexes {
 		s = append(s, generator.IndexDDL(idx))
@@ -278,6 +350,19 @@ func dropColumnStmt(table, col string) string {
 
 func dropTableStmt(name string) string {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", quote(name))
+}
+
+// addConstraintStmt / dropConstraintStmt render a single-column UNIQUE
+// constraint change. The name matches PostgreSQL's own implicit naming, so a
+// constraint created inline by CREATE TABLE can later be dropped by name.
+func addConstraintStmt(u uniqueChange) string {
+	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);",
+		pgident.Quote(u.Table), pgident.Quote(u.name()), pgident.Quote(u.Column))
+}
+
+func dropConstraintStmt(u uniqueChange) string {
+	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
+		pgident.Quote(u.Table), pgident.Quote(u.name()))
 }
 
 func dropIndexStmt(name string) string {
