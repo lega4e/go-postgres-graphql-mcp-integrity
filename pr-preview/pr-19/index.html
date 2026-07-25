@@ -4,24 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-C7MFlq15.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-jJlDhBca.css">
+    <script type="module" crossorigin src="./assets/index-NMBx-ZFO.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-DLoYVKZd.css">
   </head>
   <body class="ga-theme">
     <main>
       <header>
         <h1>gopgql</h1>
         <p class="tagline">
-          One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ.
-          Edit the <strong>schema</strong>, <strong>query</strong> and
-          <strong>variables</strong> on the left; gopgql generates the goose
-          migration and compiles the query to a single <code>GRAPH_TABLE</code>
-          statement with ordered bind parameters — however many hops it
-          traverses, up to the depth limit. It runs entirely in your
+          One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ. Each
+          tab below is a complete, editable scenario: put a
+          <strong>schema</strong> and a <strong>query</strong> in on the left,
+          press <strong>Generate</strong>, and read the generated database
+          schema and the compiled query on the right. It runs entirely in your
           browser as compiled Go (WebAssembly) — the real
           <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>
           packages, no server and no JavaScript re-implementation. Nothing is
-          hardcoded: every output below is generated from your input.
+          hardcoded: every output is generated from your input.
         </p>
         <ga-note>
           There is no database here, so query <em>results</em> can't be shown —
@@ -29,112 +28,176 @@
           dedup) happens at execution time against PostgreSQL; it is covered by
           the godog integration suite, not this browser demo.
         </ga-note>
+        <p id="boot" class="status">loading WebAssembly…</p>
       </header>
 
-      <section class="io">
-        <div class="editor">
-          <label for="sdl">GraphQL SDL — schema</label>
-          <textarea id="sdl" class="code-input" rows="9" spellcheck="false"
-            autocapitalize="off" autocorrect="off"></textarea>
-
-          <label for="gql">GraphQL query</label>
-          <textarea id="gql" class="code-input" rows="3" spellcheck="false"
-            autocapitalize="off" autocorrect="off"></textarea>
-
-          <label for="vars">Variables (JSON)</label>
-          <textarea id="vars" class="code-input" rows="2" spellcheck="false"
-            autocapitalize="off" autocorrect="off"></textarea>
-
-          <div class="controls">
-            <ga-button id="run" variant="primary">Generate</ga-button>
-            <span id="status" class="status">loading WebAssembly…</span>
+      <ga-tabs
+        id="tabs"
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
+      >
+        <!-- Traversal: the multi-hop exit query. -->
+        <div slot="traversal">
+          <p class="panel-hint">
+            Nesting extends one <code>MATCH</code> chain rather than spawning a
+            second query, so a three-hop traversal is still a single
+            <code>GRAPH_TABLE</code>. Argument values travel as bind parameters
+            (<code>$1</code>, …) and are never interpolated, and every pair of
+            vertex positions that could bind the same row is guarded with
+            <code>&lt;&gt;</code> — PostgreSQL does not enforce edge isomorphism.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="t-sdl">GraphQL SDL — schema</label>
+              <textarea id="t-sdl" class="code-input" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="t-query">GraphQL query</label>
+              <textarea id="t-query" class="code-input" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="t-vars">Variables (JSON)</label>
+              <textarea id="t-vars" class="code-input" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="traversal" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="t-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="t-schema"></ga-code>
+              <label>Database query</label>
+              <ga-code id="t-sql"></ga-code>
+              <label>Ordered bind parameters</label>
+              <ga-code id="t-params"></ga-code>
+            </div>
           </div>
         </div>
 
-        <div class="outputs">
-          <ga-tabs
-            id="tabs"
-            tabs='[{"id":"query","label":"Query → SQL"},{"id":"depth","label":"Depth limit"},{"id":"interface","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"delta","label":"Delta"}]'
-          >
-            <div slot="query" class="panel">
-              <p class="panel-hint">
-                The compiled multi-hop <code>GRAPH_TABLE</code>. Nesting extends
-                one <code>MATCH</code> chain rather than spawning a second query,
-                argument values travel as bind parameters (<code>$1</code>, …)
-                and never interpolated, and every pair of vertex positions that
-                could bind the same row is guarded with
-                <code>&lt;&gt;</code> — PostgreSQL does not enforce edge
-                isomorphism.
-              </p>
-              <label>Compiled <code>GRAPH_TABLE</code></label>
-              <ga-code id="sql"></ga-code>
-              <label>Ordered bind parameters</label>
-              <ga-code id="params"></ga-code>
-            </div>
-
-            <div slot="depth" class="panel">
-              <p class="panel-hint">
-                SQL/PGQ has no variable-length paths, so gopgql refuses a
-                selection nested past <code>MaxDepth</code> (default
-                <span id="maxdepth">3</span>) instead of silently truncating the
-                pattern. The rejection is a typed
-                <code>*compiler.DepthExceededError</code> raised at compile time,
-                so no SQL exists to send.
-              </p>
-              <label for="deep">GraphQL query — one hop too deep</label>
-              <textarea id="deep" class="code-input" rows="3" spellcheck="false"
+        <!-- Depth limit: one hop too many. -->
+        <div slot="depth">
+          <p class="panel-hint">
+            SQL/PGQ has no variable-length paths, so gopgql refuses a selection
+            nested past <code>MaxDepth</code> (default
+            <span id="maxdepth">3</span>) instead of silently truncating the
+            pattern. The rejection is a typed
+            <code>*compiler.DepthExceededError</code> raised at compile time, so
+            no SQL exists to send. Remove a level from the query to watch it
+            compile.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="d-sdl">GraphQL SDL — schema</label>
+              <textarea id="d-sdl" class="code-input" rows="10" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
-              <label>Compiler outcome</label>
-              <ga-code id="deepout"></ga-code>
-            </div>
-
-            <div slot="interface" class="panel">
-              <p class="panel-hint">
-                A GraphQL interface makes several tables one queryable position.
-                An interface carrying <code>@node(label:)</code> becomes a label
-                its implementors' tables all expose —
-                <code>(v0 IS actor)</code>; an interface without it is matched by
-                alternation over their own labels —
-                <code>(v0 IS bot|person)</code>. Edit the query below to
-                <code>{ profiles { name } }</code> to see the second form.
-              </p>
-              <label for="isdl">GraphQL SDL — interface schema</label>
-              <textarea id="isdl" class="code-input" rows="11" spellcheck="false"
+              <label for="d-query">GraphQL query — one hop too deep</label>
+              <textarea id="d-query" class="code-input" rows="3" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
-              <label for="iquery">GraphQL query</label>
-              <textarea id="iquery" class="code-input" rows="2" spellcheck="false"
+              <label for="d-vars">Variables (JSON)</label>
+              <textarea id="d-vars" class="code-input" rows="2" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
-              <label>Compiled <code>GRAPH_TABLE</code></label>
-              <ga-code id="isql"></ga-code>
-              <label>Generated <code>CREATE PROPERTY GRAPH</code></label>
-              <ga-code id="igraph"></ga-code>
             </div>
-
-            <div slot="migration" class="panel">
-              <p class="panel-hint">
-                The initial <code>0001_init.sql</code> goose migration generated
-                from the schema.
-              </p>
-              <label>Initial migration <code>0001_init.sql</code></label>
-              <ga-code id="migration"></ga-code>
+            <div class="action">
+              <ga-button class="run" data-scenario="depth" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="d-status" class="status"></span>
             </div>
-
-            <div slot="delta" class="panel">
-              <p class="panel-hint">
-                Edit a second revision of the schema; gopgql folds the initial
-                migration back into a model and diffs it to emit a delta
-                migration (<code>ALTER TABLE</code> plus a recreated property
-                graph).
-              </p>
-              <label for="sdl2">GraphQL SDL — revised schema</label>
-              <textarea id="sdl2" class="code-input" rows="9" spellcheck="false"
-                autocapitalize="off" autocorrect="off"></textarea>
-              <label>Delta migration <code>0002</code> (goose)</label>
-              <ga-code id="delta"></ga-code>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="d-schema"></ga-code>
+              <label>Database query</label>
+              <ga-code id="d-sql"></ga-code>
             </div>
-          </ga-tabs>
+          </div>
         </div>
-      </section>
+
+        <!-- Interfaces: shared label and label alternation. -->
+        <div slot="interfaces">
+          <p class="panel-hint">
+            A GraphQL interface makes several tables one queryable position. An
+            interface carrying <code>@node(label:)</code> becomes a label its
+            implementors' tables all expose — <code>(v0 IS actor)</code>; an
+            interface without it is matched by alternation over their own labels
+            — <code>(v0 IS bot|person)</code>. Edit the query to
+            <code>{ profiles { name } }</code> to see the second form.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="i-sdl">GraphQL SDL — schema</label>
+              <textarea id="i-sdl" class="code-input" rows="14" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="i-query">GraphQL query</label>
+              <textarea id="i-query" class="code-input" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="interfaces" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="i-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="i-schema"></ga-code>
+              <label>Database query</label>
+              <ga-code id="i-sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Migration: two scenarios, initial then delta. -->
+        <div slot="migration">
+          <p class="panel-hint">
+            The initial <code>0001_init.sql</code> goose migration generated from
+            a schema: the full <code>CREATE</code> DDL, with a
+            <code>-- +goose Down</code> section that is its exact inverse.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="m-sdl">GraphQL SDL — schema</label>
+              <textarea id="m-sdl" class="code-input" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="migration" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="m-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Initial migration <code>0001_init.sql</code></label>
+              <ga-code id="m-init"></ga-code>
+            </div>
+          </div>
+
+          <hr class="scenario-sep" />
+
+          <p class="panel-hint">
+            Revise that schema and gopgql folds the initial migration back into a
+            model, diffs it, and emits the delta — <code>ALTER TABLE</code> plus a
+            recreated property graph. The revision below is diffed against the
+            schema in the scenario above, so editing either one regenerates it.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="m-sdl2">GraphQL SDL — revised schema</label>
+              <textarea id="m-sdl2" class="code-input" rows="11" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="delta" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="m-status2" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Delta migration <code>0002</code> (goose)</label>
+              <ga-code id="m-delta"></ga-code>
+            </div>
+          </div>
+        </div>
+      </ga-tabs>
 
       <footer>
         <p>
