@@ -208,3 +208,30 @@ func TestDeltaError(t *testing.T) {
 		t.Error("expected error for invalid prior SDL")
 	}
 }
+
+// TestCompileMultiPatternExample proves the Multi-pattern panel's input really
+// compiles to the M5 workaround through the same entry point the WASM module
+// exports: separate GRAPH_TABLE calls joined on projected ids, and no
+// comma-separated pattern anywhere (SPEC.md §7 → M5).
+func TestCompileMultiPatternExample(t *testing.T) {
+	out, err := playground.Compile(
+		playground.ExampleSDL, playground.ExampleMultiPatternQuery,
+		map[string]any{"n": "Alice"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if n := strings.Count(out.SQL, "GRAPH_TABLE"); n != 3 {
+		t.Errorf("got %d GRAPH_TABLE calls, want 3 (spine + two branches):\n%s", n, out.SQL)
+	}
+	if !strings.Contains(out.SQL, "LEFT JOIN") {
+		t.Errorf("the branches must be joined back together:\n%s", out.SQL)
+	}
+	for _, line := range strings.Split(out.SQL, "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "MATCH ") && strings.Contains(trimmed, ",") {
+			t.Errorf("emitted a comma-separated pattern PG19 will not execute:\n%s", line)
+		}
+	}
+	if !strings.Contains(out.Params, "$1 = Alice") {
+		t.Errorf("Params = %q, want the root filter bound as $1", out.Params)
+	}
+}

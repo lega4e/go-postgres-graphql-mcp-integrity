@@ -38,8 +38,9 @@ import (
 // copy or a browser cache. An older module silently ignoring an argument the
 // page now passes is the worst kind of failure to debug: the control moves and
 // nothing happens. Bump this whenever an exported function's arguments or
-// result shape change.
-const apiVersion = 2
+// result shape change — and whenever the page starts depending on a new export,
+// so a panel cannot come up blank against a module that lacks it.
+const apiVersion = 3
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
@@ -52,6 +53,7 @@ func main() {
 	js.Global().Set("gopgqlExampleVars", js.ValueOf(playground.ExampleVars))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
+	js.Global().Set("gopgqlExampleMultiQuery", js.ValueOf(playground.ExampleMultiPatternQuery))
 	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
 	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
 	js.Global().Set("gopgqlMaxDepth", js.ValueOf(playground.MaxDepth()))

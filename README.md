@@ -10,6 +10,32 @@ See [`SPEC.md`](./SPEC.md) for the full design and milestone plan.
 
 ## Status
 
+**M5 — Multi-pattern workaround and joins.** A level may now select more than
+one relationship ([`SPEC.md` §7](./SPEC.md) → M5). That shape would need
+comma-separated path patterns in a single `MATCH`, which PG19 parses but does not
+execute ([`SPEC.md` §2.2](./SPEC.md)), so the compiler splits it instead:
+
+- **One `GRAPH_TABLE` per branch, joined on projected ids.** The chain up to the
+  branching level stays a single call — the spine; each relationship hanging off
+  it becomes its own call whose pattern re-binds the branch-point vertex by label
+  and projects its id; the outer query `LEFT JOIN`s them on that id.
+- **A missing branch no longer deletes the parent.** Joining left means a person
+  with followers but nothing followed keeps both keys and shapes to an empty
+  list, instead of vanishing the way an inner join would.
+- **Guards survive the split.** An isomorphism guard between two positions that
+  ended up in different calls moves to the join's `ON` clause, expressed over the
+  projected ids — so a branch still cannot walk back to a vertex an ancestor
+  bound.
+- **Unbranched queries are untouched.** A single chain still compiles to exactly
+  one `GRAPH_TABLE` with no join at all.
+
+The M5 godog scenarios execute the split SQL against the container and assert on
+the returned rows, and — the milestone's exit criterion — re-run an **equivalent
+hand-written join** over the same data and require an identical response, so the
+workaround is proven correct rather than merely runnable. A further scenario
+joins `GRAPH_TABLE` output with an ordinary relational table. The playground's
+**Multi-pattern** tab shows the emitted split for an editable branching query.
+
 **M4 — Multi-hop, depth limit, label alternation.** The compiler stops being
 one-hop ([`SPEC.md` §7](./SPEC.md) → M4):
 
@@ -94,6 +120,7 @@ in the middle, generated database schema and compiled query on the right:
 | Tab           | Scenario                                                                                             |
 |---------------|------------------------------------------------------------------------------------------------------|
 | *Traversal*   | The three-hop exit query: one `GRAPH_TABLE`, bind parameters, isomorphism guards.                     |
+| *Multi-pattern* | A branching query split into one `GRAPH_TABLE` per branch, `LEFT JOIN`ed on projected ids; the status line counts the calls. |
 | *Depth limit* | A four-hop query refused with the typed `*DepthExceededError`; move the `MaxDepth` control and watch it flip. |
 | *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
 | *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|

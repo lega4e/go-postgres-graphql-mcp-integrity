@@ -388,6 +388,154 @@ FROM GRAPH_TABLE (app_graph
 	}
 }
 
+// TestCompileTwoRelationshipsSplit proves the M5 workaround: a level selecting
+// two relationships becomes two GRAPH_TABLE calls — never the comma-separated
+// pattern PG19 parses but will not execute — joined on the projected root id.
+// The root filter stays on the spine, so it constrains both branches through the
+// join.
+func TestCompileTwoRelationshipsSplit(t *testing.T) {
+	c := newCompiler(t)
+	cq, err := c.CompileQuery(
+		`{ persons(name: $n) { name follows { name } followedBy { name } } }`,
+		map[string]any{"n": "Alice"})
+	if err != nil {
+		t.Fatalf("CompileQuery: %v", err)
+	}
+	want := `SELECT q0.v0_k, q0.v0_c0, q1.v2_k, q1.v2_c0, q2.v4_k, q2.v4_c0
+FROM GRAPH_TABLE (app_graph
+    MATCH (v0 IS person)
+    WHERE v0.name = $1
+    COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
+  ) AS q0
+LEFT JOIN GRAPH_TABLE (app_graph
+    MATCH (v1 IS person) -[e0 IS follows]-> (v2 IS person)
+    WHERE v1.id <> v2.id
+    COLUMNS (v1.id AS v1_j, v2.id AS v2_k, v2.name AS v2_c0)
+  ) AS q1 ON q1.v1_j = q0.v0_k
+LEFT JOIN GRAPH_TABLE (app_graph
+    MATCH (v3 IS person) <-[e1 IS follows]- (v4 IS person)
+    WHERE v3.id <> v4.id
+    COLUMNS (v3.id AS v3_j, v4.id AS v4_k, v4.name AS v4_c0)
+  ) AS q2 ON q2.v3_j = q0.v0_k`
+	if cq.SQL != want {
+		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
+	}
+	if strings.Contains(cq.SQL, "),") || strings.Contains(cq.SQL, ", (") {
+		t.Errorf("emitted a comma-separated pattern, which PG19 does not execute:\n%s", cq.SQL)
+	}
+	if len(cq.Args) != 1 || cq.Args[0] != "Alice" {
+		t.Errorf("Args = %v, want the single bound root filter", cq.Args)
+	}
+
+	root := cq.Projection.Root
+	if len(root.Children) != 2 {
+		t.Fatalf("root has %d children, want 2", len(root.Children))
+	}
+	if root.Children[0].ResponseKey != "follows" || root.Children[1].ResponseKey != "followedBy" {
+		t.Errorf("children = %q/%q, want follows/followedBy in selection order",
+			root.Children[0].ResponseKey, root.Children[1].ResponseKey)
+	}
+	// Each branch projects into its own columns, so the two lists cannot collide
+	// when shape regroups the joined rows.
+	if root.Children[0].KeyColumn == root.Children[1].KeyColumn {
+		t.Errorf("both branches share the key column %q", root.Children[0].KeyColumn)
+	}
+}
+
+// TestCompileBranchBelowRoot proves the split happens at whichever level
+// branches: here the spine is the first hop and both sub-branches join on that
+// level's id, carrying the isomorphism guards that would otherwise be lost
+// across the split.
+func TestCompileBranchBelowRoot(t *testing.T) {
+	c := newCompiler(t)
+	cq, err := c.CompileQuery(
+		`{ persons { name follows { name follows { name } followedBy { name } } } }`, nil)
+	if err != nil {
+		t.Fatalf("CompileQuery: %v", err)
+	}
+	if n := strings.Count(cq.SQL, "GRAPH_TABLE"); n != 3 {
+		t.Errorf("got %d GRAPH_TABLE calls, want 3 (spine + two branches):\n%s", n, cq.SQL)
+	}
+	// Both branches hang off the first hop (v1), not the root.
+	for _, on := range []string{"ON q1.v2_j = q0.v1_k", "ON q2.v4_j = q0.v1_k"} {
+		if !strings.Contains(cq.SQL, on) {
+			t.Errorf("missing join %q:\n%s", on, cq.SQL)
+		}
+	}
+	// A branch must not walk back to the root: that guard spans the split, so it
+	// lives in the ON clause.
+	for _, guard := range []string{"q1.v3_k <> q0.v0_k", "q2.v5_k <> q0.v0_k"} {
+		if !strings.Contains(cq.SQL, guard) {
+			t.Errorf("missing cross-fragment guard %q:\n%s", guard, cq.SQL)
+		}
+	}
+	// The branch point is re-bound and joined on its id, so guarding a branch
+	// against it again would be redundant.
+	if strings.Contains(cq.SQL, "q1.v3_k <> q0.v1_k") {
+		t.Errorf("emitted a redundant guard against the branch point:\n%s", cq.SQL)
+	}
+}
+
+// TestCompileSingleRelationshipStaysOneQuery pins the M1–M4 behaviour the split
+// must not disturb: without branching there is exactly one GRAPH_TABLE and no
+// join at all.
+func TestCompileSingleRelationshipStaysOneQuery(t *testing.T) {
+	c := newCompiler(t)
+	cq, err := c.CompileQuery(`{ persons { name follows { name } } }`, nil)
+	if err != nil {
+		t.Fatalf("CompileQuery: %v", err)
+	}
+	if n := strings.Count(cq.SQL, "GRAPH_TABLE"); n != 1 {
+		t.Errorf("got %d GRAPH_TABLE calls, want 1:\n%s", n, cq.SQL)
+	}
+	if strings.Contains(cq.SQL, "JOIN") {
+		t.Errorf("a single-chain query must not be split:\n%s", cq.SQL)
+	}
+}
+
+// TestCompileThreeBranchesFanOut proves the split generalises past two: each
+// relationship at a branching level gets its own GRAPH_TABLE and its own join.
+func TestCompileThreeBranchesFanOut(t *testing.T) {
+	c := newCompiler(t)
+	cq, err := c.CompileQuery(
+		`{ persons { a: follows { name } b: followedBy { name } c: follows { email } } }`, nil)
+	if err != nil {
+		t.Fatalf("CompileQuery: %v", err)
+	}
+	if n := strings.Count(cq.SQL, "GRAPH_TABLE"); n != 4 {
+		t.Errorf("got %d GRAPH_TABLE calls, want 4 (spine + three branches):\n%s", n, cq.SQL)
+	}
+	if n := strings.Count(cq.SQL, "LEFT JOIN"); n != 3 {
+		t.Errorf("got %d joins, want 3:\n%s", n, cq.SQL)
+	}
+	keys := map[string]bool{}
+	for _, child := range cq.Projection.Root.Children {
+		if keys[child.KeyColumn] {
+			t.Errorf("duplicate key column %q across branches", child.KeyColumn)
+		}
+		keys[child.KeyColumn] = true
+	}
+	if len(keys) != 3 {
+		t.Errorf("got %d distinct branch key columns, want 3", len(keys))
+	}
+}
+
+// TestCompileDepthAppliesToEveryBranch proves the ceiling is not bypassed by
+// branching: a too-deep selection in the second branch still fails compilation
+// before any SQL exists.
+func TestCompileDepthAppliesToEveryBranch(t *testing.T) {
+	c := newCompiler(t)
+	sql, _, err := c.Compile(
+		`{ persons { follows { name } followedBy { follows { follows { follows { name } } } } } }`, nil)
+	var depthErr *compiler.DepthExceededError
+	if !errors.As(err, &depthErr) {
+		t.Fatalf("error is %T (%v), want *compiler.DepthExceededError", err, err)
+	}
+	if sql != "" {
+		t.Errorf("a rejected compilation must yield no SQL, got:\n%s", sql)
+	}
+}
+
 // TestCompileNoGuardBetweenDisjointTables proves the guard is not emitted where
 // it cannot matter: a bot and a person can never be the same row.
 func TestCompileNoGuardBetweenDisjointTables(t *testing.T) {
@@ -407,7 +555,6 @@ func TestCompileRejects(t *testing.T) {
 		op   string
 		vars map[string]any
 	}{
-		"two relationships":    {`{ persons { follows { name } followedBy { name } } }`, nil},
 		"unknown root":         {`{ widgets { name } }`, nil},
 		"unknown field":        {`{ persons { nope } }`, nil},
 		"relationship no body": {`{ persons { follows } }`, nil},

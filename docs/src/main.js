@@ -9,7 +9,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 2
+const REQUIRED_API_VERSION = 3
 
 const el = (id) => document.getElementById(id)
 
@@ -62,6 +62,24 @@ function renderTraversal() {
   if (cmp.error) ok = false
 
   setStatus('t-status', ok, ok ? 'generated' : 'see errors')
+}
+
+// renderMultiPattern shows the M5 workaround: the same call as Traversal, but on
+// a query that branches, so the SQL pane holds the split GRAPH_TABLE calls and
+// their joins. The count is reported in the status line, since "how many
+// statements did this become" is the point of the tab.
+function renderMultiPattern() {
+  const sdl = el('p-sdl').value
+  let ok = renderSchema('p-schema', sdl)
+
+  const cmp = globalThis.gopgqlCompile(sdl, el('p-query').value, el('p-vars').value)
+  setCode('p-sql', cmp.error || cmp.sql)
+  setCode('p-params', cmp.error ? '—' : cmp.params)
+  if (cmp.error) ok = false
+
+  const calls = cmp.error ? 0 : (cmp.sql.match(/GRAPH_TABLE/g) ?? []).length
+  setStatus('p-status', ok,
+    ok ? `${calls} GRAPH_TABLE call${calls === 1 ? '' : 's'}` : 'see errors')
 }
 
 // depthLimit reads the Max depth input, falling back to the compiler's own
@@ -126,6 +144,7 @@ function renderDelta() {
 // migration SDL feeds the delta as well as the initial migration.
 const scenarios = {
   traversal: { render: renderTraversal, inputs: ['t-sdl', 't-query', 't-vars'] },
+  multipattern: { render: renderMultiPattern, inputs: ['p-sdl', 'p-query', 'p-vars'] },
   depth: { render: renderDepth, inputs: ['d-sdl', 'd-query', 'd-vars', 'd-max'] },
   interfaces: { render: renderInterfaces, inputs: ['i-sdl', 'i-query'] },
   migration: { render: renderMigration, inputs: ['m-sdl'] },
@@ -174,6 +193,10 @@ async function boot() {
     seed('t-sdl', globalThis.gopgqlExampleSDL)
     seed('t-query', globalThis.gopgqlExampleQuery)
     seed('t-vars', globalThis.gopgqlExampleVars)
+
+    seed('p-sdl', globalThis.gopgqlExampleSDL)
+    seed('p-query', globalThis.gopgqlExampleMultiQuery)
+    seed('p-vars', globalThis.gopgqlExampleVars)
 
     seed('d-sdl', globalThis.gopgqlExampleSDL)
     seed('d-query', globalThis.gopgqlExampleDeepQuery)
