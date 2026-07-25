@@ -94,6 +94,35 @@ func TestCompileDepthExceeded(t *testing.T) {
 	}
 }
 
+// TestCompileWithMaxDepth proves the ceiling is configuration, not a constant:
+// the same query the playground shows being refused compiles once the limit is
+// raised, and a shorter one is refused once it is lowered.
+func TestCompileWithMaxDepth(t *testing.T) {
+	vars := map[string]any{"n": "Alice"}
+
+	out, err := playground.CompileWithMaxDepth(
+		playground.ExampleSDL, playground.ExampleDeepQuery, vars, 4)
+	if err != nil {
+		t.Fatalf("four hops at MaxDepth 4: %v", err)
+	}
+	if !strings.Contains(out.SQL, "-[e3 IS follows]->") {
+		t.Errorf("expected a fourth hop in the compiled SQL:\n%s", out.SQL)
+	}
+
+	_, err = playground.CompileWithMaxDepth(
+		playground.ExampleSDL, `{ persons { follows { name } } }`, nil, 0)
+	if limit, ok := playground.DepthExceeded(err); !ok || limit != 0 {
+		t.Errorf("one hop at MaxDepth 0: got (%d, %v) from %v, want a rejection at 0", limit, ok, err)
+	}
+
+	// Negative ceilings clamp to zero rather than erroring: no traversal, but a
+	// plain root selection still compiles.
+	if _, err := playground.CompileWithMaxDepth(
+		playground.ExampleSDL, `{ persons { name } }`, nil, -2); err != nil {
+		t.Errorf("root-only query at a negative MaxDepth: %v", err)
+	}
+}
+
 // TestCompileInterfaceExamples proves the interface panel's inputs really
 // compile: one shared label spanning two tables, and label alternation.
 func TestCompileInterfaceExamples(t *testing.T) {

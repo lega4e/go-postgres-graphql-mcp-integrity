@@ -75,10 +75,14 @@ type DepthExceededError struct {
 }
 
 func (e *DepthExceededError) Error() string {
+	hops := "hops"
+	if e.Depth == 1 {
+		hops = "hop"
+	}
 	return fmt.Sprintf(
-		"compiler: %s.%s at %s is %d hops from the root, past MaxDepth %d; "+
+		"compiler: %s.%s at %s is %d %s from the root, past MaxDepth %d; "+
 			"SQL/PGQ has no variable-length paths, so gopgql rejects rather than truncating",
-		e.TypeName, e.Field, strings.Join(e.Path, "."), e.Depth, e.MaxDepth)
+		e.TypeName, e.Field, strings.Join(e.Path, "."), e.Depth, hops, e.MaxDepth)
 }
 
 // Compiler compiles GraphQL operations against a fixed SDL document.

@@ -113,6 +113,13 @@ label {
     box-shadow var(--ga-transition, 0.18s ease);
 }
 
+/* A single number sitting among the code editors — same styling, sized to its
+   content rather than to the column. */
+.num-input {
+  max-width: 10rem;
+  resize: none;
+}
+
 .code-input::placeholder {
   color: var(--ga-dim, #454545);
 }

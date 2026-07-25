@@ -13,7 +13,7 @@
 //
 //   - gopgqlSchema(sdl) -> {schema, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
-//   - gopgqlCompile(sdl, query, varsJSON) -> {sql, params, error, depthExceeded, maxDepth}
+//   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, error, depthExceeded, maxDepth}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
 //
 // gopgqlCompile classifies a depth rejection separately from other errors so the
@@ -85,12 +85,19 @@ func migration(_ js.Value, args []js.Value) any {
 	return js.ValueOf(result)
 }
 
-// compile is bound to window.gopgqlCompile. It expects three string arguments:
-// the SDL, the GraphQL query, and a variables document as JSON (may be empty).
+// compile is bound to window.gopgqlCompile. It expects three string arguments —
+// the SDL, the GraphQL query, and a variables document as JSON (may be empty) —
+// and an optional fourth: the traversal-depth ceiling, in hops from the root
+// field. Omitting it uses the compiler's default. The returned maxDepth is the
+// ceiling that was applied, so the page can always name the limit it is showing.
 func compile(_ js.Value, args []js.Value) any {
+	maxDepth := playground.MaxDepth()
+	if len(args) >= 4 && args[3].Type() == js.TypeNumber {
+		maxDepth = args[3].Int()
+	}
 	result := map[string]any{
 		"sql": "", "params": "", "error": "",
-		"depthExceeded": false, "maxDepth": playground.MaxDepth(),
+		"depthExceeded": false, "maxDepth": maxDepth,
 	}
 	if len(args) < 3 || args[0].Type() != js.TypeString ||
 		args[1].Type() != js.TypeString || args[2].Type() != js.TypeString {
@@ -102,7 +109,7 @@ func compile(_ js.Value, args []js.Value) any {
 		result["error"] = "variables: " + err.Error()
 		return js.ValueOf(result)
 	}
-	out, err := playground.Compile(args[0].String(), args[1].String(), vars)
+	out, err := playground.CompileWithMaxDepth(args[0].String(), args[1].String(), vars, maxDepth)
 	if err != nil {
 		result["error"] = err.Error()
 		if limit, ok := playground.DepthExceeded(err); ok {

@@ -323,8 +323,12 @@ func TestCompileMaxDepthConfigured(t *testing.T) {
 	if _, _, err := zero.Compile(`{ persons { name } }`, nil); err != nil {
 		t.Errorf("root-only query at MaxDepth 0: %v", err)
 	}
-	if _, _, err := zero.Compile(`{ persons { follows { name } } }`, nil); err == nil {
-		t.Error("one hop at MaxDepth 0: expected a depth error, got nil")
+	_, _, err = zero.Compile(`{ persons { follows { name } } }`, nil)
+	if !errors.As(err, &depthErr) {
+		t.Fatalf("one hop at MaxDepth 0: error is %T (%v), want *compiler.DepthExceededError", err, err)
+	}
+	if got := err.Error(); !strings.Contains(got, "is 1 hop from the root") {
+		t.Errorf("a single hop must not be reported as %q", got)
 	}
 }
 

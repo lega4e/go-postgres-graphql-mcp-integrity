@@ -138,23 +138,34 @@ type Compiled struct {
 }
 
 // Compile parses the SDL and compiles the GraphQL query against it, resolving
-// any variables from vars. It returns the emitted SQL and the ordered bind
-// parameters — proving values travel as parameters, never interpolated
-// (SPEC.md §6.2). It never executes the query.
+// any variables from vars, at the compiler's default traversal-depth ceiling.
+// It returns the emitted SQL and the ordered bind parameters — proving values
+// travel as parameters, never interpolated (SPEC.md §6.2). It never executes the
+// query.
 func Compile(sdlSrc, query string, vars map[string]any) (Compiled, error) {
+	return CompileWithMaxDepth(sdlSrc, query, vars, MaxDepth())
+}
+
+// CompileWithMaxDepth is Compile with an explicit traversal-depth ceiling, in
+// hops from the root field. It exists because MaxDepth is per-Compiler
+// configuration rather than a constant (SPEC.md §6.2): letting a reader move the
+// limit and watch one query flip between compiling and being refused shows that
+// better than any prose. A negative ceiling is clamped to zero, which permits no
+// traversal at all.
+func CompileWithMaxDepth(sdlSrc, query string, vars map[string]any, maxDepth int) (Compiled, error) {
 	doc, err := sdl.Parse(sdlSrc)
 	if err != nil {
 		return Compiled{}, err
 	}
-	sql, args, err := compiler.New(doc).Compile(query, vars)
+	sql, args, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).Compile(query, vars)
 	if err != nil {
 		return Compiled{}, err
 	}
 	return Compiled{SQL: sql, Params: renderParams(args)}, nil
 }
 
-// MaxDepth reports the compiler's default traversal-depth ceiling, so the
-// playground can name it when a query is rejected for exceeding it.
+// MaxDepth reports the compiler's default traversal-depth ceiling: what the
+// playground starts at, and what it falls back to when no ceiling is given.
 func MaxDepth() int { return compiler.DefaultMaxDepth }
 
 // DepthExceeded classifies a Compile error: it reports whether the compiler

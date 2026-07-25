@@ -57,13 +57,21 @@ function renderTraversal() {
   setStatus('t-status', ok, ok ? 'generated' : 'see errors')
 }
 
+// depthLimit reads the Max depth input, falling back to the compiler's own
+// default when it is blank or not a number. Negatives are clamped here the way
+// the compiler clamps them, so the ceiling reported back is the one applied.
+function depthLimit() {
+  const n = Number.parseInt(el('d-max').value, 10)
+  return Number.isFinite(n) ? Math.max(0, n) : (globalThis.gopgqlMaxDepth ?? 3)
+}
+
 // renderDepth treats a depth rejection as success: refusing to truncate a
 // pattern past MaxDepth is the designed outcome, not a page error.
 function renderDepth() {
   const sdl = el('d-sdl').value
   const schemaOk = renderSchema('d-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('d-query').value, el('d-vars').value)
+  const cmp = globalThis.gopgqlCompile(sdl, el('d-query').value, el('d-vars').value, depthLimit())
   if (cmp.depthExceeded) {
     setCode('d-sql',
       'rejected at compile time — *compiler.DepthExceededError\n\n' +
@@ -111,7 +119,7 @@ function renderDelta() {
 // migration SDL feeds the delta as well as the initial migration.
 const scenarios = {
   traversal: { render: renderTraversal, inputs: ['t-sdl', 't-query', 't-vars'] },
-  depth: { render: renderDepth, inputs: ['d-sdl', 'd-query', 'd-vars'] },
+  depth: { render: renderDepth, inputs: ['d-sdl', 'd-query', 'd-vars', 'd-max'] },
   interfaces: { render: renderInterfaces, inputs: ['i-sdl', 'i-query'] },
   migration: { render: renderMigration, inputs: ['m-sdl'] },
   delta: { render: renderDelta, inputs: ['m-sdl', 'm-sdl2'] },
@@ -152,6 +160,7 @@ async function boot() {
     seed('d-sdl', globalThis.gopgqlExampleSDL)
     seed('d-query', globalThis.gopgqlExampleDeepQuery)
     seed('d-vars', globalThis.gopgqlExampleVars)
+    seed('d-max', String(globalThis.gopgqlMaxDepth ?? 3))
 
     seed('i-sdl', globalThis.gopgqlExampleInterfaceSDL)
     seed('i-query', globalThis.gopgqlExampleInterfaceQuery)
