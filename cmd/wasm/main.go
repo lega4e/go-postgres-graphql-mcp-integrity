@@ -29,7 +29,20 @@ import (
 	"github.com/lega4e/gopgql/playground"
 )
 
+// apiVersion is the shape of the surface exported below. The page checks it
+// before calling anything.
+//
+// docs/public/gopgql.wasm is a build artefact that is never committed
+// (SPEC.md §8.3), and it is served from a stable, unhashed URL — so it is easy
+// to end up running a new page against an old module, from a stale working
+// copy or a browser cache. An older module silently ignoring an argument the
+// page now passes is the worst kind of failure to debug: the control moves and
+// nothing happens. Bump this whenever an exported function's arguments or
+// result shape change.
+const apiVersion = 2
+
 func main() {
+	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
 	js.Global().Set("gopgqlSchema", js.FuncOf(schemaDDL))
 	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
 	js.Global().Set("gopgqlCompile", js.FuncOf(compile))

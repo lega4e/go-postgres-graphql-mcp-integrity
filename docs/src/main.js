@@ -4,6 +4,13 @@ import './style.css'
 import '../vendor/ui-kit/src/index.js'
 import '../vendor/ui-kit/src/tokens/tokens.css'
 
+// REQUIRED_API_VERSION must match apiVersion in cmd/wasm/main.go. gopgql.wasm is
+// a build artefact served from an unhashed URL, so a new page can end up running
+// an old module — which would silently ignore arguments this page passes rather
+// than failing. Checking the version turns that into a message that says what to
+// do about it.
+const REQUIRED_API_VERSION = 2
+
 const el = (id) => document.getElementById(id)
 
 const bootEl = el('boot')
@@ -141,7 +148,10 @@ async function boot() {
     // it works at any base path.
     await loadScript('wasm_exec.js')
     const go = new globalThis.Go()
-    const resp = await fetch('gopgql.wasm')
+    // no-cache revalidates rather than trusting a cached copy: the module's URL
+    // never changes between builds, unlike the content-hashed JS bundle, so a
+    // returning visitor would otherwise pair new page code with an old module.
+    const resp = await fetch('gopgql.wasm', { cache: 'no-cache' })
     if (!resp.ok) {
       throw new Error(`gopgql.wasm: HTTP ${resp.status}`)
     }
@@ -150,6 +160,14 @@ async function boot() {
     // go.run resolves only when the Go program exits; our program blocks
     // forever (select{}), so we intentionally do not await it.
     go.run(instance)
+
+    const api = globalThis.gopgqlApiVersion ?? 0
+    if (api !== REQUIRED_API_VERSION) {
+      throw new Error(
+        `gopgql.wasm is out of date: it exports API v${api || '(unknown)'}, ` +
+        `this page needs v${REQUIRED_API_VERSION}. Rebuild it with ` +
+        '`bash scripts/build-wasm.sh`, then reload.')
+    }
 
     // The Go main sets the exported functions and examples synchronously
     // before it blocks.

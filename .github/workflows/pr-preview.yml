@@ -22,10 +22,6 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: build WASM playground
-        if: github.event.action != 'closed'
-        run: bash scripts/build-wasm.sh
-
       - uses: actions/setup-node@v4
         if: github.event.action != 'closed'
         with:
@@ -38,6 +34,7 @@ jobs:
         run: npm ci
         working-directory: docs
 
+      # npm's prebuild hook stages gopgql.wasm from the Go source above.
       - name: build docs
         if: github.event.action != 'closed'
         run: npm run build

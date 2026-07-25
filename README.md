@@ -138,6 +138,11 @@ go test ./compiler/... ./shape/... ./sdl/... ./generator/... ./migrate/... ./pla
 ## Playground locally
 
 ```sh
-make docs
-cd docs && npm run preview
+cd docs && npm install && npm run dev
 ```
+
+`npm run dev` and `npm run build` stage `gopgql.wasm` first (a `pre*` hook
+running `scripts/build-wasm.sh`), so the page is never served against a stale
+module — it is a build artefact and is never committed (`SPEC.md` §8.3). The
+page also refuses to start if the module it loads is older than the code
+calling it, rather than silently ignoring arguments it does not understand.

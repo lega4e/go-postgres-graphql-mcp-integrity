@@ -73,8 +73,6 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: build WASM playground
-        run: bash scripts/build-wasm.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -83,6 +81,8 @@ jobs:
       - name: install docs deps
         run: npm ci
         working-directory: docs
+      # npm's prebuild hook stages gopgql.wasm, so the site is never built
+      # against a stale module. setup-go above is what makes that possible.
       - name: build docs
         run: npm run build
         working-directory: docs
