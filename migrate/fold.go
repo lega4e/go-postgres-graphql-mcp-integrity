@@ -161,6 +161,7 @@ func column(c ddl.ColumnDef) schema.Column {
 		Array:      c.Array,
 		NotNull:    c.NotNull,
 		PrimaryKey: c.PrimaryKey,
+		Unique:     c.Unique,
 		Default:    c.Default,
 	}
 	if c.References != nil {
@@ -186,6 +187,12 @@ func (f *folder) applyAlterTable(s *ddl.AlterTableStmt) error {
 	case *ddl.DropColumn:
 		f.cols[s.Name] = removeColumn(f.cols[s.Name], a.Name)
 		return nil
+	case *ddl.AddConstraint:
+		// gopgql only ever emits a single-column UNIQUE, which folds back onto
+		// the column it constrains (SPEC.md §7 → M6).
+		return f.setUnique(s.Name, a, true)
+	case *ddl.DropConstraint:
+		return f.setUnique(s.Name, &ddl.AddConstraint{Name: a.Name, Kind: "UNIQUE"}, false)
 	default:
 		return fmt.Errorf("ALTER TABLE %s: unsupported action %T", s.Name, s.Action)
 	}
@@ -195,8 +202,39 @@ func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
 	if _, exists := f.indexes[s.Name]; !exists {
 		f.idxOrder = append(f.idxOrder, s.Name)
 	}
-	f.indexes[s.Name] = schema.Index{Name: s.Name, Table: s.Table, Columns: s.Columns}
+	f.indexes[s.Name] = schema.Index{
+		Name: s.Name, Table: s.Table, Columns: s.Columns, Method: s.Method,
+	}
 	return nil
+}
+
+// setUnique folds a UNIQUE constraint statement back onto its column. The
+// constraint carries the column list when it is added; a DROP carries only the
+// name, so the column is recovered from the naming convention gopgql and
+// PostgreSQL share (schema.UniqueConstraintName).
+func (f *folder) setUnique(table string, c *ddl.AddConstraint, unique bool) error {
+	cols := f.cols[table]
+	if cols == nil {
+		return fmt.Errorf("ALTER TABLE %s: constraint %s on an unknown table", table, c.Name)
+	}
+	target := ""
+	switch {
+	case len(c.Columns) == 1:
+		target = c.Columns[0]
+	case strings.HasPrefix(c.Name, table+"_") && strings.HasSuffix(c.Name, "_key"):
+		target = strings.TrimSuffix(strings.TrimPrefix(c.Name, table+"_"), "_key")
+	default:
+		return fmt.Errorf("ALTER TABLE %s: cannot tell which column constraint %q covers; "+
+			"gopgql names single-column UNIQUE constraints <table>_<column>_key", table, c.Name)
+	}
+	for i := range cols {
+		if cols[i].Name == target {
+			cols[i].Unique = unique
+			f.cols[table] = cols
+			return nil
+		}
+	}
+	return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, c.Name, target)
 }
 
 func (f *folder) applyDropTable(s *ddl.DropTableStmt) error {

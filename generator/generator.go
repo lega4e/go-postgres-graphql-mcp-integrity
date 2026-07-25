@@ -48,6 +48,7 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 			return nil, err
 		}
 		m.VertexTables = append(m.VertexTables, vt)
+		m.Indexes = append(m.Indexes, fieldIndexes(n)...)
 	}
 
 	if err := attachInterfaceLabels(m, doc); err != nil {
@@ -84,7 +85,16 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 				"generator: %s.%s has unsupported type %q (no default scalar mapping)",
 				n.TypeName, f.Name, f.TypeName)
 		}
-		col := schema.Column{Name: f.Name, Type: base, Array: f.List, NotNull: f.NonNull}
+		if f.ColumnType != "" {
+			// @column(type:) overrides the default scalar mapping (SPEC.md §5.1).
+			// The text is emitted verbatim, so a modified type such as
+			// numeric(10,2) round-trips into the DDL exactly as written.
+			base = f.ColumnType
+		}
+		col := schema.Column{
+			Name: f.ColumnName(), Type: base, Array: f.List,
+			NotNull: f.NonNull, Unique: f.Unique,
+		}
 		if f.Name == "id" && f.TypeName == "ID" {
 			// Surrogate key (SPEC.md §7 → M1).
 			col.PrimaryKey = true
@@ -92,9 +102,31 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 			col.Default = "gen_random_uuid()"
 		}
 		vt.Columns = append(vt.Columns, col)
-		vt.Properties = append(vt.Properties, f.Name)
+		vt.Properties = append(vt.Properties, col.Name)
 	}
 	return vt, nil
+}
+
+// fieldIndexes collects the secondary indexes requested with @index on a node's
+// scalar fields (SPEC.md §7 → M6). An index with no explicit name is named
+// <table>_<column>_idx, matching the convention the mandatory edge-key index
+// already uses.
+func fieldIndexes(n *sdl.Node) []schema.Index {
+	var out []schema.Index
+	for _, f := range n.Fields {
+		if !f.IsScalarColumn() || f.Index == nil {
+			continue
+		}
+		col := f.ColumnName()
+		name := f.Index.Name
+		if name == "" {
+			name = n.Table + "_" + col + "_idx"
+		}
+		out = append(out, schema.Index{
+			Name: name, Table: n.Table, Columns: []string{col}, Method: f.Index.Using,
+		})
+	}
+	return out
 }
 
 // attachInterfaceLabels gives every implementor's vertex table the shared label
@@ -211,20 +243,27 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 func DDL(m *schema.Schema) string {
 	var blocks []string
 	for i := range m.VertexTables {
-		blocks = append(blocks, VertexTableDDL(&m.VertexTables[i]))
+		vt := &m.VertexTables[i]
+		blocks = append(blocks, withIndexes(m, vt.Name, VertexTableDDL(vt)))
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		block := EdgeTableDDL(e)
-		for _, idx := range m.Indexes {
-			if idx.Table == e.Name {
-				block += "\n" + IndexDDL(idx)
-			}
-		}
-		blocks = append(blocks, block)
+		blocks = append(blocks, withIndexes(m, e.Name, EdgeTableDDL(e)))
 	}
 	blocks = append(blocks, GraphDDL(m))
 	return strings.Join(blocks, "\n\n") + "\n"
+}
+
+// withIndexes appends a table's CREATE INDEX statements to its CREATE TABLE
+// block: the mandatory destination-key index on every edge table (SPEC.md §5.3
+// invariant 2) and any index a field asked for with @index (SPEC.md §7 → M6).
+func withIndexes(m *schema.Schema, table, block string) string {
+	for _, idx := range m.Indexes {
+		if idx.Table == table {
+			block += "\n" + IndexDDL(idx)
+		}
+	}
+	return block
 }
 
 // VertexTableDDL renders a single CREATE TABLE for a vertex table. It is
@@ -257,6 +296,9 @@ func ColumnDDL(c schema.Column) string {
 	case c.NotNull:
 		parts = append(parts, "NOT NULL")
 	}
+	if c.Unique && !c.PrimaryKey {
+		parts = append(parts, "UNIQUE")
+	}
 	if c.Default != "" {
 		parts = append(parts, "DEFAULT "+c.Default)
 	}
@@ -288,8 +330,12 @@ func IndexDDL(idx schema.Index) string {
 	for i, c := range idx.Columns {
 		cols[i] = pgident.Quote(c)
 	}
-	return fmt.Sprintf("CREATE INDEX %s ON %s (%s);",
-		pgident.Quote(idx.Name), pgident.Quote(idx.Table), strings.Join(cols, ", "))
+	using := ""
+	if idx.Method != "" {
+		using = " USING " + idx.Method
+	}
+	return fmt.Sprintf("CREATE INDEX %s ON %s%s (%s);",
+		pgident.Quote(idx.Name), pgident.Quote(idx.Table), using, strings.Join(cols, ", "))
 }
 
 // GraphDDL renders the CREATE PROPERTY GRAPH statement for a schema. Exported

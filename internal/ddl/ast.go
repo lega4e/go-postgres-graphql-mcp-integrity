@@ -22,6 +22,8 @@ type ColumnDef struct {
 	Array      bool
 	PrimaryKey bool
 	NotNull    bool
+	// Unique records an inline UNIQUE column constraint (SPEC.md §7 → M6).
+	Unique     bool
 	Default    string
 	References *Reference
 }
@@ -54,11 +56,24 @@ type AddColumn struct{ Column ColumnDef }
 // DropColumn is "DROP COLUMN <name>".
 type DropColumn struct{ Name string }
 
+// AddConstraint is `ALTER TABLE t ADD CONSTRAINT n UNIQUE (cols…)`. gopgql emits
+// it only for UNIQUE, which is the constraint @unique maps to (SPEC.md §7 → M6).
+type AddConstraint struct {
+	Name    string
+	Kind    string // "UNIQUE"
+	Columns []string
+}
+
+// DropConstraint is `ALTER TABLE t DROP CONSTRAINT n`.
+type DropConstraint struct{ Name string }
+
 // CreateIndexStmt is "CREATE INDEX <name> ON <table> ( <columns> )".
 type CreateIndexStmt struct {
 	Name    string
 	Table   string
 	Columns []string
+	// Method is the access method from `USING <method>`, or "" (SPEC.md §7 → M6).
+	Method string
 }
 
 // DropIndexStmt is "DROP INDEX [IF EXISTS] <name>".
@@ -128,5 +143,7 @@ func (*DropTableStmt) isStatement()           {}
 func (*CreatePropertyGraphStmt) isStatement() {}
 func (*DropPropertyGraphStmt) isStatement()   {}
 
-func (*AddColumn) isAlterAction()  {}
-func (*DropColumn) isAlterAction() {}
+func (*AddColumn) isAlterAction()      {}
+func (*DropColumn) isAlterAction()     {}
+func (*AddConstraint) isAlterAction()  {}
+func (*DropConstraint) isAlterAction() {}

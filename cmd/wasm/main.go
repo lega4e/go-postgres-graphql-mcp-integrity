@@ -40,7 +40,7 @@ import (
 // nothing happens. Bump this whenever an exported function's arguments or
 // result shape change — and whenever the page starts depending on a new export,
 // so a panel cannot come up blank against a module that lacks it.
-const apiVersion = 3
+const apiVersion = 4
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
@@ -54,6 +54,9 @@ func main() {
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
 	js.Global().Set("gopgqlExampleMultiQuery", js.ValueOf(playground.ExampleMultiPatternQuery))
+	js.Global().Set("gopgqlExampleDirectivesSDL", js.ValueOf(playground.ExampleDirectivesSDL))
+	js.Global().Set("gopgqlExampleDirectivesQuery", js.ValueOf(playground.ExampleDirectivesQuery))
+	js.Global().Set("gopgqlExampleDirectivesVars", js.ValueOf(playground.ExampleDirectivesVars))
 	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
 	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
 	js.Global().Set("gopgqlMaxDepth", js.ValueOf(playground.MaxDepth()))

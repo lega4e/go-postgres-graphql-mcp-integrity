@@ -244,3 +244,82 @@ type Person @node(label: "person") { id: ID! name: String! }`)
 		t.Error("an unimplemented interface must not be queryable")
 	}
 }
+
+// TestParseColumnDirectives covers the M6 mapping directives: a renamed column,
+// an overridden type, uniqueness and a per-field index (SPEC.md §7 → M6).
+func TestParseColumnDirectives(t *testing.T) {
+	doc, err := sdl.Parse(`type Product @node(label: "product") {
+  id: ID!
+  sku: String! @unique
+  title: String! @column(name: "name")
+  price: Float! @column(type: "numeric(10,2)")
+  category: String! @index(name: "by_category", using: "hash")
+  notes: String @index
+}`)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	n := doc.NodeByType("Product")
+	if n == nil {
+		t.Fatal("Product is not a mapped node")
+	}
+	byName := map[string]*sdl.Field{}
+	for _, f := range n.Fields {
+		byName[f.Name] = f
+	}
+
+	if got := byName["title"].ColumnName(); got != "name" {
+		t.Errorf("title maps to column %q, want %q", got, "name")
+	}
+	if got := byName["sku"].ColumnName(); got != "sku" {
+		t.Errorf("a field without @column(name:) keeps its own name, got %q", got)
+	}
+	if got := byName["price"].ColumnType; got != "numeric(10,2)" {
+		t.Errorf("price type override = %q, want numeric(10,2)", got)
+	}
+	if !byName["sku"].Unique {
+		t.Error("sku carries @unique but Unique is false")
+	}
+	if byName["title"].Unique {
+		t.Error("title has no @unique but Unique is true")
+	}
+	idx := byName["category"].Index
+	if idx == nil || idx.Name != "by_category" || idx.Using != "hash" {
+		t.Errorf("category index = %+v, want name=by_category using=hash", idx)
+	}
+	if bare := byName["notes"].Index; bare == nil || bare.Name != "" || bare.Using != "" {
+		t.Errorf("bare @index = %+v, want an empty spec the generator defaults", bare)
+	}
+}
+
+// TestParseRejectsMisplacedMappingDirectives proves the M6 directives are
+// rejected where they could have no effect, rather than silently ignored
+// (SPEC.md §10).
+func TestParseRejectsMisplacedMappingDirectives(t *testing.T) {
+	cases := map[string]string{
+		"on a relationship": `type Person @node(label: "person") {
+  id: ID!
+  follows: [Person!]! @relationship(type: "follows", direction: OUT) @unique
+}`,
+		"on an ignored field": `type Person @node(label: "person") {
+  id: ID!
+  nickname: String @ignore @column(name: "nick")
+}`,
+		"type override on the key": `type Person @node(label: "person") {
+  id: ID! @column(type: "text")
+}`,
+		"unique on the key": `type Person @node(label: "person") {
+  id: ID! @unique
+}`,
+		"colliding column names": `type Person @node(label: "person") {
+  id: ID!
+  name: String!
+  title: String! @column(name: "name")
+}`,
+	}
+	for label, src := range cases {
+		if _, err := sdl.Parse(src); err == nil {
+			t.Errorf("%s: expected a parse error, got none", label)
+		}
+	}
+}

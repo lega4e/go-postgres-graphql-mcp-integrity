@@ -235,3 +235,36 @@ func TestCompileMultiPatternExample(t *testing.T) {
 		t.Errorf("Params = %q, want the root filter bound as $1", out.Params)
 	}
 }
+
+// TestDirectivesExample proves the Directives panel's inputs really produce the
+// M6 DDL through the same entry point the WASM module exports, and that the
+// compiled query reads the renamed column (SPEC.md §7 → M6).
+func TestDirectivesExample(t *testing.T) {
+	ddl, err := playground.Schema(playground.ExampleDirectivesSDL)
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+	for _, want := range []string{
+		"sku text NOT NULL UNIQUE",
+		"price numeric(10,2) NOT NULL",
+		"CREATE INDEX products_category_idx ON products USING btree (category);",
+		"CREATE INDEX products_vendor_idx ON products (vendor);",
+	} {
+		if !strings.Contains(ddl, want) {
+			t.Errorf("generated DDL is missing %q:\n%s", want, ddl)
+		}
+	}
+
+	out, err := playground.Compile(
+		playground.ExampleDirectivesSDL, playground.ExampleDirectivesQuery,
+		map[string]any{"t": "Chain"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if !strings.Contains(out.SQL, "v0.name AS") {
+		t.Errorf("the compiled query must project the renamed column:\n%s", out.SQL)
+	}
+	if strings.Contains(out.SQL, "v0.title") {
+		t.Errorf("the compiled query must not use the GraphQL field name as a column:\n%s", out.SQL)
+	}
+}

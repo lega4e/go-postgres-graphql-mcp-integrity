@@ -82,12 +82,43 @@ type Field struct {
 	Ignore bool
 	// Rel is the relationship metadata, or nil for a plain scalar column.
 	Rel *Relationship
+	// Column is the physical column name from @column(name:); empty means the
+	// field name is used (SPEC.md §7 → M6).
+	Column string
+	// ColumnType is the PostgreSQL type from @column(type:), overriding the
+	// default scalar mapping (SPEC.md §5.1); empty means the default.
+	ColumnType string
+	// Unique is true when the field carries @unique: the database rejects a
+	// duplicate value.
+	Unique bool
+	// Index is the secondary index requested with @index, or nil.
+	Index *IndexSpec
+}
+
+// IndexSpec is a per-field @index request: an optional explicit name and access
+// method (`USING`), both defaulted by the generator when omitted.
+type IndexSpec struct {
+	// Name is the index name from @index(name:); empty means a derived one.
+	Name string
+	// Using is the access method from @index(using:) — btree, hash, gin, … —
+	// empty means the database default.
+	Using string
 }
 
 // IsScalarColumn reports whether the field maps to a physical column: it is not
 // ignored and is not a relationship.
 func (f *Field) IsScalarColumn() bool {
 	return !f.Ignore && f.Rel == nil
+}
+
+// ColumnName is the physical column a scalar field maps to: its @column(name:)
+// override, or the field name. The graph exposes the column under this name too,
+// so the compiler projects properties by it (SPEC.md §5.3 invariant 1).
+func (f *Field) ColumnName() string {
+	if f.Column != "" {
+		return f.Column
+	}
+	return f.Name
 }
 
 // Node is a GraphQL object type carrying @node.
@@ -200,6 +231,9 @@ const prelude = `directive @node(label: String!, table: String) on OBJECT | INTE
 directive @relationship(type: String!, direction: RelDirection, table: String) on FIELD_DEFINITION
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @ignore on FIELD_DEFINITION
+directive @column(name: String, type: String) on FIELD_DEFINITION
+directive @index(name: String, using: String) on FIELD_DEFINITION | OBJECT
+directive @unique on FIELD_DEFINITION
 enum RelDirection { OUT IN }
 scalar DateTime
 scalar JSON
@@ -383,6 +417,16 @@ func buildFields(def *ast.Definition) []*Field {
 		if fd.Directives.ForName("ignore") != nil {
 			f.Ignore = true
 		}
+		if colDir := fd.Directives.ForName("column"); colDir != nil {
+			f.Column = argString(colDir, "name")
+			f.ColumnType = argString(colDir, "type")
+		}
+		if fd.Directives.ForName("unique") != nil {
+			f.Unique = true
+		}
+		if idxDir := fd.Directives.ForName("index"); idxDir != nil {
+			f.Index = &IndexSpec{Name: argString(idxDir, "name"), Using: argString(idxDir, "using")}
+		}
 		if relDir := fd.Directives.ForName("relationship"); relDir != nil {
 			rel := &Relationship{
 				Type:      argString(relDir, "type"),
@@ -416,11 +460,17 @@ func (d *Document) validate() error {
 			if err := d.validateRelField(n.TypeName, f); err != nil {
 				return err
 			}
+			if err := validateMappingDirectives(n.TypeName, f); err != nil {
+				return err
+			}
 			if f.Rel != nil && f.Rel.HasInverse != "" {
 				if err := validateInverse(d, n, f); err != nil {
 					return err
 				}
 			}
+		}
+		if err := validateColumnNames(n); err != nil {
+			return err
 		}
 	}
 
@@ -430,6 +480,9 @@ func (d *Document) validate() error {
 		}
 		for _, f := range iface.Fields {
 			if err := d.validateRelField(iface.TypeName, f); err != nil {
+				return err
+			}
+			if err := validateMappingDirectives(iface.TypeName, f); err != nil {
 				return err
 			}
 			if err := validateImplementors(iface, f); err != nil {
@@ -511,6 +564,59 @@ func validateImplementors(iface *Interface, f *Field) error {
 // validateKey requires the surrogate key `id: ID!`. Interfaces need it too: the
 // compiler projects it as every level's hidden key column and compares it
 // between vertex positions to exclude self-matches.
+// validateMappingDirectives checks the M6 column directives sit on fields that
+// actually map to a column, and that they do not contradict the surrogate key.
+// A directive on a relationship or an @ignore field is a mistake with no
+// possible effect, so it is rejected rather than ignored (SPEC.md §10).
+func validateMappingDirectives(typeName string, f *Field) error {
+	has := f.Column != "" || f.ColumnType != "" || f.Unique || f.Index != nil
+	if !has {
+		return nil
+	}
+	if !f.IsScalarColumn() {
+		what := "a relationship"
+		if f.Ignore {
+			what = "@ignore"
+		}
+		return fmt.Errorf("sdl: %s.%s carries @column/@index/@unique, but it is %s and maps to no column",
+			typeName, f.Name, what)
+	}
+	if f.Name == "id" {
+		if f.ColumnType != "" {
+			return fmt.Errorf("sdl: %s.id cannot override its type: the surrogate key is a uuid primary key", typeName)
+		}
+		if f.Unique {
+			return fmt.Errorf("sdl: %s.id is already unique as the primary key; drop the @unique", typeName)
+		}
+		if f.Index != nil {
+			return fmt.Errorf("sdl: %s.id is already indexed by its primary key; drop the @index", typeName)
+		}
+	}
+	if f.Column != "" && pgident.NeedsQuote(f.Column) {
+		// Allowed — the column name is quoted wherever it is emitted.
+		_ = f.Column
+	}
+	return nil
+}
+
+// validateColumnNames rejects two fields of one type mapping to the same
+// physical column, which @column(name:) makes possible.
+func validateColumnNames(n *Node) error {
+	seen := map[string]string{}
+	for _, f := range n.Fields {
+		if !f.IsScalarColumn() {
+			continue
+		}
+		col := f.ColumnName()
+		if prev, dup := seen[col]; dup {
+			return fmt.Errorf("sdl: %s.%s and %s.%s both map to column %q; disambiguate with @column(name:)",
+				n.TypeName, prev, n.TypeName, f.Name, col)
+		}
+		seen[col] = f.Name
+	}
+	return nil
+}
+
 func validateKey(typeName, kind string, fields []*Field) error {
 	for _, f := range fields {
 		if f.Name != "id" {

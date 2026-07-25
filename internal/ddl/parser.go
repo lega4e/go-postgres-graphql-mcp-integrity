@@ -195,8 +195,7 @@ func (p *parser) columnDef() (ColumnDef, error) {
 		case p.acceptKeyword("NOT", "NULL"):
 			c.NotNull = true
 		case p.acceptKeyword("UNIQUE"):
-			// gopgql does not emit inline UNIQUE yet (M6); tolerate it so the
-			// grammar widens without a rewrite.
+			c.Unique = true
 		case p.acceptKeyword("DEFAULT"):
 			c.Default = p.defaultExpr()
 		case p.acceptKeyword("REFERENCES"):
@@ -342,11 +341,18 @@ func (p *parser) createIndex() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
+	method := ""
+	if p.acceptKeyword("USING") {
+		method, err = p.ident("index access method")
+		if err != nil {
+			return nil, err
+		}
+	}
 	cols, err := p.parenIdentList()
 	if err != nil {
 		return nil, err
 	}
-	return &CreateIndexStmt{Name: name, Table: table, Columns: cols}, nil
+	return &CreateIndexStmt{Name: name, Table: table, Columns: cols, Method: method}, nil
 }
 
 func (p *parser) alterTable() (Statement, error) {
@@ -367,6 +373,25 @@ func (p *parser) alterTable() (Statement, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{Name: name, Action: &DropColumn{Name: col}}, nil
+	case p.acceptKeyword("ADD", "CONSTRAINT"):
+		cname, err := p.ident("constraint name")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectKeyword("UNIQUE"); err != nil {
+			return nil, err
+		}
+		cols, err := p.parenIdentList()
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Name: name, Action: &AddConstraint{Name: cname, Kind: "UNIQUE", Columns: cols}}, nil
+	case p.acceptKeyword("DROP", "CONSTRAINT"):
+		cname, err := p.ident("constraint name")
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Name: name, Action: &DropConstraint{Name: cname}}, nil
 	default:
 		return nil, p.errorf("unsupported ALTER TABLE action at %q", p.peek().Value)
 	}

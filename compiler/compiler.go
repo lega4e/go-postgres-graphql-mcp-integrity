@@ -375,8 +375,12 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 				return nil, fmt.Errorf("compiler: arguments on scalar field %s.%s are not supported", t.TypeName, f.Name)
 			}
 			col := fmt.Sprintf("%s_c%d", alias, len(sel.Fields))
-			b.addColumn(alias, def.Name, col)
-			sel.Fields = append(sel.Fields, ProjectedField{ResponseKey: responseKey(f), Property: def.Name, Column: col})
+			// The graph exposes the *column*, which @column(name:) may have
+			// renamed away from the GraphQL field name (SPEC.md §7 → M6).
+			b.addColumn(alias, def.ColumnName(), col)
+			sel.Fields = append(sel.Fields, ProjectedField{
+				ResponseKey: responseKey(f), Property: def.ColumnName(), Column: col,
+			})
 		case def.Rel != nil:
 			rels = append(rels, relSelection{field: f, def: def})
 		default:
@@ -493,7 +497,7 @@ func (b *builder) predicate(t *sdl.Target, alias string, arg *ast.Argument) erro
 		return err
 	}
 	b.args = append(b.args, val)
-	b.cur.preds = append(b.cur.preds, fmt.Sprintf("%s.%s = $%d", alias, pgident.Quote(def.Name), len(b.args)))
+	b.cur.preds = append(b.cur.preds, fmt.Sprintf("%s.%s = $%d", alias, pgident.Quote(def.ColumnName()), len(b.args)))
 	return nil
 }
 

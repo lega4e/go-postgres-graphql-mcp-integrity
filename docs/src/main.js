@@ -9,7 +9,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 3
+const REQUIRED_API_VERSION = 4
 
 const el = (id) => document.getElementById(id)
 
@@ -82,6 +82,21 @@ function renderMultiPattern() {
     ok ? `${calls} GRAPH_TABLE call${calls === 1 ? '' : 's'}` : 'see errors')
 }
 
+// renderDirectives shows what the M6 mapping directives do to the generated
+// DDL, next to the query compiled against the same schema: @column(name:)
+// renames the column the graph exposes, so the compiled SQL projects the column
+// while the GraphQL field keeps its own name.
+function renderDirectives() {
+  const sdl = el('c-sdl').value
+  let ok = renderSchema('c-schema', sdl)
+
+  const cmp = globalThis.gopgqlCompile(sdl, el('c-query').value, el('c-vars').value)
+  setCode('c-sql', cmp.error || cmp.sql)
+  if (cmp.error) ok = false
+
+  setStatus('c-status', ok, ok ? 'generated' : 'see errors')
+}
+
 // depthLimit reads the Max depth input, falling back to the compiler's own
 // default when it is blank or not a number. Negatives are clamped here the way
 // the compiler clamps them, so the ceiling reported back is the one applied.
@@ -145,6 +160,7 @@ function renderDelta() {
 const scenarios = {
   traversal: { render: renderTraversal, inputs: ['t-sdl', 't-query', 't-vars'] },
   multipattern: { render: renderMultiPattern, inputs: ['p-sdl', 'p-query', 'p-vars'] },
+  directives: { render: renderDirectives, inputs: ['c-sdl', 'c-query', 'c-vars'] },
   depth: { render: renderDepth, inputs: ['d-sdl', 'd-query', 'd-vars', 'd-max'] },
   interfaces: { render: renderInterfaces, inputs: ['i-sdl', 'i-query'] },
   migration: { render: renderMigration, inputs: ['m-sdl'] },
@@ -197,6 +213,10 @@ async function boot() {
     seed('p-sdl', globalThis.gopgqlExampleSDL)
     seed('p-query', globalThis.gopgqlExampleMultiQuery)
     seed('p-vars', globalThis.gopgqlExampleVars)
+
+    seed('c-sdl', globalThis.gopgqlExampleDirectivesSDL)
+    seed('c-query', globalThis.gopgqlExampleDirectivesQuery)
+    seed('c-vars', globalThis.gopgqlExampleDirectivesVars)
 
     seed('d-sdl', globalThis.gopgqlExampleSDL)
     seed('d-query', globalThis.gopgqlExampleDeepQuery)

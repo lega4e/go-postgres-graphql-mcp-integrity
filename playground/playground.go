@@ -45,6 +45,26 @@ const ExampleQuery = `{ persons(name: $n) { name follows { name follows { name f
 // LEFT JOINed on the projected root id (SPEC.md §6.2, §7 → M5).
 const ExampleMultiPatternQuery = `{ persons(name: $n) { name follows { name } followedBy { name } } }`
 
+// ExampleDirectivesSDL exercises the M6 mapping directives at once: a renamed
+// column, an overridden type, a database-enforced unique, and two indexes — one
+// named with an explicit access method, one bare so the generator derives the
+// name (SPEC.md §5, §7 → M6).
+const ExampleDirectivesSDL = `type Product @node(label: "product") {
+  id: ID!
+  sku: String! @unique
+  title: String! @column(name: "name")
+  price: Float! @column(type: "numeric(10,2)")
+  category: String! @index(name: "products_category_idx", using: "btree")
+  vendor: String @index
+}`
+
+// ExampleDirectivesQuery reads the renamed column: the GraphQL field stays
+// `title`, while the graph exposes — and the compiler projects — `name`.
+const ExampleDirectivesQuery = `{ products(title: $t) { title price category } }`
+
+// ExampleDirectivesVars binds ExampleDirectivesQuery's variable.
+const ExampleDirectivesVars = `{ "t": "Chain" }`
+
 // ExampleDeepQuery is one hop past the default MaxDepth. It compiles to a typed
 // *compiler.DepthExceededError rather than a truncated pattern: SQL/PGQ has no
 // variable-length paths, so gopgql rejects (SPEC.md §3, decision 3).

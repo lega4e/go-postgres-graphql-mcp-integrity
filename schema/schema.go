@@ -24,6 +24,11 @@ type Column struct {
 	PrimaryKey bool
 	// Default is a raw default expression (e.g. "gen_random_uuid()"), or "".
 	Default string
+	// Unique adds a UNIQUE constraint on the column, so the database itself
+	// rejects a duplicate (SPEC.md §7 → M6). PostgreSQL names the implicit
+	// constraint <table>_<column>_key, which is the name a delta migration uses
+	// when it adds or drops it later.
+	Unique bool
 	// References, when non-nil, is the foreign key target for this column.
 	References *Reference
 }
@@ -39,6 +44,16 @@ type Index struct {
 	Name    string
 	Table   string
 	Columns []string
+	// Method is the access method (`USING btree`, `hash`, `gin`, …) from
+	// @index(using:); empty means the database default (SPEC.md §7 → M6).
+	Method string
+}
+
+// UniqueConstraintName is the constraint name PostgreSQL gives an implicit
+// single-column UNIQUE, and the name gopgql uses when a delta adds or drops one,
+// so the two paths always agree.
+func UniqueConstraintName(table, column string) string {
+	return table + "_" + column + "_key"
 }
 
 // LabelProperties is one graph label exposed on a table together with the

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/lega4e/gopgql/generator"
+	"github.com/lega4e/gopgql/schema"
 	"github.com/lega4e/gopgql/sdl"
 )
 
@@ -263,4 +264,94 @@ type Person implements Actor @node(label: "person", table: "people") {
 	if _, err := generator.Build(doc, ""); err == nil {
 		t.Error("expected an error when an interface and its implementor claim one label")
 	}
+}
+
+// m6SDL exercises every M6 mapping directive at once.
+const m6SDL = `type Product @node(label: "product") {
+  id: ID!
+  sku: String! @unique
+  title: String! @column(name: "name")
+  price: Float! @column(type: "numeric(10,2)")
+  category: String! @index(name: "products_category_idx", using: "btree")
+  vendor: String @index
+}`
+
+// TestBuildM6Directives proves the directives reach the physical model: a
+// renamed column (also renaming the graph property), an overridden type, a
+// UNIQUE column, and one index per @index with a derived name when none was
+// given (SPEC.md §7 → M6).
+func TestBuildM6Directives(t *testing.T) {
+	m := buildModel(t, m6SDL)
+	vt := m.VertexTables[0]
+
+	byName := map[string]schema.Column{}
+	for _, c := range vt.Columns {
+		byName[c.Name] = c
+	}
+	if _, ok := byName["title"]; ok {
+		t.Error("the column is named by @column(name:), so no `title` column should exist")
+	}
+	if _, ok := byName["name"]; !ok {
+		t.Fatal("@column(name: \"name\") produced no `name` column")
+	}
+	if got := byName["price"].Type; got != "numeric(10,2)" {
+		t.Errorf("price type = %q, want numeric(10,2)", got)
+	}
+	if !byName["sku"].Unique {
+		t.Error("sku should carry a UNIQUE constraint")
+	}
+	if !hasString(vt.Properties, "name") || hasString(vt.Properties, "title") {
+		t.Errorf("graph properties = %v, want the column name rather than the field name", vt.Properties)
+	}
+
+	idx := map[string]schema.Index{}
+	for _, i := range m.Indexes {
+		idx[i.Name] = i
+	}
+	if got, ok := idx["products_category_idx"]; !ok || got.Method != "btree" {
+		t.Errorf("named index = %+v, want method btree", got)
+	}
+	if got, ok := idx["products_vendor_idx"]; !ok || got.Method != "" {
+		t.Errorf("bare @index = %+v, want the derived name and no explicit method", got)
+	}
+}
+
+// TestDDLM6Directives pins the emitted DDL: an inline UNIQUE, the overridden
+// type, and a CREATE INDEX per @index — including on a vertex table, which only
+// edge tables had before M6.
+func TestDDLM6Directives(t *testing.T) {
+	out := buildDDL(t, m6SDL)
+	for _, want := range []string{
+		`sku text NOT NULL UNIQUE`,
+		`price numeric(10,2) NOT NULL`,
+		`CREATE INDEX products_category_idx ON products USING btree (category);`,
+		`CREATE INDEX products_vendor_idx ON products (vendor);`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("DDL is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// buildModel parses an SDL and returns the physical model behind it.
+func buildModel(t *testing.T, src string) *schema.Schema {
+	t.Helper()
+	doc, err := sdl.Parse(src)
+	if err != nil {
+		t.Fatalf("sdl.Parse: %v", err)
+	}
+	m, err := generator.Build(doc, "")
+	if err != nil {
+		t.Fatalf("generator.Build: %v", err)
+	}
+	return m
+}
+
+func hasString(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }

@@ -10,6 +10,32 @@ See [`SPEC.md`](./SPEC.md) for the full design and milestone plan.
 
 ## Status
 
+**M6 — SDL widening: moderate.** The SDL stops being structure-only
+([`SPEC.md` §5](./SPEC.md), [§7](./SPEC.md) → M6):
+
+- **`@column(name:)`** renames the physical column — and with it the property the
+  graph exposes, so the compiler projects and filters on the column while the
+  GraphQL field keeps its own name.
+- **`@column(type:)`** overrides the default scalar mapping
+  ([`SPEC.md` §5.1](./SPEC.md)): `price: Float! @column(type: "numeric(10,2)")`
+  reaches the database as `numeric(10,2)` and round-trips exact values.
+- **`@unique`** puts the constraint in the database, so a duplicate is rejected
+  by PostgreSQL (SQLSTATE 23505) rather than by anything gopgql checks.
+- **`@index(name:, using:)`** adds a secondary index, with the name derived from
+  the table and column when it is omitted.
+- **The differ follows.** A constraint or index added to an SDL becomes an
+  `ALTER TABLE … ADD CONSTRAINT` / `CREATE INDEX` in the next delta, an index
+  whose definition moved is dropped and recreated (PostgreSQL has no `ALTER` for
+  either), and every Down section is the exact inverse.
+
+The M6 godog scenarios read the column type back from the catalog, assert the
+stored value as text so exactness is the database's word and not the driver's,
+force a unique violation and check its SQLSTATE, and prove the index is both in
+`pg_indexes` **and** chosen by the planner via `EXPLAIN` over 2 020 seeded rows.
+A further scenario applies a delta that adds a constraint and an index, then
+rolls it back and asserts both are gone. The playground's **Directives** tab
+shows the DDL and compiled query for an editable SDL using all four directives.
+
 **M5 — Multi-pattern workaround and joins.** A level may now select more than
 one relationship ([`SPEC.md` §7](./SPEC.md) → M5). That shape would need
 comma-separated path patterns in a single `MATCH`, which PG19 parses but does not
@@ -120,6 +146,7 @@ in the middle, generated database schema and compiled query on the right:
 | Tab           | Scenario                                                                                             |
 |---------------|------------------------------------------------------------------------------------------------------|
 | *Traversal*   | The three-hop exit query: one `GRAPH_TABLE`, bind parameters, isomorphism guards.                     |
+| *Directives*  | The M6 mapping directives in the generated DDL: a renamed column, an overridden type, a UNIQUE, and two indexes. |
 | *Multi-pattern* | A branching query split into one `GRAPH_TABLE` per branch, `LEFT JOIN`ed on projected ids; the status line counts the calls. |
 | *Depth limit* | A four-hop query refused with the typed `*DepthExceededError`; move the `MaxDepth` control and watch it flip. |
 | *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
