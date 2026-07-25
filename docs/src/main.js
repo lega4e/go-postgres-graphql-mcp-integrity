@@ -1,4 +1,5 @@
 import './style.css'
+import { createInput, createOutput, getDoc, setDoc } from './editor.js'
 // Vendored, zero-dependency Web Components (lega4e/ui-kit). Importing the
 // entry registers every <ga-*> element; the tokens give the page its theme.
 import '../vendor/ui-kit/src/index.js'
@@ -12,6 +13,23 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 const REQUIRED_API_VERSION = 4
 
 const el = (id) => document.getElementById(id)
+
+// Every upgraded pane, by the id its <textarea>/<ga-code> had. The rest of the
+// page keeps addressing panes by id and never learns they became editors.
+const editors = new Map()
+
+/** The text in a pane: the editor's document, or a plain input's value. */
+function valueOf(id) {
+  const view = editors.get(id)
+  return view ? getDoc(view) : el(id).value
+}
+
+/** Replace a pane's text. */
+function setValue(id, text) {
+  const view = editors.get(id)
+  if (view) setDoc(view, text)
+  else el(id).value = text
+}
 
 const bootEl = el('boot')
 const maxDepthEl = el('maxdepth')
@@ -28,10 +46,12 @@ function loadScript(src) {
   })
 }
 
-// setCode writes text into a <ga-code> block. ga-code renders its default slot,
-// so its textContent is both what is shown and what its copy button copies.
+// setCode writes a generated pane: the read-only editor it was upgraded to, or
+// the original <ga-code> block when the upgrade did not run.
 function setCode(id, text) {
-  el(id).textContent = text
+  const view = editors.get(id)
+  if (view) setDoc(view, text ?? '')
+  else el(id).textContent = text
 }
 
 function setStatus(id, ok, message) {
@@ -53,10 +73,10 @@ function renderSchema(outId, sdl) {
 // its own outputs, so a broken query in one tab leaves the others alone.
 
 function renderTraversal() {
-  const sdl = el('t-sdl').value
+  const sdl = valueOf('t-sdl')
   let ok = renderSchema('t-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('t-query').value, el('t-vars').value)
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('t-query'), valueOf('t-vars'))
   setCode('t-sql', cmp.error || cmp.sql)
   setCode('t-params', cmp.error ? '—' : cmp.params)
   if (cmp.error) ok = false
@@ -69,10 +89,10 @@ function renderTraversal() {
 // their joins. The count is reported in the status line, since "how many
 // statements did this become" is the point of the tab.
 function renderMultiPattern() {
-  const sdl = el('p-sdl').value
+  const sdl = valueOf('p-sdl')
   let ok = renderSchema('p-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('p-query').value, el('p-vars').value)
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('p-query'), valueOf('p-vars'))
   setCode('p-sql', cmp.error || cmp.sql)
   setCode('p-params', cmp.error ? '—' : cmp.params)
   if (cmp.error) ok = false
@@ -87,10 +107,10 @@ function renderMultiPattern() {
 // renames the column the graph exposes, so the compiled SQL projects the column
 // while the GraphQL field keeps its own name.
 function renderDirectives() {
-  const sdl = el('c-sdl').value
+  const sdl = valueOf('c-sdl')
   let ok = renderSchema('c-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('c-query').value, el('c-vars').value)
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('c-query'), valueOf('c-vars'))
   setCode('c-sql', cmp.error || cmp.sql)
   if (cmp.error) ok = false
 
@@ -101,17 +121,17 @@ function renderDirectives() {
 // default when it is blank or not a number. Negatives are clamped here the way
 // the compiler clamps them, so the ceiling reported back is the one applied.
 function depthLimit() {
-  const n = Number.parseInt(el('d-max').value, 10)
+  const n = Number.parseInt(valueOf('d-max'), 10)
   return Number.isFinite(n) ? Math.max(0, n) : (globalThis.gopgqlMaxDepth ?? 3)
 }
 
 // renderDepth treats a depth rejection as success: refusing to truncate a
 // pattern past MaxDepth is the designed outcome, not a page error.
 function renderDepth() {
-  const sdl = el('d-sdl').value
+  const sdl = valueOf('d-sdl')
   const schemaOk = renderSchema('d-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('d-query').value, el('d-vars').value, depthLimit())
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('d-query'), valueOf('d-vars'), depthLimit())
   if (cmp.depthExceeded) {
     setCode('d-sql',
       'rejected at compile time — *compiler.DepthExceededError\n\n' +
@@ -126,10 +146,10 @@ function renderDepth() {
 }
 
 function renderInterfaces() {
-  const sdl = el('i-sdl').value
+  const sdl = valueOf('i-sdl')
   let ok = renderSchema('i-schema', sdl)
 
-  const cmp = globalThis.gopgqlCompile(sdl, el('i-query').value, '')
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('i-query'), '')
   setCode('i-sql', cmp.error || cmp.sql)
   if (cmp.error) ok = false
 
@@ -137,7 +157,7 @@ function renderInterfaces() {
 }
 
 function renderMigration() {
-  const mig = globalThis.gopgqlMigration(el('m-sdl').value)
+  const mig = globalThis.gopgqlMigration(valueOf('m-sdl'))
   setCode('m-init', mig.error || mig.migration)
   setStatus('m-status', !mig.error, mig.error ? 'see errors' : 'generated')
 }
@@ -145,7 +165,7 @@ function renderMigration() {
 // renderDelta diffs the revised schema against the one in the scenario above it,
 // which is why editing either textarea re-runs it.
 function renderDelta() {
-  const dl = globalThis.gopgqlDelta(el('m-sdl').value, el('m-sdl2').value)
+  const dl = globalThis.gopgqlDelta(valueOf('m-sdl'), valueOf('m-sdl2'))
   setCode('m-delta', dl.error || dl.delta)
   if (dl.error) {
     setStatus('m-status2', false, 'see errors')
@@ -167,6 +187,67 @@ const scenarios = {
   delta: { render: renderDelta, inputs: ['m-sdl', 'm-sdl2'] },
 }
 
+// onPaneEdited re-renders every scenario that reads the edited pane. An input
+// feeding two scenarios (the migration SDL feeds the delta as well) re-runs
+// both, which is what the textarea listeners used to do.
+function onPaneEdited(id) {
+  if (!globalThis.gopgqlSchema) return
+  for (const s of Object.values(scenarios)) {
+    if (s.inputs.includes(id)) s.render()
+  }
+}
+
+/**
+ * Turn the static markup into editors: every `data-lang` textarea becomes an
+ * editable CodeMirror pane, and every `data-lang` <ga-code> becomes a read-only
+ * one with its own copy button. Panes keep their ids, so the rest of the page
+ * is unchanged — and if this never runs, the original markup still works.
+ */
+function upgradeEditors() {
+  for (const ta of document.querySelectorAll('textarea.code-input[data-lang]')) {
+    const id = ta.id
+    const wrap = document.createElement('div')
+    wrap.className = 'code-editor'
+    wrap.id = id
+    ta.removeAttribute('id')
+    ta.replaceWith(wrap)
+    const view = createInput({
+      parent: wrap,
+      doc: ta.value,
+      lang: ta.dataset.lang,
+      minHeight: `${Math.max(Number(ta.rows) || 3, 2) * 1.5}em`,
+      onChange: () => onPaneEdited(id),
+    })
+    editors.set(id, view)
+    // A <div> is not labelable, so carry the label across by hand.
+    const label = document.querySelector(`label[for="${id}"]`)
+    if (label) {
+      wrap.setAttribute('aria-label', label.textContent.trim())
+      label.addEventListener('click', () => view.focus())
+    }
+  }
+
+  for (const code of document.querySelectorAll('ga-code[data-lang]')) {
+    const id = code.id
+    const wrap = document.createElement('div')
+    wrap.className = 'code-view'
+    wrap.id = id
+    const copy = document.createElement('button')
+    copy.type = 'button'
+    copy.className = 'code-copy'
+    copy.textContent = 'Copy'
+    copy.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(getDoc(editors.get(id)))
+      copy.textContent = 'Copied'
+      setTimeout(() => { copy.textContent = 'Copy' }, 1200)
+    })
+    code.replaceWith(wrap)
+    const view = createOutput({ parent: wrap, doc: code.textContent.trim(), lang: code.dataset.lang })
+    editors.set(id, view)
+    wrap.appendChild(copy)
+  }
+}
+
 function renderAll() {
   for (const s of Object.values(scenarios)) s.render()
 }
@@ -174,7 +255,7 @@ function renderAll() {
 // seed fills an input from a value the WASM module exported, leaving whatever is
 // there if the export is missing.
 function seed(id, value) {
-  if (value) el(id).value = value
+  if (value) setValue(id, value)
 }
 
 async function boot() {
@@ -243,12 +324,17 @@ async function boot() {
   }
 }
 
+upgradeEditors()
+
 for (const [name, scenario] of Object.entries(scenarios)) {
   for (const btn of document.querySelectorAll(`.run[data-scenario="${name}"]`)) {
     btn.addEventListener('click', scenario.render)
   }
-  // Live regeneration as the schema or query is edited.
+  // Live regeneration as the schema or query is edited. Editor panes report
+  // their own changes through onPaneEdited; anything left as a plain input
+  // (the depth spinner) still needs a listener.
   for (const id of scenario.inputs) {
+    if (editors.has(id)) continue
     el(id).addEventListener('input', () => {
       if (globalThis.gopgqlSchema) scenario.render()
     })

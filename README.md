@@ -141,7 +141,11 @@ apply of the same final schema and asserts the resulting schemas are identical.
 The **WASM playground** (`cmd/wasm` + `docs/`) runs the real
 `sdl`+`generator`+`migrate`+`compiler` in the browser as compiled Go. Each tab is
 one complete, editable scenario — schema and query in on the left, **Generate**
-in the middle, generated database schema and compiled query on the right:
+in the middle, generated database schema and compiled query on the right. Every
+pane is a CodeMirror 6 editor: GraphQL on the inputs, JSON on the variables, and
+SQL on the generated output — the stock PostgreSQL dialect **extended** with
+PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
+`CREATE PROPERTY GRAPH` …), which no published grammar covers yet:
 
 | Tab           | Scenario                                                                                             |
 |---------------|------------------------------------------------------------------------------------------------------|
