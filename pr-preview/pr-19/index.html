@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-NMBx-ZFO.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-DLoYVKZd.css">
+    <script type="module" crossorigin src="./assets/index-DMUPBtL0.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-qTqsWIqk.css">
   </head>
   <body class="ga-theme">
     <main>
@@ -78,12 +78,14 @@
         <div slot="depth">
           <p class="panel-hint">
             SQL/PGQ has no variable-length paths, so gopgql refuses a selection
-            nested past <code>MaxDepth</code> (default
-            <span id="maxdepth">3</span>) instead of silently truncating the
+            nested past <code>MaxDepth</code> instead of silently truncating the
             pattern. The rejection is a typed
             <code>*compiler.DepthExceededError</code> raised at compile time, so
-            no SQL exists to send. Remove a level from the query to watch it
-            compile.
+            no SQL exists to send. The ceiling is per-<code>Compiler</code>
+            configuration (<code>compiler.WithMaxDepth</code>), not a constant —
+            it defaults to <span id="maxdepth">3</span>. Raise it below to
+            compile this four-hop query, or lower it until a shorter one is
+            refused.
           </p>
           <div class="scenario">
             <div class="inputs">
@@ -96,6 +98,10 @@
               <label for="d-vars">Variables (JSON)</label>
               <textarea id="d-vars" class="code-input" rows="2" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
+
+              <label for="d-max">Max depth (hops from the root field)</label>
+              <input id="d-max" class="code-input num-input" type="number"
+                min="0" max="12" step="1" inputmode="numeric" />
             </div>
             <div class="action">
               <ga-button class="run" data-scenario="depth" variant="primary" disabled>

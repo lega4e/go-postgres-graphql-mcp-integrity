@@ -1,4 +1,4 @@
-var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configurable:!0,writable:!0,value:t}):r[e]=t;var i=(r,e,t)=>B(r,typeof e!="symbol"?e+"":e,t);(function(){const e=document.createElement("link").relList;if(e&&e.supports&&e.supports("modulepreload"))return;for(const s of document.querySelectorAll('link[rel="modulepreload"]'))a(s);new MutationObserver(s=>{for(const o of s)if(o.type==="childList")for(const l of o.addedNodes)l.tagName==="LINK"&&l.rel==="modulepreload"&&a(l)}).observe(document,{childList:!0,subtree:!0});function t(s){const o={};return s.integrity&&(o.integrity=s.integrity),s.referrerPolicy&&(o.referrerPolicy=s.referrerPolicy),s.crossOrigin==="use-credentials"?o.credentials="include":s.crossOrigin==="anonymous"?o.credentials="omit":o.credentials="same-origin",o}function a(s){if(s.ep)return;s.ep=!0;const o=t(s);fetch(s.href,o)}})();const J=`
+var U=Object.defineProperty;var B=(r,e,t)=>e in r?U(r,e,{enumerable:!0,configurable:!0,writable:!0,value:t}):r[e]=t;var i=(r,e,t)=>B(r,typeof e!="symbol"?e+"":e,t);(function(){const e=document.createElement("link").relList;if(e&&e.supports&&e.supports("modulepreload"))return;for(const s of document.querySelectorAll('link[rel="modulepreload"]'))a(s);new MutationObserver(s=>{for(const o of s)if(o.type==="childList")for(const l of o.addedNodes)l.tagName==="LINK"&&l.rel==="modulepreload"&&a(l)}).observe(document,{childList:!0,subtree:!0});function t(s){const o={};return s.integrity&&(o.integrity=s.integrity),s.referrerPolicy&&(o.referrerPolicy=s.referrerPolicy),s.crossOrigin==="use-credentials"?o.credentials="include":s.crossOrigin==="anonymous"?o.credentials="omit":o.credentials="same-origin",o}function a(s){if(s.ep)return;s.ep=!0;const o=t(s);fetch(s.href,o)}})();const J=`
   :host {
     box-sizing: border-box;
     font-family: var(--ga-font-sans, ui-sans-serif, system-ui, sans-serif);
@@ -223,7 +223,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
   stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
   <path d="M20 6 9 17l-5-5"></path></svg>`,Q=`<svg width="14" height="14" viewBox="0 0 24 24" fill="none"
   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7 17 17 7"></path><path d="M7 7h10v10"></path></svg>`;c("ga-code",k);class _ extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.length-1;return`<nav aria-label="Breadcrumb" part="nav"><ol part="list">${e.map((s,o)=>{const l=o>0?'<span class="sep" part="separator" aria-hidden="true">/</span>':"",u=o===t,R=n(s.label),U=!u&&s.href?`<a part="link" href="${n(s.href)}">${R}</a>`:`<span class="current" part="current" ${u?'aria-current="page"':""}>${R}</span>`;return`<li>${l}${U}</li>`}).join("")}</ol></nav>`}}i(_,"observed",["items"]),i(_,"styles",`
+  <path d="M7 17 17 7"></path><path d="M7 7h10v10"></path></svg>`;c("ga-code",k);class _ extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){const e=this._parse(),t=e.length-1;return`<nav aria-label="Breadcrumb" part="nav"><ol part="list">${e.map((s,o)=>{const l=o>0?'<span class="sep" part="separator" aria-hidden="true">/</span>':"",u=o===t,R=n(s.label),I=!u&&s.href?`<a part="link" href="${n(s.href)}">${R}</a>`:`<span class="current" part="current" ${u?'aria-current="page"':""}>${R}</span>`;return`<li>${l}${I}</li>`}).join("")}</ol></nav>`}}i(_,"observed",["items"]),i(_,"styles",`
     :host { display: block; }
     ol {
       display: flex;
@@ -397,7 +397,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     }
     /* Collapse the gap when only the body is present. */
     .card:not(:has(.header.show)):not(:has(.footer.show)) { gap: 0; }
-  `);c("ga-card",E);class L extends d{_initials(e){return e.trim().split(/\s+/).slice(0,2).map(a=>{var s;return((s=a[0])==null?void 0:s.toUpperCase())??""}).join("")||"?"}template(){const e=this.attr("src"),t=this.attr("name",""),a=e?`<img src="${n(e)}" alt="${n(t)}" loading="lazy" />`:`<span aria-hidden="true">${n(this._initials(t))}</span>`;return`<div class="avatar" part="avatar" role="img" aria-label="${n(t)}">${a}</div>`}}i(L,"observed",["src","name","size","square"]),i(L,"styles",`
+  `);c("ga-card",E);class q extends d{_initials(e){return e.trim().split(/\s+/).slice(0,2).map(a=>{var s;return((s=a[0])==null?void 0:s.toUpperCase())??""}).join("")||"?"}template(){const e=this.attr("src"),t=this.attr("name",""),a=e?`<img src="${n(e)}" alt="${n(t)}" loading="lazy" />`:`<span aria-hidden="true">${n(this._initials(t))}</span>`;return`<div class="avatar" part="avatar" role="img" aria-label="${n(t)}">${a}</div>`}}i(q,"observed",["src","name","size","square"]),i(q,"styles",`
     :host { display: inline-block; }
     .avatar {
       display: inline-flex;
@@ -418,7 +418,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     :host([size="sm"]) .avatar { width: 28px; height: 28px; font-size: 11px; }
     :host([size="lg"]) .avatar { width: 64px; height: 64px; font-size: var(--ga-fs-lg, 20px); }
     img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  `);c("ga-avatar",L);class x extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("error"),a=this.attr("hint"),s=this.hasFlag("required")?'<span class="req">*</span>':"";return`
+  `);c("ga-avatar",q);class x extends d{constructor(){var e;super(),this._internals=(e=this.attachInternals)==null?void 0:e.call(this)}template(){const e=this.attr("label"),t=this.attr("error"),a=this.attr("hint"),s=this.hasFlag("required")?'<span class="req">*</span>':"";return`
       <div class="field">
         ${e?`<label part="label">${n(e)}${s}</label>`:""}
         <input
@@ -519,7 +519,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
       background: var(--ga-accent-contrast, #000);
     }
     .label { font-size: var(--ga-fs-sm, 14px); color: var(--ga-fg, #ededed); }
-  `);c("ga-switch",m);class q extends d{template(){return'<div class="spinner" part="spinner" role="status" aria-label="Loading"></div>'}}i(q,"observed",["size","color"]),i(q,"styles",`
+  `);c("ga-switch",m);class L extends d{template(){return'<div class="spinner" part="spinner" role="status" aria-label="Loading"></div>'}}i(L,"observed",["size","color"]),i(L,"styles",`
     :host { display: inline-flex; }
     .spinner {
       width: 20px; height: 20px;
@@ -537,7 +537,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     :host([color="red"])    .spinner { color: var(--ga-red, #ff6568); }
     :host([color="fg"])     .spinner { color: var(--ga-fg, #ededed); }
     @keyframes spin { to { transform: rotate(360deg); } }
-  `);c("ga-spinner",q);class C extends d{template(){const e=this.attr("title"),t=this.hasFlag("dismissible")?'<button class="close" part="close" aria-label="Dismiss">&times;</button>':"";return`
+  `);c("ga-spinner",L);class C extends d{template(){const e=this.attr("title"),t=this.hasFlag("dismissible")?'<button class="close" part="close" aria-label="Dismiss">&times;</button>':"";return`
       <div class="alert" part="alert" role="alert">
         <span class="dot" aria-hidden="true"></span>
         <div class="content">
@@ -672,14 +672,14 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
       stroke: currentColor; fill: none;
       stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
     }
-  `);c("ga-icon",M);class j extends d{template(){const e=this.attr("label","Drop files here or click to browse");return`
+  `);c("ga-icon",M);class S extends d{template(){const e=this.attr("label","Drop files here or click to browse");return`
       <label class="drop" part="drop">
         <ga-icon class="icon" name="upload" size="24"></ga-icon>
         <span class="label">${n(e)}</span>
         <span class="hint"><slot></slot></span>
         <input type="file" ${this.hasFlag("multiple")?"multiple":""} accept="${n(this.attr("accept"))}" />
       </label>
-    `}render(){super.render();const e=this.$(".drop"),t=this.$("input");t.addEventListener("change",()=>this._emit(t.files)),["dragenter","dragover"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.add("dragging")})),["dragleave","dragend","drop"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.remove("dragging")})),e.addEventListener("drop",a=>{var s,o;(o=(s=a.dataTransfer)==null?void 0:s.files)!=null&&o.length&&this._emit(a.dataTransfer.files)})}_emit(e){e&&e.length&&this.emit("files",{files:Array.from(e)})}}i(j,"observed",["accept","multiple","label"]),i(j,"styles",`
+    `}render(){super.render();const e=this.$(".drop"),t=this.$("input");t.addEventListener("change",()=>this._emit(t.files)),["dragenter","dragover"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.add("dragging")})),["dragleave","dragend","drop"].forEach(a=>e.addEventListener(a,s=>{s.preventDefault(),e.classList.remove("dragging")})),e.addEventListener("drop",a=>{var s,o;(o=(s=a.dataTransfer)==null?void 0:s.files)!=null&&o.length&&this._emit(a.dataTransfer.files)})}_emit(e){e&&e.length&&this.emit("files",{files:Array.from(e)})}}i(S,"observed",["accept","multiple","label"]),i(S,"styles",`
     :host { display: block; }
     .drop {
       display: flex;
@@ -706,11 +706,11 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     .hint { font-size: var(--ga-fs-xs, 12px); color: var(--ga-dim, #454545); }
     .hint:empty { display: none; }
     input { display: none; }
-  `);c("ga-file-drop",j);class S extends d{template(){return`
+  `);c("ga-file-drop",S);class j extends d{template(){return`
       <button class="fab" part="fab" aria-label="${n(this.attr("label","Action"))}">
         <slot>+</slot>
       </button>
-    `}}i(S,"observed",["color","position","label"]),i(S,"styles",`
+    `}}i(j,"observed",["color","position","label"]),i(j,"styles",`
     :host { display: contents; }
     .fab {
       --_c: var(--ga-accent, #54a2ff);
@@ -745,7 +745,7 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     :host([color="amber"])  .fab { --_c: var(--ga-amber, #fcbb00); }
     :host([color="purple"]) .fab { --_c: var(--ga-purple, #ac4bff); }
     :host([color="red"])    .fab { --_c: var(--ga-red, #ff6568); }
-  `);c("ga-fab",S);class F extends d{template(){const e=this.attr("title");return`
+  `);c("ga-fab",j);class F extends d{template(){const e=this.attr("title");return`
       <div class="scrim" part="scrim"></div>
       <div class="panel" part="panel" role="dialog" aria-modal="true">
         <div class="head" part="header">
@@ -839,13 +839,13 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
       background: var(--ga-accent, #54a2ff); cursor: pointer;
     }
     input[type="range"]::-moz-range-track { height: 6px; border-radius: 9999px; background: var(--ga-bg-elev-hover, #1f1f1f); }
-  `);c("ga-slider",y);class O extends d{template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${n(e)}"`:"";return`
+  `);c("ga-slider",y);class D extends d{template(){const e=this.attr("href"),t=e?"a":"div",a=e?`href="${n(e)}"`:"";return`
       <header class="hdr" part="header">
         <${t} class="brand" part="brand" ${a}><slot name="brand">${n(this.attr("brand"))}</slot></${t}>
         <div class="spacer"></div>
         <nav class="actions" part="actions"><slot></slot></nav>
       </header>
-    `}}i(O,"observed",["brand","href","static"]),i(O,"styles",`
+    `}}i(D,"observed",["brand","href","static"]),i(D,"styles",`
     :host { display: block; }
     .hdr {
       position: sticky; top: 0; z-index: 50;
@@ -877,13 +877,13 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
       transition: color var(--ga-transition, 0.18s ease);
     }
     ::slotted(a:hover) { color: var(--ga-fg, #ededed) !important; }
-  `);c("ga-header",O);class D extends d{template(){return`
+  `);c("ga-header",D);class O extends d{template(){return`
       <div class="sheet" part="sheet">
         <div class="grip" part="handle"><span class="bar"></span></div>
         <div class="head" part="header"><slot name="header"></slot></div>
         <div class="body" part="body"><slot></slot></div>
       </div>
-    `}connectedCallback(){super.connectedCallback(),this._onResize=()=>this._apply(),window.addEventListener("resize",this._onResize),this._onMove=e=>this._move(e),this._onUp=()=>this._up(),window.addEventListener("pointermove",this._onMove),window.addEventListener("pointerup",this._onUp)}disconnectedCallback(){window.removeEventListener("resize",this._onResize),window.removeEventListener("pointermove",this._onMove),window.removeEventListener("pointerup",this._onUp)}attributeChangedCallback(){this._mounted&&this._apply()}render(){super.render();const e=this.$(".grip"),t=this.$(".head");for(const a of[e,t])a==null||a.addEventListener("pointerdown",s=>this._down(s));requestAnimationFrame(()=>this._apply())}get open(){return this.hasFlag("open")}get snap(){return this.attr("snap","half")}show(e){e&&this.setAttribute("snap",e),this.setAttribute("open",""),this._apply(),this.emit("open")}close(){this.removeAttribute("open"),this._apply(),this.emit("close")}snapTo(e){this.setAttribute("snap",e),this._apply(),this.emit("snapchange",{snap:e})}_snaps(){var a;const e=((a=this.$(".sheet"))==null?void 0:a.offsetHeight)||window.innerHeight*.88,t=window.innerHeight;return{full:0,half:Math.max(0,e-t*.45),peek:Math.max(0,e-128),closed:e}}_currentY(){var t;const e=/translateY\(([-0-9.]+)px\)/.exec(((t=this.$(".sheet"))==null?void 0:t.style.transform)||"");return e?parseFloat(e[1]):this._snaps().closed}_apply(){const e=this.$(".sheet");if(!e)return;const t=this._snaps(),a=this.open?t[this.snap]??t.half:t.closed;e.style.transform=`translateY(${a}px)`}_down(e){var t;this._dragging=!0,this._startY=e.clientY,this._startTf=this._currentY(),(t=this.$(".sheet"))==null||t.classList.add("dragging")}_move(e){if(!this._dragging)return;const t=this._snaps(),a=Math.min(t.closed,Math.max(0,this._startTf+(e.clientY-this._startY)));this.$(".sheet").style.transform=`translateY(${a}px)`}_up(){var s;if(!this._dragging)return;this._dragging=!1,(s=this.$(".sheet"))==null||s.classList.remove("dragging");const e=this._snaps(),t=this._currentY();if(t>e.peek+80){this.close();return}let a="full";for(const o of["full","half","peek"])Math.abs(e[o]-t)<Math.abs(e[a]-t)&&(a=o);a!==this.snap&&(this.setAttribute("snap",a),this.emit("snapchange",{snap:a})),this._apply()}}i(D,"observed",["open","snap"]),i(D,"styles",`
+    `}connectedCallback(){super.connectedCallback(),this._onResize=()=>this._apply(),window.addEventListener("resize",this._onResize),this._onMove=e=>this._move(e),this._onUp=()=>this._up(),window.addEventListener("pointermove",this._onMove),window.addEventListener("pointerup",this._onUp)}disconnectedCallback(){window.removeEventListener("resize",this._onResize),window.removeEventListener("pointermove",this._onMove),window.removeEventListener("pointerup",this._onUp)}attributeChangedCallback(){this._mounted&&this._apply()}render(){super.render();const e=this.$(".grip"),t=this.$(".head");for(const a of[e,t])a==null||a.addEventListener("pointerdown",s=>this._down(s));requestAnimationFrame(()=>this._apply())}get open(){return this.hasFlag("open")}get snap(){return this.attr("snap","half")}show(e){e&&this.setAttribute("snap",e),this.setAttribute("open",""),this._apply(),this.emit("open")}close(){this.removeAttribute("open"),this._apply(),this.emit("close")}snapTo(e){this.setAttribute("snap",e),this._apply(),this.emit("snapchange",{snap:e})}_snaps(){var a;const e=((a=this.$(".sheet"))==null?void 0:a.offsetHeight)||window.innerHeight*.88,t=window.innerHeight;return{full:0,half:Math.max(0,e-t*.45),peek:Math.max(0,e-128),closed:e}}_currentY(){var t;const e=/translateY\(([-0-9.]+)px\)/.exec(((t=this.$(".sheet"))==null?void 0:t.style.transform)||"");return e?parseFloat(e[1]):this._snaps().closed}_apply(){const e=this.$(".sheet");if(!e)return;const t=this._snaps(),a=this.open?t[this.snap]??t.half:t.closed;e.style.transform=`translateY(${a}px)`}_down(e){var t;this._dragging=!0,this._startY=e.clientY,this._startTf=this._currentY(),(t=this.$(".sheet"))==null||t.classList.add("dragging")}_move(e){if(!this._dragging)return;const t=this._snaps(),a=Math.min(t.closed,Math.max(0,this._startTf+(e.clientY-this._startY)));this.$(".sheet").style.transform=`translateY(${a}px)`}_up(){var s;if(!this._dragging)return;this._dragging=!1,(s=this.$(".sheet"))==null||s.classList.remove("dragging");const e=this._snaps(),t=this._currentY();if(t>e.peek+80){this.close();return}let a="full";for(const o of["full","half","peek"])Math.abs(e[o]-t)<Math.abs(e[a]-t)&&(a=o);a!==this.snap&&(this.setAttribute("snap",a),this.emit("snapchange",{snap:a})),this._apply()}}i(O,"observed",["open","snap"]),i(O,"styles",`
     :host { display: contents; }
     .sheet {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
@@ -908,12 +908,12 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     .head:empty { display: none; }
 
     .body { flex: 1; overflow-y: auto; padding: 0 20px 24px; color: var(--ga-muted, #878787); line-height: 1.55; }
-  `);c("ga-bottom-sheet",D);class H extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var s;const e=this._parse(),t=this.attr("active")||((s=e[0])==null?void 0:s.id);return`<nav class="nav" part="nav" role="navigation">${e.map(o=>{const l=o.icon||"",u=/^[a-z][a-z0-9-]*$/.test(l)?`<ga-icon class="icon" name="${n(l)}" size="22"></ga-icon>`:`<span class="icon" aria-hidden="true">${n(l||"•")}</span>`;return`
+  `);c("ga-bottom-sheet",O);class N extends d{_parse(){try{return JSON.parse(this.attr("items","[]"))}catch{return[]}}template(){var s;const e=this._parse(),t=this.attr("active")||((s=e[0])==null?void 0:s.id);return`<nav class="nav" part="nav" role="navigation">${e.map(o=>{const l=o.icon||"",u=/^[a-z][a-z0-9-]*$/.test(l)?`<ga-icon class="icon" name="${n(l)}" size="22"></ga-icon>`:`<span class="icon" aria-hidden="true">${n(l||"•")}</span>`;return`
       <button class="item" part="item" data-id="${n(o.id)}"
         ${o.id===t?'aria-current="page"':""}>
         ${u}
         <span class="label">${n(o.label)}</span>
-      </button>`}).join("")}</nav>`}render(){super.render(),this.shadowRoot.querySelectorAll(".item").forEach(e=>e.addEventListener("click",()=>this._select(e.dataset.id)))}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}i(H,"observed",["items","active"]),i(H,"styles",`
+      </button>`}).join("")}</nav>`}render(){super.render(),this.shadowRoot.querySelectorAll(".item").forEach(e=>e.addEventListener("click",()=>this._select(e.dataset.id)))}_select(e){e!==this.attr("active")&&(this.setAttribute("active",e),this.emit("change",{id:e}))}}i(N,"observed",["items","active"]),i(N,"styles",`
     :host { display: block; }
     .nav {
       position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
@@ -941,8 +941,8 @@ var I=Object.defineProperty;var B=(r,e,t)=>e in r?I(r,e,{enumerable:!0,configura
     .item:focus-visible { outline: none; box-shadow: var(--ga-ring, 0 0 0 2px #000, 0 0 0 4px #54a2ff); border-radius: var(--ga-radius, 6px); }
     .icon { font-size: 20px; line-height: 1; }
     .label { font-size: 11px; line-height: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
-  `);c("ga-bottom-nav",H);const p=r=>document.getElementById(r),v=p("boot"),Z=p("maxdepth");function G(r){return new Promise((e,t)=>{const a=document.createElement("script");a.src=r,a.onload=()=>e(),a.onerror=()=>t(new Error(`failed to load ${r}`)),document.head.appendChild(a)})}function h(r,e){p(r).textContent=e}function b(r,e,t){const a=p(r);a.textContent=t,a.className=e?"status ok":"status error"}function N(r,e){const t=globalThis.gopgqlSchema(e);return h(r,t.error||t.schema),!t.error}function ee(){const r=p("t-sdl").value;let e=N("t-schema",r);const t=globalThis.gopgqlCompile(r,p("t-query").value,p("t-vars").value);h("t-sql",t.error||t.sql),h("t-params",t.error?"—":t.params),t.error&&(e=!1),b("t-status",e,e?"generated":"see errors")}function te(){const r=p("d-sdl").value,e=N("d-schema",r),t=globalThis.gopgqlCompile(r,p("d-query").value,p("d-vars").value);if(t.depthExceeded){h("d-sql",`rejected at compile time — *compiler.DepthExceededError
+  `);c("ga-bottom-nav",N);const p=r=>document.getElementById(r),v=p("boot"),Z=p("maxdepth");function G(r){return new Promise((e,t)=>{const a=document.createElement("script");a.src=r,a.onload=()=>e(),a.onerror=()=>t(new Error(`failed to load ${r}`)),document.head.appendChild(a)})}function h(r,e){p(r).textContent=e}function b(r,e,t){const a=p(r);a.textContent=t,a.className=e?"status ok":"status error"}function H(r,e){const t=globalThis.gopgqlSchema(e);return h(r,t.error||t.schema),!t.error}function ee(){const r=p("t-sdl").value;let e=H("t-schema",r);const t=globalThis.gopgqlCompile(r,p("t-query").value,p("t-vars").value);h("t-sql",t.error||t.sql),h("t-params",t.error?"—":t.params),t.error&&(e=!1),b("t-status",e,e?"generated":"see errors")}function te(){const r=Number.parseInt(p("d-max").value,10);return Number.isFinite(r)?Math.max(0,r):globalThis.gopgqlMaxDepth??3}function ae(){const r=p("d-sdl").value,e=H("d-schema",r),t=globalThis.gopgqlCompile(r,p("d-query").value,p("d-vars").value,te());if(t.depthExceeded){h("d-sql",`rejected at compile time — *compiler.DepthExceededError
 
 ${t.error}
 
-MaxDepth = ${t.maxDepth}. No SQL was emitted, so nothing reached a database.`),b("d-status",e,e?"rejected, as designed":"see errors");return}h("d-sql",t.error||t.sql);const a=e&&!t.error;b("d-status",a,a?`compiled within MaxDepth ${t.maxDepth}`:"see errors")}function ae(){const r=p("i-sdl").value;let e=N("i-schema",r);const t=globalThis.gopgqlCompile(r,p("i-query").value,"");h("i-sql",t.error||t.sql),t.error&&(e=!1),b("i-status",e,e?"generated":"see errors")}function re(){const r=globalThis.gopgqlMigration(p("m-sdl").value);h("m-init",r.error||r.migration),b("m-status",!r.error,r.error?"see errors":"generated")}function se(){const r=globalThis.gopgqlDelta(p("m-sdl").value,p("m-sdl2").value);if(h("m-delta",r.error||r.delta),r.error){b("m-status2",!1,"see errors");return}b("m-status2",!0,r.changed?"generated":"no schema change")}const P={traversal:{render:ee,inputs:["t-sdl","t-query","t-vars"]},depth:{render:te,inputs:["d-sdl","d-query","d-vars"]},interfaces:{render:ae,inputs:["i-sdl","i-query"]},migration:{render:re,inputs:["m-sdl"]},delta:{render:se,inputs:["m-sdl","m-sdl2"]}};function oe(){for(const r of Object.values(P))r.render()}function g(r,e){e&&(p(r).value=e)}async function ie(){try{await G("wasm_exec.js");const r=new globalThis.Go,e=await fetch("gopgql.wasm");if(!e.ok)throw new Error(`gopgql.wasm: HTTP ${e.status}`);const t=await e.arrayBuffer(),{instance:a}=await WebAssembly.instantiate(t,r.importObject);r.run(a),g("t-sdl",globalThis.gopgqlExampleSDL),g("t-query",globalThis.gopgqlExampleQuery),g("t-vars",globalThis.gopgqlExampleVars),g("d-sdl",globalThis.gopgqlExampleSDL),g("d-query",globalThis.gopgqlExampleDeepQuery),g("d-vars",globalThis.gopgqlExampleVars),g("i-sdl",globalThis.gopgqlExampleInterfaceSDL),g("i-query",globalThis.gopgqlExampleInterfaceQuery),g("m-sdl",globalThis.gopgqlExampleSDL),g("m-sdl2",globalThis.gopgqlRevisedExampleSDL),Z.textContent=String(globalThis.gopgqlMaxDepth??3);for(const s of document.querySelectorAll(".run"))s.removeAttribute("disabled");v.textContent="WebAssembly ready — every output below is generated from your input",v.className="status ok",oe()}catch(r){v.textContent=String(r),v.className="status error"}}for(const[r,e]of Object.entries(P)){for(const t of document.querySelectorAll(`.run[data-scenario="${r}"]`))t.addEventListener("click",e.render);for(const t of e.inputs)p(t).addEventListener("input",()=>{globalThis.gopgqlSchema&&e.render()})}ie();
+MaxDepth = ${t.maxDepth}. No SQL was emitted, so nothing reached a database.`),b("d-status",e,e?"rejected, as designed":"see errors");return}h("d-sql",t.error||t.sql);const a=e&&!t.error;b("d-status",a,a?`compiled within MaxDepth ${t.maxDepth}`:"see errors")}function re(){const r=p("i-sdl").value;let e=H("i-schema",r);const t=globalThis.gopgqlCompile(r,p("i-query").value,"");h("i-sql",t.error||t.sql),t.error&&(e=!1),b("i-status",e,e?"generated":"see errors")}function se(){const r=globalThis.gopgqlMigration(p("m-sdl").value);h("m-init",r.error||r.migration),b("m-status",!r.error,r.error?"see errors":"generated")}function oe(){const r=globalThis.gopgqlDelta(p("m-sdl").value,p("m-sdl2").value);if(h("m-delta",r.error||r.delta),r.error){b("m-status2",!1,"see errors");return}b("m-status2",!0,r.changed?"generated":"no schema change")}const P={traversal:{render:ee,inputs:["t-sdl","t-query","t-vars"]},depth:{render:ae,inputs:["d-sdl","d-query","d-vars","d-max"]},interfaces:{render:re,inputs:["i-sdl","i-query"]},migration:{render:se,inputs:["m-sdl"]},delta:{render:oe,inputs:["m-sdl","m-sdl2"]}};function ie(){for(const r of Object.values(P))r.render()}function g(r,e){e&&(p(r).value=e)}async function ne(){try{await G("wasm_exec.js");const r=new globalThis.Go,e=await fetch("gopgql.wasm");if(!e.ok)throw new Error(`gopgql.wasm: HTTP ${e.status}`);const t=await e.arrayBuffer(),{instance:a}=await WebAssembly.instantiate(t,r.importObject);r.run(a),g("t-sdl",globalThis.gopgqlExampleSDL),g("t-query",globalThis.gopgqlExampleQuery),g("t-vars",globalThis.gopgqlExampleVars),g("d-sdl",globalThis.gopgqlExampleSDL),g("d-query",globalThis.gopgqlExampleDeepQuery),g("d-vars",globalThis.gopgqlExampleVars),g("d-max",String(globalThis.gopgqlMaxDepth??3)),g("i-sdl",globalThis.gopgqlExampleInterfaceSDL),g("i-query",globalThis.gopgqlExampleInterfaceQuery),g("m-sdl",globalThis.gopgqlExampleSDL),g("m-sdl2",globalThis.gopgqlRevisedExampleSDL),Z.textContent=String(globalThis.gopgqlMaxDepth??3);for(const s of document.querySelectorAll(".run"))s.removeAttribute("disabled");v.textContent="WebAssembly ready — every output below is generated from your input",v.className="status ok",ie()}catch(r){v.textContent=String(r),v.className="status error"}}for(const[r,e]of Object.entries(P)){for(const t of document.querySelectorAll(`.run[data-scenario="${r}"]`))t.addEventListener("click",e.render);for(const t of e.inputs)p(t).addEventListener("input",()=>{globalThis.gopgqlSchema&&e.render()})}ne();
