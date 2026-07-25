@@ -9,7 +9,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 2
+const REQUIRED_API_VERSION = 3
 
 const el = (id) => document.getElementById(id)
 

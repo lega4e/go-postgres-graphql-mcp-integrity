@@ -38,8 +38,9 @@ import (
 // copy or a browser cache. An older module silently ignoring an argument the
 // page now passes is the worst kind of failure to debug: the control moves and
 // nothing happens. Bump this whenever an exported function's arguments or
-// result shape change.
-const apiVersion = 2
+// result shape change — and whenever the page starts depending on a new export,
+// so a panel cannot come up blank against a module that lacks it.
+const apiVersion = 3
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
