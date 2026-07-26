@@ -35,6 +35,75 @@ func Delta(from, to *schema.Schema) (up, down string, changed bool) {
 	return joinStmts(upStmts), joinStmts(downStmts), true
 }
 
+// DeltaTables renders the next migration for a tables directory: the structural
+// difference between the two schemas, and nothing about the property graph.
+//
+// The graph comparison is skipped entirely rather than being found to be equal.
+// A tables directory's folded history contains no CREATE PROPERTY GRAPH, so its
+// prior state has no graph and a comparison would report a difference on every
+// single run — emitting a graph the directory does not own, forever.
+func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
+	d := diffSchemas(classifyLike(from, to), to)
+	if !d.structural() {
+		return "", "", false
+	}
+	return joinStmts(d.upStructural(to)), joinStmts(d.downStructural(from)), true
+}
+
+// classifyLike splits prior's tables into vertex and edge tables the way `like`
+// classifies them.
+//
+// A tables-only directory has no CREATE PROPERTY GRAPH, so folding it cannot
+// know which of its tables are vertices and which are edges — it returns them
+// all as vertices. The desired schema is the only place those roles are
+// recorded, and using it keeps the diff's ordering guarantees intact: edges are
+// still dropped before the vertices they reference, and created after them. A
+// table whose role genuinely changed is absent from the matching list on one
+// side, so it is dropped and recreated, which is correct.
+func classifyLike(prior, like *schema.Schema) *schema.Schema {
+	if prior == nil || len(prior.EdgeTables) > 0 {
+		return prior // already classified (folded from a directory with a graph)
+	}
+	edges := map[string]bool{}
+	for _, e := range like.EdgeTables {
+		edges[e.Name] = true
+	}
+	out := &schema.Schema{GraphName: prior.GraphName, Indexes: prior.Indexes}
+	for _, vt := range prior.VertexTables {
+		if edges[vt.Name] {
+			out.EdgeTables = append(out.EdgeTables, schema.EdgeTable{Name: vt.Name, Columns: vt.Columns})
+			continue
+		}
+		out.VertexTables = append(out.VertexTables, vt)
+	}
+	return out
+}
+
+// DeltaGraph renders the next migration for a graph directory: drop the graph
+// the directory last created, create the one the schema now describes.
+//
+// It emits no table statement under any circumstance. The prior state folded
+// from a graph directory has no tables in it, and that absence says nothing
+// about the database — the SDL may describe only the slice surfaced as a graph,
+// with the rest owned by someone else (gopgql#38).
+func DeltaGraph(from, to *schema.Schema) (up, down string, changed bool) {
+	if generator.GraphDDL(from) == generator.GraphDDL(to) {
+		return "", "", false
+	}
+	var ups, downs []string
+	if from.GraphName != "" {
+		ups = append(ups, dropGraphStmt(from.GraphName))
+	}
+	if to.GraphName != "" {
+		ups = append(ups, generator.GraphDDL(to))
+		downs = append(downs, dropGraphStmt(to.GraphName))
+	}
+	if from.GraphName != "" {
+		downs = append(downs, generator.GraphDDL(from))
+	}
+	return joinStmts(ups), joinStmts(downs), true
+}
+
 // schemaDiff is the set of structural differences between two schemas.
 type schemaDiff struct {
 	addedVertices   []string // names of vertex tables only in `to`
@@ -199,12 +268,23 @@ func uniqueDiff(table string, fromCols, toCols []schema.Column) (gained, lost []
 	return gained, lost
 }
 
-// upStatements renders the forward migration: prior → desired.
+// upStatements renders the forward migration: prior → desired, with the
+// property graph dropped first and recreated last so table changes are never
+// blocked by a graph depending on them.
 func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	var s []string
 	if from.GraphName != "" {
 		s = append(s, dropGraphStmt(from.GraphName))
 	}
+	s = append(s, d.upStructural(to)...)
+	s = append(s, generator.GraphDDL(to))
+	return s
+}
+
+// upStructural renders the table half of the forward migration: everything
+// except the property graph.
+func (d *schemaDiff) upStructural(to *schema.Schema) []string {
+	var s []string
 	for _, idx := range d.droppedIndexes {
 		s = append(s, dropIndexStmt(idx.Name))
 	}
@@ -239,7 +319,6 @@ func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	for _, idx := range d.addedIndexes {
 		s = append(s, generator.IndexDDL(idx))
 	}
-	s = append(s, generator.GraphDDL(to))
 	return s
 }
 
@@ -251,6 +330,14 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 	if to.GraphName != "" {
 		s = append(s, dropGraphStmt(to.GraphName))
 	}
+	s = append(s, d.downStructural(from)...)
+	s = append(s, generator.GraphDDL(from))
+	return s
+}
+
+// downStructural renders the table half of the reverse migration.
+func (d *schemaDiff) downStructural(from *schema.Schema) []string {
+	var s []string
 	for _, idx := range d.addedIndexes {
 		s = append(s, dropIndexStmt(idx.Name))
 	}
@@ -285,7 +372,6 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 	for _, idx := range d.droppedIndexes {
 		s = append(s, generator.IndexDDL(idx))
 	}
-	s = append(s, generator.GraphDDL(from))
 	return s
 }
 

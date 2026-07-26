@@ -12,11 +12,30 @@ func TestMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Migration: %v", err)
 	}
-	if !strings.HasPrefix(mig, "-- +goose Up\n") {
-		t.Error("migration must be goose-formatted")
+	// Both halves, each a goose file, labelled with the path gopgql writes it
+	// to (gopgql#38).
+	for _, want := range []string{
+		"-- migrations/tables/0001_init.sql",
+		"-- migrations/graph/0001_init.sql",
+		"CREATE PROPERTY GRAPH app_graph",
+	} {
+		if !strings.Contains(mig, want) {
+			t.Errorf("migration output missing %q:\n%s", want, mig)
+		}
 	}
-	if !strings.Contains(mig, "CREATE PROPERTY GRAPH app_graph") {
-		t.Error("migration must create the property graph")
+	if strings.Count(mig, "-- +goose Up\n") != 2 {
+		t.Errorf("expected two goose files, got:\n%s", mig)
+	}
+	// The tables half must not carry the graph, and vice versa.
+	tables, graph, ok := strings.Cut(mig, "-- migrations/graph/0001_init.sql")
+	if !ok {
+		t.Fatal("could not split the two halves")
+	}
+	if strings.Contains(tables, "CREATE PROPERTY GRAPH") {
+		t.Error("the tables half must not create the property graph")
+	}
+	if strings.Contains(graph, "CREATE TABLE") {
+		t.Error("the graph half must not create tables")
 	}
 }
 

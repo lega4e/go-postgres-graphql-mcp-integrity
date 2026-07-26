@@ -120,7 +120,12 @@ const RevisedExampleSDL = `type Person @node(label: "person") {
 }`
 
 // Migration parses and validates the SDL and returns the initial goose
-// migration (0001_init.sql) generated from it.
+// migrations generated from it — both halves, as gopgql writes them:
+// migrations/tables/0001_init.sql and migrations/graph/0001_init.sql.
+//
+// They are returned as one annotated document because the playground has one
+// output pane, but they are two files that are generated and applied
+// separately, tables first (gopgql#38).
 func Migration(sdlSrc string) (string, error) {
 	doc, err := sdl.Parse(sdlSrc)
 	if err != nil {
@@ -130,7 +135,11 @@ func Migration(sdlSrc string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return migrate.Init(m), nil
+	return "-- migrations/tables/0001_init.sql\n" +
+		migrate.InitTables(m) +
+		"\n-- migrations/graph/0001_init.sql\n" +
+		"-- Applied after the tables above: the graph references them.\n" +
+		migrate.InitGraph(m), nil
 }
 
 // Schema parses and validates the SDL and returns the PostgreSQL DDL generated
@@ -222,7 +231,7 @@ func Delta(oldSDL, newSDL string) (delta string, changed bool, err error) {
 		return "", false, err
 	}
 
-	prior, err := migrate.FoldContent([]string{migrate.Init(oldModel)})
+	prior, err := migrate.FoldContent([]string{migrate.InitTables(oldModel), migrate.InitGraph(oldModel)})
 	if err != nil {
 		return "", false, err
 	}
@@ -236,11 +245,25 @@ func Delta(oldSDL, newSDL string) (delta string, changed bool, err error) {
 		return "", false, err
 	}
 
-	up, down, changed := migrate.Delta(prior, newModel)
-	if !changed {
+	tUp, tDown, tChanged := migrate.DeltaTables(prior, newModel)
+	gUp, gDown, gChanged := migrate.DeltaGraph(prior, newModel)
+	if !tChanged && !gChanged {
 		return "-- no schema change between the two SDL revisions", false, nil
 	}
-	return "-- +goose Up\n" + up + "\n-- +goose Down\n" + down, true, nil
+
+	out := ""
+	if tChanged {
+		out += "-- migrations/tables/0002_delta.sql\n" +
+			"-- +goose Up\n" + tUp + "\n-- +goose Down\n" + tDown + "\n"
+	}
+	if gChanged {
+		if out != "" {
+			out += "\n"
+		}
+		out += "-- migrations/graph/0002_delta.sql\n" +
+			"-- +goose Up\n" + gUp + "\n-- +goose Down\n" + gDown + "\n"
+	}
+	return out, true, nil
 }
 
 // renderParams formats ordered bind parameters as "$1 = v1, $2 = v2".

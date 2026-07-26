@@ -274,20 +274,47 @@ func (f *folder) indexList() []schema.Index {
 	return out
 }
 
+// buildTablesOnly assembles a schema from the CREATE TABLE statements alone,
+// for a directory that never declared a property graph. It carries no labels,
+// no properties and no edge metadata, because nothing in such a directory says
+// what they would be.
+func (f *folder) buildTablesOnly() *schema.Schema {
+	m := &schema.Schema{}
+	names := make([]string, 0, len(f.cols))
+	for name := range f.cols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		m.VertexTables = append(m.VertexTables, schema.VertexTable{Name: name, Columns: f.cols[name]})
+	}
+	m.Indexes = f.indexList()
+	return m
+}
+
 // build assembles the folded schema from the accumulated tables, indexes and
 // graph. The graph classifies every table as a vertex or an edge and supplies
 // labels, property lists and edge key metadata; the CREATE TABLE statements
 // supply the columns.
 func (f *folder) build() (*schema.Schema, error) {
 	if f.graph == nil {
-		return nil, fmt.Errorf("migrate: folded migrations declare no property graph")
+		// A tables-only migration directory (gopgql#38) has no CREATE PROPERTY
+		// GRAPH to classify its tables with, and that is not an error — the
+		// graph half is generated and applied somewhere else, or by nobody.
+		// Return the tables as they were created; DeltaTables classifies them
+		// against the desired schema, which is the only place the roles are
+		// known. Vertex is the neutral bucket here, not a claim.
+		return f.buildTablesOnly(), nil
 	}
 	m := &schema.Schema{GraphName: f.graph.Name}
 	for _, v := range f.graph.Vertices {
-		cols, ok := f.cols[v.Table]
-		if !ok {
-			return nil, fmt.Errorf("migrate: graph vertex table %q was never created", v.Table)
-		}
+		// A missing CREATE TABLE is not an error: a graph-only directory
+		// (gopgql#38) declares a property graph over tables owned elsewhere and
+		// never creates them. The columns stay nil — the graph half's diff
+		// compares the graph statement, which is self-describing, and the SDL
+		// is a description of the slice being surfaced, not an inventory of the
+		// database.
+		cols := f.cols[v.Table]
 		var extra []schema.LabelProperties
 		for _, l := range v.ExtraLabels {
 			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
@@ -301,10 +328,7 @@ func (f *folder) build() (*schema.Schema, error) {
 		})
 	}
 	for _, e := range f.graph.Edges {
-		cols, ok := f.cols[e.Table]
-		if !ok {
-			return nil, fmt.Errorf("migrate: graph edge table %q was never created", e.Table)
-		}
+		cols := f.cols[e.Table]
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
 			Name:        e.Table,
 			Label:       e.Label,

@@ -316,7 +316,8 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	if _, err := migrate.WriteInit(dir, st.model); err != nil {
+	dirs, err := migrate.WriteInitSplit(dir, st.model)
+	if err != nil {
 		return err
 	}
 
@@ -325,8 +326,12 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return fmt.Errorf("open sql.DB for goose: %w", err)
 	}
 	defer db.Close()
-	if err := goose.UpContext(ctx, db, dir); err != nil {
-		return fmt.Errorf("goose up: %w", err)
+	for _, d := range dirs {
+		// Tables then graph, each with its own version table.
+		goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
+		if err := goose.UpContext(ctx, db, d); err != nil {
+			return fmt.Errorf("goose up %s: %w", d, err)
+		}
 	}
 	return nil
 }

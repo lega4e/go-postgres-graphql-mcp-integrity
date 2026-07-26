@@ -230,12 +230,16 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	path, err := migrate.WriteInit(dir, st.model)
+	// Both halves, in apply order: the graph references the tables, so the
+	// tables directory has to go first.
+	dirs, err := migrate.WriteInitSplit(dir, st.model)
 	if err != nil {
 		return err
 	}
-	if got := filepath.Base(path); got != migrate.InitFilename {
-		return fmt.Errorf("migration filename = %s, want %s", got, migrate.InitFilename)
+	for _, d := range dirs {
+		if _, err := os.Stat(filepath.Join(d, migrate.InitFilename)); err != nil {
+			return fmt.Errorf("missing %s in %s: %w", migrate.InitFilename, d, err)
+		}
 	}
 
 	db, err := sql.Open("pgx", connString)
@@ -243,7 +247,7 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return fmt.Errorf("open sql.DB for goose: %w", err)
 	}
 	defer db.Close()
-	if err := goose.UpContext(ctx, db, dir); err != nil {
+	if err := upAll(ctx, db, dirs); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
@@ -523,4 +527,18 @@ func header(table *godog.Table) map[string]int {
 		cols[cell.Value] = i
 	}
 	return cols
+}
+
+// upAll applies the migration directories in the order given — tables before
+// the graph that references them.
+func upAll(ctx context.Context, db *sql.DB, dirs []string) error {
+	for _, d := range dirs {
+		// Each half has its own version table — both start at 0001, so a
+		// shared one makes goose skip the second half entirely.
+		goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
+		if err := goose.UpContext(ctx, db, d); err != nil {
+			return err
+		}
+	}
+	return nil
 }

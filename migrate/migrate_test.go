@@ -59,7 +59,7 @@ func TestInitGooseFormat(t *testing.T) {
 		}
 	}
 	// Down drops in dependency-safe order: graph, edge table, vertex table.
-	graphIdx := strings.Index(down, "DROP PROPERTY GRAPH app_graph")
+	graphIdx := strings.Index(down, "DROP PROPERTY GRAPH IF EXISTS app_graph")
 	edgeIdx := strings.Index(down, "DROP TABLE IF EXISTS follows")
 	vertexIdx := strings.Index(down, "DROP TABLE IF EXISTS persons")
 	if graphIdx < 0 || edgeIdx < 0 || vertexIdx < 0 {
@@ -80,9 +80,9 @@ func TestWriteInit(t *testing.T) {
 		t.Fatalf("generator.Build: %v", err)
 	}
 	dir := t.TempDir()
-	path, err := migrate.WriteInit(dir, m)
+	path, err := migrate.GenerateTables(dir, m, "init")
 	if err != nil {
-		t.Fatalf("WriteInit: %v", err)
+		t.Fatalf("GenerateTables: %v", err)
 	}
 	if filepath.Base(path) != migrate.InitFilename {
 		t.Errorf("filename = %s, want %s", filepath.Base(path), migrate.InitFilename)
@@ -91,7 +91,7 @@ func TestWriteInit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migration: %v", err)
 	}
-	if string(data) != migrate.Init(m) {
-		t.Error("written file content differs from migrate.Init")
+	if string(data) != migrate.InitTables(m) {
+		t.Error("written file content differs from migrate.InitTables")
 	}
 }

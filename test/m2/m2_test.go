@@ -106,7 +106,9 @@ type scenarioState struct {
 	// dir is the active migration directory; doc is the desired document the
 	// compiler queries against.
 	dir string
-	doc *sdl.Document
+	// halves are the migration directories in apply order: tables, then graph.
+	halves []string
+	doc    *sdl.Document
 	// response is the shaped JSON response from the last compiled query.
 	response map[string]any
 	// base/widened models for the fold-correctness scenario.
@@ -188,10 +190,12 @@ func (st *scenarioState) applyInitial(ctx context.Context, src *godog.DocString)
 	st.dir = dir
 	st.doc = doc
 
-	if _, err := migrate.WriteInit(dir, m); err != nil {
+	dirs, err := migrate.WriteInitSplit(dir, m)
+	if err != nil {
 		return err
 	}
-	return applyMigrations(ctx, dir)
+	st.halves = dirs
+	return applyAll(ctx, dirs)
 }
 
 // generateAndApplyDelta folds the migrations in the active directory, diffs
@@ -208,18 +212,26 @@ func (st *scenarioState) generateAndApplyDelta(ctx context.Context, src *godog.D
 	if err != nil {
 		return err
 	}
-	path, err := migrate.Generate(st.dir, desired, "delta")
+	paths, err := migrate.GenerateSplit(st.dir, desired, "delta")
 	if err != nil {
 		return fmt.Errorf("generate delta: %w", err)
 	}
-	if path == "" {
+	var wrote []string
+	for _, p := range paths {
+		if p != "" {
+			wrote = append(wrote, p)
+		}
+	}
+	if len(wrote) == 0 {
 		return fmt.Errorf("expected a delta migration, but the schemas were identical")
 	}
-	if base := filepath.Base(path); base[:4] != "0002" {
-		return fmt.Errorf("delta filename = %s, want a 0002_* file", base)
+	for _, p := range wrote {
+		if base := filepath.Base(p); base[:4] != "0002" {
+			return fmt.Errorf("delta filename = %s, want a 0002_* file", base)
+		}
 	}
 	st.doc = doc
-	return applyMigrations(ctx, st.dir)
+	return applyAll(ctx, st.halves)
 }
 
 func (st *scenarioState) personsExist(ctx context.Context, table *godog.Table) error {
@@ -362,20 +374,27 @@ func (st *scenarioState) applyFoldedPath(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	if _, err := migrate.WriteInit(dir, st.baseModel); err != nil {
-		return err
-	}
-	if err := applyMigrations(ctx, dir); err != nil {
-		return fmt.Errorf("apply base: %w", err)
-	}
-	path, err := migrate.Generate(dir, st.widenedModel, "delta")
+	dirs, err := migrate.WriteInitSplit(dir, st.baseModel)
 	if err != nil {
 		return err
 	}
-	if path == "" {
+	if err := applyAll(ctx, dirs); err != nil {
+		return fmt.Errorf("apply base: %w", err)
+	}
+	paths, err := migrate.GenerateSplit(dir, st.widenedModel, "delta")
+	if err != nil {
+		return err
+	}
+	any := false
+	for _, p := range paths {
+		if p != "" {
+			any = true
+		}
+	}
+	if !any {
 		return fmt.Errorf("expected a delta between base and widened schemas")
 	}
-	if err := applyMigrations(ctx, dir); err != nil {
+	if err := applyAll(ctx, dirs); err != nil {
 		return fmt.Errorf("apply delta: %w", err)
 	}
 	fp, err := schemaFingerprint(ctx, st.pool)
@@ -397,10 +416,11 @@ func (st *scenarioState) applyDirectPath(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	if _, err := migrate.WriteInit(dir, st.widenedModel); err != nil {
+	dirs, err := migrate.WriteInitSplit(dir, st.widenedModel)
+	if err != nil {
 		return err
 	}
-	if err := applyMigrations(ctx, dir); err != nil {
+	if err := applyAll(ctx, dirs); err != nil {
 		return fmt.Errorf("apply direct: %w", err)
 	}
 	fp, err := schemaFingerprint(ctx, st.pool)
@@ -437,6 +457,51 @@ func (st *scenarioState) resetDB(ctx context.Context) error {
 		return fmt.Errorf("reopen pool: %w", err)
 	}
 	st.pool = pool
+	return nil
+}
+
+// applyAll runs goose up over each directory in order — tables before the graph
+// that references them.
+// applyAll applies the halves in the only order that works: the property graph
+// is taken down first, because PostgreSQL refuses to alter a column the graph
+// exposes, then the tables go up, then the graph is rebuilt on top. On a fresh
+// database the first step is a no-op.
+func applyAll(ctx context.Context, dirs []string) error {
+	if err := releaseGraph(ctx, dirs); err != nil {
+		return err
+	}
+	for _, d := range dirs {
+		// Each half has its own version table — both start at 0001, so a
+		// shared one makes goose skip the second half entirely.
+		goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
+		if err := applyMigrations(ctx, d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// releaseGraph drops the live property graph so the tables half can alter the
+// columns it exposes. Not a goose rollback: replaying the graph directory from
+// zero would re-run historical CREATE PROPERTY GRAPH statements against tables
+// that have since changed.
+func releaseGraph(ctx context.Context, dirs []string) error {
+	for _, d := range dirs {
+		if filepath.Base(d) != migrate.GraphDir {
+			continue
+		}
+		folded, err := migrate.Fold(d)
+		if err != nil || folded == nil || folded.GraphName == "" {
+			return nil
+		}
+		db, err := sql.Open("pgx", connString)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		_, err = db.ExecContext(ctx, migrate.DropGraphSQL(folded.GraphName))
+		return err
+	}
 	return nil
 }
 
