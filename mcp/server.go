@@ -113,7 +113,9 @@ Runs a standard GraphQL introspection query over the schema this server was star
   - full: true: the complete introspection result (` + "`__schema`" + ` with every type fully expanded).
   - format: "sdl": the schema as an SDL document.
 
-Start with no arguments, then drill into one type. The same information is reachable through the query tool with the ` + "`__schema`" + ` and ` + "`__type`" + ` meta-fields.`
+Start with no arguments, then drill into one type. The same information is reachable through the query tool with the ` + "`__schema`" + ` and ` + "`__type`" + ` meta-fields.
+
+The arguments are ranked, so supplying more than one is never ambiguous: ` + "`format: \"sdl\"`" + ` wins over everything, then ` + "`type`" + `, then ` + "`full`" + `. Any other value of ` + "`format`" + ` is an error rather than a silent default.`
 
 const queryDescription = `Run a GraphQL query against the mapped PostgreSQL database and return the data.
 

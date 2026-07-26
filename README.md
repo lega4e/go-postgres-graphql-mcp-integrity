@@ -133,15 +133,18 @@ discover what is queryable and query it:
 
 ```sh
 go build -o gopgql-mcp ./cmd/gopgql-mcp
-claude mcp add gopgql -- ./gopgql-mcp --sdl schema.graphql --dsn "postgres://user:pass@localhost:5432/app"
+claude mcp add gopgql --env GOPGQL_DSN="$GOPGQL_DSN" -- ./gopgql-mcp --sdl schema.graphql
 ```
 
-`--sdl` and `--dsn` also read `GOPGQL_SDL` and `GOPGQL_DSN`; a flag wins over
-the environment, and the DSN is better supplied through it — an agent's MCP
-configuration is not a good place for a password. The schema is parsed and
-validated, and the pool is pinged, **before** the server starts serving, so a
-broken schema or an unreachable database is an exit code rather than a tool that
-fails on every call.
+Pass the DSN through the environment, not `--dsn`: an MCP configuration file is
+stored on disk and command-line arguments are visible to every process on the
+machine, so a password in either is a password leaked. `--dsn` exists for a
+local database that has no secret worth protecting. `--sdl` likewise falls back
+to `GOPGQL_SDL`, and a flag wins over the environment.
+
+The schema is parsed and validated, and the pool is pinged, **before** the
+server starts serving, so a broken schema or an unreachable database is an exit
+code rather than a tool that fails on every call.
 
 Two tools:
 
