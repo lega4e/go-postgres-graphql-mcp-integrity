@@ -149,8 +149,9 @@ code rather than a tool that fails on every call.
 Three runnable examples live in [`examples/`](./examples) — a PageIndex-style
 documentation graph, this repository's own source graph, and a team-chat graph.
 Each is a `docker compose` stack (Postgres + `gopgql migrate` + seed + the
-server) with a `.mcp.json`, so `cd examples/docs-graph && docker compose up -d
---build && claude` is the whole setup.
+server on the HTTP transport) with a `.mcp.json`, so
+`cd examples/docs-graph && docker compose up -d --build && claude` is the whole
+setup.
 
 Two tools:
 
@@ -183,7 +184,7 @@ the database itself. A read-only database role is recommended, not required.
 | `shape/`         | Flat rows → nested GraphQL response.                              |
 | `exec/`          | Compiled query → `pgx` execution → shaped response; read-only pool.|
 | `mcp/`           | MCP server: GraphQL introspection over the SDL + a query tool.     |
-| `cmd/gopgql-mcp/`| The MCP server binary (stdio).                                     |
+| `cmd/gopgql-mcp/`| The MCP server binary (stdio or HTTP).                             |
 | `cmd/gopgql/`    | Schema CLI: generate migrations from SDL and apply them.          |
 | `examples/`      | Three runnable graphs (docs, code, chat) as docker compose stacks.|
 | `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |

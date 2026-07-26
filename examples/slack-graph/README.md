@@ -19,9 +19,8 @@ five threads that refer to each other, and the mentions that pulled people in.
 ## Run it
 
 ```sh
-docker compose up -d --build
-docker compose --profile mcp build
-claude --mcp-config .mcp.json
+docker compose up -d --build          # postgres, migrate, seed, and the server
+claude --mcp-config .mcp.json         # the server is at http://localhost:8767/mcp
 ```
 
 ## Questions worth asking it

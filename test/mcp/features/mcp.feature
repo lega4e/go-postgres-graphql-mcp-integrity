@@ -236,6 +236,20 @@ Feature: An MCP server over a schema and a database
   Scenario: The server's connection is read-only
     Then a write on the server's connection is refused by the database
 
+  Scenario: The built binary serves over the HTTP transport
+    When I connect a client to the built binary over HTTP
+    Then the tool list is:
+      | introspect |
+      | query      |
+    When I call "query" on the binary with:
+      """
+      { persons(name: "Ada") { name follows { name } } }
+      """
+    Then the result JSON is:
+      """
+      { "persons": [ { "name": "Ada", "follows": [ { "name": "Linus" }, { "name": "Grace" } ] } ] }
+      """
+
   Scenario: The built binary serves over stdio
     When I connect a client to the built binary over stdio
     Then the tool list is:

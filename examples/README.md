@@ -16,15 +16,14 @@ you have read all three:
 schema.graphql      the SDL — the whole mapping
 seed.sql            the corpus
 docker-compose.yml  postgres + init (gopgql migrate) + seed + mcp
-.mcp.json           what an agent needs to connect
+.mcp.json           the URL an agent connects to
 ```
 
 ## Run one
 
 ```sh
 cd examples/docs-graph
-docker compose up -d --build      # postgres, migrate, seed
-docker compose --profile mcp build # build the server image once
+docker compose up -d --build      # postgres, migrate, seed, and the server
 ```
 
 `init` runs `gopgql migrate --sdl schema.graphql`, which generates the initial
@@ -48,19 +47,30 @@ claude --mcp-config .mcp.json -p "introspect the schema, then find …"
 Ask it to `introspect` first — the tool descriptions tell it how — and then to
 `query`. It never needs the SDL file.
 
-## Why the server is not started by `up`
+## The server is an ordinary container
 
-MCP over stdio means one server process per client, spawned by the client on
-its stdin/stdout. So the `mcp` service sits behind a compose profile and is
-started on demand by `mcp.sh`, which is what `.mcp.json` runs:
+The examples run `gopgql-mcp --transport http`, so the server is a long-lived
+service like any other — several agents can connect to one process, and
+`.mcp.json` is just a URL:
 
-```sh
-exec docker compose run --rm -T --no-deps mcp
+```json
+{"mcpServers": {"gopgql-docs": {"type": "http", "url": "http://localhost:8765/mcp"}}}
 ```
 
-`--no-deps` matters: without it every spawn re-evaluates the
-postgres → init → seed chain, which pushes the MCP handshake past two minutes.
-Bring the stack up yourself first; the launcher then attaches in ~2 seconds.
+| Example | MCP URL | Postgres |
+|---|---|---|
+| docs-graph | `http://localhost:8765/mcp` | `localhost:55432` |
+| code-graph | `http://localhost:8766/mcp` | `localhost:55433` |
+| slack-graph | `http://localhost:8767/mcp` | `localhost:55434` |
+
+Both ports bind to loopback only. `/healthz` answers the compose healthcheck
+without opening an MCP session, so `docker compose ps` tells you when the
+server is actually ready.
+
+The binary still speaks stdio — that is the default, and it is what
+`claude mcp add gopgql -- gopgql-mcp --sdl …` uses for a server an agent owns
+and spawns itself. `--transport http` is for a server that outlives its
+clients, which is what a compose stack is.
 
 ## Poking at the database directly
 

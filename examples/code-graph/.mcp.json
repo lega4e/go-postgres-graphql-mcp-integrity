@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gopgql-code": {
-      "command": "sh",
-      "args": ["mcp.sh"]
+      "type": "http",
+      "url": "http://localhost:8766/mcp"
     }
   }
 }

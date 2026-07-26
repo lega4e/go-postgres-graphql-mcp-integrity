@@ -3,9 +3,9 @@
 #   postgres  PostgreSQL 19 (SQL/PGQ), the only stateful piece.
 #   init      runs `gopgql migrate` — SDL in, schema and property graph out.
 #   seed      loads the example corpus once the schema exists.
-#   mcp       the MCP server. It speaks stdio, so it is *not* started by
-#             `up`: an agent spawns it with `docker compose run --rm -T mcp`,
-#             which is exactly what .mcp.json does.
+#   mcp       the MCP server, over the streamable HTTP transport. It is a
+#             long-running container like any other service, so several agents
+#             can connect to one process — .mcp.json just points at the URL.
 name: gopgql-slack-graph
 
 x-dsn: &dsn postgres://gopgql:gopgql@postgres:5432/gopgql?sslmode=disable
@@ -59,12 +59,20 @@ services:
   mcp:
     build:
       context: ../..
-    profiles: [mcp]
     depends_on:
       seed:
         condition: service_completed_successfully
     environment:
       GOPGQL_DSN: *dsn
+      GOPGQL_TRANSPORT: http
+      GOPGQL_ADDR: ":8080"
+    ports:
+      - "127.0.0.1:8767:8080"
     volumes:
       - ./schema.graphql:/example/schema.graphql:ro
     command: ["gopgql-mcp", "--sdl", "/example/schema.graphql"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

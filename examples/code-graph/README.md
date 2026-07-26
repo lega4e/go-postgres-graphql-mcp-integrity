@@ -17,9 +17,8 @@ whole-repo index, and it does not update itself.
 ## Run it
 
 ```sh
-docker compose up -d --build
-docker compose --profile mcp build
-claude --mcp-config .mcp.json
+docker compose up -d --build          # postgres, migrate, seed, and the server
+claude --mcp-config .mcp.json         # the server is at http://localhost:8766/mcp
 ```
 
 ## Questions worth asking it

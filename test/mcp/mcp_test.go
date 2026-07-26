@@ -21,6 +21,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	oexec "os/exec"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -178,8 +181,10 @@ type scenarioState struct {
 
 	server  *gopgqlmcp.Server
 	session *mcpsdk.ClientSession
-	// binary is the client session for the stdio scenario, when there is one.
-	binary *mcpsdk.ClientSession
+	// binary is the client session for the stdio and http scenarios, when
+	// there is one; httpCmd is the process behind the http one.
+	binary  *mcpsdk.ClientSession
+	httpCmd *oexec.Cmd
 
 	vars   map[string]any
 	tools  []*mcpsdk.Tool
@@ -213,6 +218,11 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 		if st.binary != nil {
 			_ = st.binary.Close()
 			st.binary = nil
+		}
+		if st.httpCmd != nil && st.httpCmd.Process != nil {
+			_ = st.httpCmd.Process.Signal(syscall.SIGTERM)
+			_ = st.httpCmd.Wait()
+			st.httpCmd = nil
 		}
 		if st.seed != nil {
 			st.seed.Close()
@@ -251,6 +261,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^I call "([^"]*)" asking for SDL$`, st.callSDL)
 	sc.Step(`^I send the introspection query a GraphQL client sends$`, st.callIntrospectionQuery)
 	sc.Step(`^I connect a client to the built binary over stdio$`, st.connectBinary)
+	sc.Step(`^I connect a client to the built binary over HTTP$`, st.connectBinaryHTTP)
 	sc.Step(`^I call "([^"]*)" on the binary with:$`, st.callBinary)
 
 	sc.Step(`^the tool list is:$`, st.assertToolList)
@@ -406,6 +417,79 @@ func (st *scenarioState) connectBinary(ctx context.Context) error {
 	}
 	st.binary = session
 	return st.loadTools(ctx, session)
+}
+
+// connectBinaryHTTP starts the built binary on the streamable HTTP transport
+// and connects to it over the network, which is how the examples run it: a
+// long-lived container several agents can share, rather than one process per
+// client.
+func (st *scenarioState) connectBinaryHTTP(ctx context.Context) error {
+	dir, err := os.MkdirTemp("", "gopgql-mcp-schema-")
+	if err != nil {
+		return err
+	}
+	st.dirs = append(st.dirs, dir)
+	path := filepath.Join(dir, "schema.graphql")
+	if err := os.WriteFile(path, []byte(st.sdlSource), 0o600); err != nil {
+		return err
+	}
+
+	port, err := freePort()
+	if err != nil {
+		return err
+	}
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	cmd := oexec.Command(binaryPath, "--sdl", path, "--transport", "http", "--addr", addr)
+	cmd.Env = append(os.Environ(), "GOPGQL_DSN="+connString)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start the built binary on http: %w", err)
+	}
+	st.httpCmd = cmd
+
+	// /healthz answers without opening an MCP session, which is exactly what a
+	// readiness poll wants.
+	if err := waitForHealth(ctx, "http://"+addr+"/healthz"); err != nil {
+		return err
+	}
+
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "gopgql-suite", Version: "test"}, nil)
+	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{Endpoint: "http://" + addr + "/mcp"}, nil)
+	if err != nil {
+		return fmt.Errorf("connect over http: %w", err)
+	}
+	st.binary = session
+	return st.loadTools(ctx, session)
+}
+
+// freePort asks the kernel for an unused port and hands it back.
+func freePort() (int, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port, nil
+}
+
+func waitForHealth(ctx context.Context, url string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err == nil {
+			res.Body.Close()
+			if res.StatusCode == http.StatusOK {
+				return nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("the http server never became healthy at %s", url)
 }
 
 func (st *scenarioState) loadTools(ctx context.Context, session *mcpsdk.ClientSession) error {

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "gopgql-slack": {
-      "command": "sh",
-      "args": ["mcp.sh"]
+      "type": "http",
+      "url": "http://localhost:8767/mcp"
     }
   }
 }
