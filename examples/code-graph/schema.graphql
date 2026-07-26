@@ -1,0 +1,46 @@
+# A source-code graph — of this repository, and specifically of the MCP server
+# in it, so the thing an agent is querying is the thing it is talking to.
+#
+# Packages contain files, files declare symbols, symbols call symbols, packages
+# import packages. The queries worth asking are the ones a grep cannot answer:
+# "what reaches the database?", "who calls the shaper?", "which package would a
+# change to `exec` disturb?" — each of those is a traversal.
+
+type Package @node(label: "package") {
+  id: ID!
+  name: String!
+  # Import path relative to the module root.
+  path: String!
+  # One line on what the package is for.
+  purpose: String!
+  # True when the package has no database dependency and compiles to WASM
+  # (SPEC.md §4.1) — the property that decides where new code may live.
+  wasmSafe: Boolean!
+
+  files: [File!]! @relationship(type: "contains", direction: OUT)
+  imports: [Package!]! @relationship(type: "imports", direction: OUT)
+  importedBy: [Package!]! @relationship(type: "imports", direction: IN)
+}
+
+type File @node(label: "file") {
+  id: ID!
+  path: String!
+  lines: Int!
+
+  package: [Package!]! @relationship(type: "contains", direction: IN)
+  symbols: [Symbol!]! @relationship(type: "declares", direction: OUT)
+}
+
+type Symbol @node(label: "symbol") {
+  id: ID!
+  name: String!
+  # func | method | type
+  kind: String!
+  signature: String!
+  doc: String!
+  line: Int!
+
+  file: [File!]! @relationship(type: "declares", direction: IN)
+  calls: [Symbol!]! @relationship(type: "calls", direction: OUT)
+  calledBy: [Symbol!]! @relationship(type: "calls", direction: IN)
+}

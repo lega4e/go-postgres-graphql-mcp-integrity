@@ -1,0 +1,52 @@
+# A team-chat graph: channels with members, threads inside them, messages
+# inside threads, people tagging people, and threads referring to other threads.
+#
+# Chat is a graph pretending to be a list. The questions that matter are all
+# traversals — "who got pulled into this incident and by whom?", "which earlier
+# thread does this one lean on?", "who is in this channel but never tagged?" —
+# and none of them are a text search.
+
+type Person @node(label: "person") {
+  id: ID!
+  handle: String!
+  name: String!
+  team: String!
+
+  memberOf: [Channel!]! @relationship(type: "member_of", direction: OUT)
+  authored: [Message!]! @relationship(type: "authored", direction: OUT)
+  # Every message that tagged this person.
+  mentionedIn: [Message!]! @relationship(type: "mentions", direction: IN)
+}
+
+type Channel @node(label: "channel") {
+  id: ID!
+  name: String!
+  purpose: String!
+
+  members: [Person!]! @relationship(type: "member_of", direction: IN)
+  threads: [Thread!]! @relationship(type: "in_channel", direction: IN)
+}
+
+type Thread @node(label: "thread") {
+  id: ID!
+  subject: String!
+  startedAt: String!
+
+  channel: [Channel!]! @relationship(type: "in_channel", direction: OUT)
+  messages: [Message!]! @relationship(type: "in_thread", direction: IN)
+
+  # A thread pointing at an earlier one — "same as last week", "see the
+  # incident thread". The edge that makes chat history navigable.
+  refersTo: [Thread!]! @relationship(type: "refers_to", direction: OUT)
+  referredToBy: [Thread!]! @relationship(type: "refers_to", direction: IN)
+}
+
+type Message @node(label: "message") {
+  id: ID!
+  text: String!
+  postedAt: String!
+
+  author: [Person!]! @relationship(type: "authored", direction: IN)
+  thread: [Thread!]! @relationship(type: "in_thread", direction: OUT)
+  mentions: [Person!]! @relationship(type: "mentions", direction: OUT)
+}

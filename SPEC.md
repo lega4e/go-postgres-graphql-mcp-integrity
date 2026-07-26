@@ -113,10 +113,12 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`migrate`   |Fold prior goose migrations → model; diff against desired; emit next migration.                        |
 |`compiler`  |GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.                                           |
 |`shape`     |Flat rows → nested GraphQL response (Go-side; SQL-side added M8).                                      |
-|`exec`      |Optional thin `pgx` execution helper.                                                                  |
-|`cmd/gopgql`|CLI: `generate`, `migrate diff`, `compile`.                                                            |
+|`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool.        |
+|`mcp`       |Model Context Protocol server: GraphQL introspection over the SDL, plus a query tool over `exec`.      |
+|`cmd/gopgql`|CLI: `generate` (SDL → migration) and `migrate` (generate + apply). `compile` is not implemented yet.  |
+|`cmd/gopgql-mcp`|The MCP server binary: one SDL, one DSN, stdio or streamable-HTTP transport.                       |
 
-`sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. Only `exec` imports `pgx`.
+`sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `mcp` and `cmd/gopgql-mcp` build on `exec` and so are not part of the WASM surface either.
 
 ### 4.2 Dependencies
 
@@ -127,6 +129,7 @@ Single Go module, `github.com/<owner>/gopgql`:
 |Migration runner      |`github.com/pressly/goose/v3`                                     |
 |BDD                   |`github.com/cucumber/godog`                                       |
 |Containers            |`github.com/testcontainers/testcontainers-go` + `modules/postgres`|
+|MCP server/client     |`github.com/modelcontextprotocol/go-sdk`                          |
 
 -----
 

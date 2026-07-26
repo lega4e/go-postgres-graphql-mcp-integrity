@@ -156,6 +156,52 @@ PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
 | *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
 | *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|
 
+## Connect an AI agent (MCP)
+
+`cmd/gopgql-mcp` serves one SDL schema and one database over the
+[Model Context Protocol](https://modelcontextprotocol.io), so an agent can
+discover what is queryable and query it:
+
+```sh
+go build -o gopgql-mcp ./cmd/gopgql-mcp
+claude mcp add gopgql --env GOPGQL_DSN="$GOPGQL_DSN" -- ./gopgql-mcp --sdl schema.graphql
+```
+
+Pass the DSN through the environment, not `--dsn`: an MCP configuration file is
+stored on disk and command-line arguments are visible to every process on the
+machine, so a password in either is a password leaked. `--dsn` exists for a
+local database that has no secret worth protecting. `--sdl` likewise falls back
+to `GOPGQL_SDL`, and a flag wins over the environment.
+
+The schema is parsed and validated, and the pool is pinged, **before** the
+server starts serving, so a broken schema or an unreachable database is an exit
+code rather than a tool that fails on every call.
+
+Three runnable examples live in [`examples/`](./examples) — a PageIndex-style
+documentation graph, this repository's own source graph, and a team-chat graph.
+Each is a `docker compose` stack (Postgres + `gopgql migrate` + seed + the
+server on the HTTP transport) with a `.mcp.json`, so
+`cd examples/docs-graph && docker compose up -d --build && claude` is the whole
+setup.
+
+Two tools:
+
+| Tool | What it does |
+|------|--------------|
+| `introspect` | Runs a standard GraphQL introspection query over the loaded schema. No arguments gives the overview — every root field, and every type by name and kind, without the types' field definitions. `type: "Person"` drills into one type; `full: true` returns the complete introspection result; `format: "sdl"` returns the document. |
+| `query` | Compiles a GraphQL query, executes it, and returns the nested response. `variables` are bound as SQL parameters, never interpolated. `format: "markdown"` renders a table instead of JSON, and is refused for a selection that nests, because a table cannot represent it. |
+
+Discovery is **standard GraphQL introspection**, not a gopgql dialect: the
+`__schema`, `__type(name:)` and `__typename` meta-fields are answered through
+the `query` tool too, served from the loaded schema without touching the
+database. Both tool descriptions say how, so an agent that has only the tool
+list can still reach a valid data query.
+
+The server never migrates and never writes. The compiler emits nothing but a
+`SELECT` over `GRAPH_TABLE`, there is no migration or mutation tool, and the
+pool opens with `default_transaction_read_only=on` — so a write is refused by
+the database itself. A read-only database role is recommended, not required.
+
 ## Layout
 
 | Path             | Purpose                                                            |
@@ -167,6 +213,11 @@ PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
 | `internal/ddl/`  | Lexer + recursive-descent parser + AST for gopgql's own DDL.       |
 | `compiler/`      | GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.      |
 | `shape/`         | Flat rows → nested GraphQL response.                              |
+| `exec/`          | Compiled query → `pgx` execution → shaped response; read-only pool.|
+| `mcp/`           | MCP server: GraphQL introspection over the SDL + a query tool.     |
+| `cmd/gopgql-mcp/`| The MCP server binary (stdio or HTTP).                             |
+| `cmd/gopgql/`    | Schema CLI: generate migrations from SDL and apply them.          |
+| `examples/`      | Three runnable graphs (docs, code, chat) as docker compose stacks.|
 | `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |
 | `cmd/wasm/`      | WebAssembly entry point exposing `playground` to the docs site.  |
 | `docs/`          | Vite site with the browser playground.                            |
