@@ -38,9 +38,14 @@ services:
       GOPGQL_DSN: *dsn
     volumes:
       - ./schema.graphql:/example/schema.graphql:ro
-    # An ephemeral --dir means the initial migration is regenerated every run;
-    # goose skips the versions it has already applied, so this is a no-op on a
+    # Both halves are generated into /tmp/migrations/{tables,graph} and applied
+    # in order. An ephemeral --dir means they are regenerated every run; goose
+    # skips the versions it has already applied, so this is a no-op on a
     # database that is already migrated.
+    #
+    # Tables must exist before the property graph that references them, and a
+    # live graph blocks changes to the columns it exposes — gopgql sequences
+    # both for you when it owns both halves.
     command: ["gopgql", "migrate", "--sdl", "/example/schema.graphql", "--dir", "/tmp/migrations"]
 
   seed:
