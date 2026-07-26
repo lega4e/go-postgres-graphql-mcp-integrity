@@ -1,0 +1,16 @@
+# The image needs the Go module and nothing else. Everything below is either
+# large, machine-specific, or regenerated at build time — keeping it out of the
+# build context keeps `docker compose build` fast and cache-friendly.
+.git
+.github
+.worktrees
+
+docs/node_modules
+docs/dist
+docs/public/gopgql.wasm
+
+examples/*/README.md
+openspec
+
+*.md
+!README.md

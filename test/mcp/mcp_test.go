@@ -25,6 +25,7 @@ import (
 	oexec "os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -266,6 +267,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^the result contains "([^"]*)"$`, st.assertContains)
 	sc.Step(`^the result is the table:$`, st.assertTable)
 	sc.Step(`^the result carries no SQL$`, st.assertNoSQL)
+	sc.Step(`^the result carries a uuid in text form$`, st.assertTextUUID)
 	sc.Step(`^the introspection result names the query root "([^"]*)"$`, st.assertQueryRoot)
 	sc.Step(`^the introspection result describes the types "([^"]*)"$`, st.assertTypesDescribed)
 	sc.Step(`^the type reference of "([^"]*)" is "([^"]*)"$`, st.assertTypeRef)
@@ -733,6 +735,20 @@ func (st *scenarioState) assertNoSQL() error {
 	}
 	return nil
 }
+
+// assertTextUUID proves an id is returned as the canonical 8-4-4-4-12 text
+// form rather than as the raw byte array pgx decodes a uuid into.
+func (st *scenarioState) assertTextUUID() error {
+	if err := st.assertSucceeded(); err != nil {
+		return err
+	}
+	if !uuidText.MatchString(st.text) {
+		return fmt.Errorf("no text-form uuid in the result:\n%s", st.text)
+	}
+	return nil
+}
+
+var uuidText = regexp.MustCompile(`"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"`)
 
 // --- introspection assertions ----------------------------------------------
 

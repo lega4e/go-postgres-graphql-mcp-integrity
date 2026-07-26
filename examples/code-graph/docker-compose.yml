@@ -1,0 +1,69 @@
+# Three containers and one on-demand one:
+#
+#   postgres  PostgreSQL 19 (SQL/PGQ), the only stateful piece.
+#   init      runs `gopgql migrate` — SDL in, schema and property graph out.
+#   seed      loads the example corpus once the schema exists.
+#   mcp       the MCP server. It speaks stdio, so it is *not* started by
+#             `up`: an agent spawns it with `docker compose run --rm -T mcp`,
+#             which is exactly what .mcp.json does.
+name: gopgql-code-graph
+
+x-dsn: &dsn postgres://gopgql:gopgql@postgres:5432/gopgql?sslmode=disable
+
+services:
+  postgres:
+    image: postgres:19beta2
+    environment:
+      POSTGRES_DB: gopgql
+      POSTGRES_USER: gopgql
+      POSTGRES_PASSWORD: gopgql
+    # Published so you can point psql — or a locally built gopgql-mcp — at the
+    # same database the server sees.
+    ports:
+      - "55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gopgql -d gopgql"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  init:
+    build:
+      context: ../..
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOPGQL_DSN: *dsn
+    volumes:
+      - ./schema.graphql:/example/schema.graphql:ro
+    # An ephemeral --dir means the initial migration is regenerated every run;
+    # goose skips the versions it has already applied, so this is a no-op on a
+    # database that is already migrated.
+    command: ["gopgql", "migrate", "--sdl", "/example/schema.graphql", "--dir", "/tmp/migrations"]
+
+  seed:
+    build:
+      context: ../..
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    environment:
+      GOPGQL_DSN: *dsn
+    volumes:
+      - ./seed.sql:/example/seed.sql:ro
+    # $$ escapes compose's own interpolation so the shell expands it.
+    command: ["sh", "-c", "psql \"$$GOPGQL_DSN\" -v ON_ERROR_STOP=1 -q -f /example/seed.sql"]
+
+  mcp:
+    build:
+      context: ../..
+    profiles: [mcp]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      GOPGQL_DSN: *dsn
+    volumes:
+      - ./schema.graphql:/example/schema.graphql:ro
+    command: ["gopgql-mcp", "--sdl", "/example/schema.graphql"]

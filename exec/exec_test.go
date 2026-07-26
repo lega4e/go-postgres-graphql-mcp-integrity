@@ -177,3 +177,26 @@ func TestQueryRejectsNilCompiled(t *testing.T) {
 		t.Fatal("a nil compiled query must not reach the database")
 	}
 }
+
+func TestScanRendersUUIDsAsText(t *testing.T) {
+	// pgx decodes a uuid column to [16]byte. Left raw it marshals to a JSON
+	// array of sixteen numbers, so `id` would come back as [80,0,0,…] and could
+	// not be fed back into a query.
+	id := [16]byte{0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x05}
+	db := &fakeDB{rows: &fakeRows{
+		cols:   []string{"v0_k", "v0_c0"},
+		values: [][]any{{id, []byte{0xde, 0xad}}},
+	}}
+
+	got, err := Rows(context.Background(), db, "SELECT 1")
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	if want := "50000000-0000-0000-0000-000000000005"; got[0]["v0_k"] != want {
+		t.Errorf("uuid = %v (%T), want the text form %q", got[0]["v0_k"], got[0]["v0_k"], want)
+	}
+	// A bytea decodes to a []byte slice, not a [16]byte array, and is untouched.
+	if _, ok := got[0]["v0_c0"].([]byte); !ok {
+		t.Errorf("bytea = %v (%T), want it left as []byte", got[0]["v0_c0"], got[0]["v0_c0"])
+	}
+}

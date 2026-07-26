@@ -146,6 +146,12 @@ The schema is parsed and validated, and the pool is pinged, **before** the
 server starts serving, so a broken schema or an unreachable database is an exit
 code rather than a tool that fails on every call.
 
+Three runnable examples live in [`examples/`](./examples) — a PageIndex-style
+documentation graph, this repository's own source graph, and a team-chat graph.
+Each is a `docker compose` stack (Postgres + `gopgql migrate` + seed + the
+server) with a `.mcp.json`, so `cd examples/docs-graph && docker compose up -d
+--build && claude` is the whole setup.
+
 Two tools:
 
 | Tool | What it does |
@@ -178,6 +184,8 @@ the database itself. A read-only database role is recommended, not required.
 | `exec/`          | Compiled query → `pgx` execution → shaped response; read-only pool.|
 | `mcp/`           | MCP server: GraphQL introspection over the SDL + a query tool.     |
 | `cmd/gopgql-mcp/`| The MCP server binary (stdio).                                     |
+| `cmd/gopgql/`    | Schema CLI: generate migrations from SDL and apply them.          |
+| `examples/`      | Three runnable graphs (docs, code, chat) as docker compose stacks.|
 | `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |
 | `cmd/wasm/`      | WebAssembly entry point exposing `playground` to the docs site.  |
 | `docs/`          | Vite site with the browser playground.                            |

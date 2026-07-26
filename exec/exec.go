@@ -13,6 +13,7 @@ package exec
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -107,7 +108,7 @@ func scan(rows pgx.Rows) ([]map[string]any, error) {
 		row := make(map[string]any, len(fds))
 		for i, fd := range fds {
 			if i < len(vals) {
-				row[fd.Name] = vals[i]
+				row[fd.Name] = jsonValue(vals[i])
 			}
 		}
 		out = append(out, row)
@@ -116,4 +117,36 @@ func scan(rows pgx.Rows) ([]map[string]any, error) {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
 	return out, nil
+}
+
+// jsonValue renders a scanned value as the shape a caller expects to see.
+//
+// Every gopgql node has a surrogate `id uuid` key (SPEC.md §5.1), and pgx
+// decodes uuid to a [16]byte array. Left alone that marshals to a JSON array of
+// sixteen numbers — so `id` comes back as [80,0,0,…] instead of the identifier
+// the caller filtered on, and cannot be fed back into a query. Rendering it in
+// the canonical 8-4-4-4-12 text form makes the value round-trip.
+//
+// Only the fixed-size array is converted: a bytea column decodes to a []byte
+// slice, which is a different Go type and is left as it is.
+func jsonValue(v any) any {
+	if u, ok := v.([16]byte); ok {
+		return uuidString(u)
+	}
+	return v
+}
+
+// uuidString formats a raw uuid in the canonical hyphenated text form.
+func uuidString(u [16]byte) string {
+	var b [36]byte
+	hex.Encode(b[0:8], u[0:4])
+	b[8] = '-'
+	hex.Encode(b[9:13], u[4:6])
+	b[13] = '-'
+	hex.Encode(b[14:18], u[6:8])
+	b[18] = '-'
+	hex.Encode(b[19:23], u[8:10])
+	b[23] = '-'
+	hex.Encode(b[24:36], u[10:16])
+	return string(b[:])
 }

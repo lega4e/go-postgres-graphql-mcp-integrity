@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gopgql-code": {
+      "command": "sh",
+      "args": ["mcp.sh"]
+    }
+  }
+}

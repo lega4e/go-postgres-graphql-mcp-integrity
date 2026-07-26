@@ -115,7 +115,7 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`shape`     |Flat rows → nested GraphQL response (Go-side; SQL-side added M8).                                      |
 |`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool.        |
 |`mcp`       |Model Context Protocol server: GraphQL introspection over the SDL, plus a query tool over `exec`.      |
-|`cmd/gopgql`|CLI: `generate`, `migrate diff`, `compile`.                                                            |
+|`cmd/gopgql`|CLI: `generate` (SDL → migration) and `migrate` (generate + apply). `compile` is not implemented yet.  |
 |`cmd/gopgql-mcp`|The MCP server binary: one SDL, one DSN, stdio transport.                                          |
 
 `sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `mcp` and `cmd/gopgql-mcp` build on `exec` and so are not part of the WASM surface either.

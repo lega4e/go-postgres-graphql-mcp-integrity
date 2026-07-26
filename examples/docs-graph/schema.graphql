@@ -1,0 +1,45 @@
+# A documentation graph, modelled on PageIndex (VectifyAI/PageIndex).
+#
+# PageIndex turns a document into a *semantic tree* — a table of contents whose
+# nodes carry `title`, `node_id`, `start_index`/`end_index` (the page range) and
+# a `summary`, nested through a `nodes` array. That tree is the vertical
+# structure here: a Document has Sections, and a Section has child Sections.
+#
+# The horizontal structure is what makes it a graph rather than a tree, and is
+# the thing a tree-shaped index cannot answer: sections **cite** other sections,
+# across documents. "Which sections does the incident review lean on, and who
+# else leans on those?" is two hops over `cites`, not a tree walk.
+
+type Document @node(label: "document") {
+  id: ID!
+  title: String!
+  # Where the document came from — a filename, a URL, a wiki page.
+  source: String!
+  # Total page count, so a section's page range can be read against it.
+  pages: Int!
+
+  sections: [Section!]! @relationship(type: "has_section", direction: OUT)
+}
+
+type Section @node(label: "section") {
+  id: ID!
+  # PageIndex's own node identifier, e.g. "0006". Stable across re-indexing,
+  # which is what makes a citation to it durable.
+  nodeId: String!
+  title: String!
+  # The concise description PageIndex generates for the section.
+  summary: String!
+  # The page range the section spans (PageIndex: start_index / end_index).
+  startPage: Int!
+  endPage: Int!
+
+  # The tree: PageIndex's nested `nodes` array, both ways.
+  children: [Section!]! @relationship(type: "has_child", direction: OUT)
+  parent: [Section!]! @relationship(type: "has_child", direction: IN)
+
+  # The graph: a section citing another, usually in a different document.
+  cites: [Section!]! @relationship(type: "cites", direction: OUT)
+  citedBy: [Section!]! @relationship(type: "cites", direction: IN)
+
+  document: [Document!]! @relationship(type: "has_section", direction: IN)
+}

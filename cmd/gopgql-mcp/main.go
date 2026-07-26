@@ -18,6 +18,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -87,7 +88,10 @@ func run(argv []string) error {
 	defer pool.Close()
 
 	srv := mcp.New(doc, string(source), pool, mcp.WithVersion(version))
-	if err := srv.Run(ctx, &mcpsdk.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
+	// A closed stdin is how an MCP client says goodbye, and a cancelled context
+	// is how a signal does; neither is a failure to report.
+	if err := srv.Run(ctx, &mcpsdk.StdioTransport{}); err != nil &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		return err
 	}
 	return nil

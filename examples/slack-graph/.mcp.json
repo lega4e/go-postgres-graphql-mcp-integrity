@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gopgql-slack": {
+      "command": "sh",
+      "args": ["mcp.sh"]
+    }
+  }
+}

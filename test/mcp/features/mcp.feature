@@ -114,6 +114,15 @@ Feature: An MCP server over a schema and a database
       { "persons": [ { "name": "Ada" }, { "name": "Linus" }, { "name": "Grace" } ] }
       """
 
+  Scenario: An id comes back as a readable identifier
+    # pgx decodes uuid to a 16-byte array, which would marshal as a JSON array
+    # of numbers and could not be fed back into a query.
+    When I call "query" with:
+      """
+      { persons(name: "Ada") { id name } }
+      """
+    Then the result carries a uuid in text form
+
   Scenario: A traversal nests without duplicating parents
     When I call "query" with:
       """
