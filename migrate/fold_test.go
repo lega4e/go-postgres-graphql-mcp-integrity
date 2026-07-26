@@ -147,7 +147,7 @@ func TestFoldTablesOnlyDirectory(t *testing.T) {
 	if folded.GraphName != "" {
 		t.Errorf("a tables-only fold must declare no graph, got %q", folded.GraphName)
 	}
-	if !hasColumn(folded, "persons", "name") {
+	if !hasPersonColumn(folded, "name") {
 		t.Errorf("tables-only fold lost its columns: %+v", folded)
 	}
 }

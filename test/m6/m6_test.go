@@ -230,13 +230,13 @@ func (st *scenarioState) generateAndApplyDelta(ctx context.Context, src *godog.D
 	if err != nil {
 		return fmt.Errorf("generate delta: %w", err)
 	}
-	any := false
+	wrote := false
 	for _, p := range paths {
 		if p != "" {
-			any = true
+			wrote = true
 		}
 	}
-	if !any {
+	if !wrote {
 		return fmt.Errorf("expected a delta migration, but the schemas were identical")
 	}
 	st.doc, st.model = doc, desired

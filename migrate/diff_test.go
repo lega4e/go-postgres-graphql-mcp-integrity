@@ -88,7 +88,7 @@ func TestDeltaAddColumnFoldsToDesired(t *testing.T) {
 		t.Errorf("folded init+delta != desired\nfolded: %+v\ndesired: %+v", folded, to)
 	}
 	// The new column is physically present.
-	if !hasColumn(folded, "persons", "age") {
+	if !hasPersonColumn(folded, "age") {
 		t.Errorf("folded schema missing appended column age: %+v", folded)
 	}
 }
@@ -114,7 +114,7 @@ func TestDeltaDropColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FoldContent: %v", err)
 	}
-	if hasColumn(folded, "persons", "age") {
+	if hasPersonColumn(folded, "age") {
 		t.Errorf("folded schema should not contain dropped column age: %+v", folded)
 	}
 	if !reflect.DeepEqual(canonicalize(folded), canonicalize(to)) {
@@ -164,7 +164,7 @@ func TestGenerateWritesDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fold: %v", err)
 	}
-	if !hasColumn(folded, "persons", "age") {
+	if !hasPersonColumn(folded, "age") {
 		t.Errorf("folded directory missing age column: %+v", folded)
 	}
 
@@ -191,9 +191,9 @@ func TestGenerateOnEmptyDirWritesInit(t *testing.T) {
 	}
 }
 
-func hasColumn(m *schema.Schema, table, col string) bool {
+func hasPersonColumn(m *schema.Schema, col string) bool {
 	for _, vt := range m.VertexTables {
-		if vt.Name != table {
+		if vt.Name != "persons" {
 			continue
 		}
 		for _, c := range vt.Columns {

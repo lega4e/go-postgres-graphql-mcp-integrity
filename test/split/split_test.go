@@ -71,9 +71,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func mustModel(t *testing.T, src string) *schema.Schema {
+// mustModel builds the physical schema for personSDL — the one schema this
+// suite is about.
+func mustModel(t *testing.T) *schema.Schema {
 	t.Helper()
-	doc, err := sdl.Parse(src)
+	doc, err := sdl.Parse(personSDL)
 	require.NoError(t, err, "sdl.Parse")
 	m, err := generator.Build(doc, "")
 	require.NoError(t, err, "generator.Build")
@@ -146,7 +148,7 @@ func TestGraphOverForeignTables(t *testing.T) {
 	// gopgql supplies the graph half only.
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
-	_, err := migrate.GenerateGraph(graphDir, mustModel(t, personSDL), "init")
+	_, err := migrate.GenerateGraph(graphDir, mustModel(t), "init")
 	require.NoError(t, err, "GenerateGraph")
 	written, err := os.ReadFile(filepath.Join(graphDir, migrate.InitFilename))
 	require.NoError(t, err, "read migration")
@@ -195,7 +197,7 @@ func TestPartialProjectionLeavesTheRestAlone(t *testing.T) {
 
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
-	model := mustModel(t, personSDL)
+	model := mustModel(t)
 	_, err := migrate.GenerateGraph(graphDir, model, "init")
 	require.NoError(t, err, "GenerateGraph")
 	require.NoError(t, applyDir(t, dsn, graphDir), "apply graph half")
@@ -232,7 +234,7 @@ func TestGraphBeforeTablesFailsLoudly(t *testing.T) {
 	_, dsn := freshDB(t)
 
 	root := t.TempDir()
-	dirs, err := migrate.WriteInitSplit(root, mustModel(t, personSDL))
+	dirs, err := migrate.WriteInitSplit(root, mustModel(t))
 	require.NoError(t, err, "WriteInitSplit")
 	require.Equal(t, []string{migrate.TablesDir, migrate.GraphDir},
 		[]string{filepath.Base(dirs[0]), filepath.Base(dirs[1])},
@@ -255,7 +257,7 @@ func TestDropGraphKeepsTheData(t *testing.T) {
 	pool, dsn := freshDB(t)
 
 	root := t.TempDir()
-	model := mustModel(t, personSDL)
+	model := mustModel(t)
 	dirs, err := migrate.WriteInitSplit(root, model)
 	require.NoError(t, err, "WriteInitSplit")
 	for _, d := range dirs {

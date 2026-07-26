@@ -385,13 +385,13 @@ func (st *scenarioState) applyFoldedPath(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	any := false
+	wrote := false
 	for _, p := range paths {
 		if p != "" {
-			any = true
+			wrote = true
 		}
 	}
-	if !any {
+	if !wrote {
 		return fmt.Errorf("expected a delta between base and widened schemas")
 	}
 	if err := applyAll(ctx, dirs); err != nil {
