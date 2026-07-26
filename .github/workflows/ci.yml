@@ -23,14 +23,18 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
+      # Builds every binary, including cmd/gopgql-mcp — which the MCP
+      # integration suite also compiles and spawns over stdio.
       - name: go build
         run: go build ./...
       - name: go vet
         run: go vet ./...
       - name: WASM build (playground compiles for js/wasm)
         run: GOOS=js GOARCH=wasm go build -o /tmp/gopgql.wasm ./cmd/wasm
-      # The godog suite boots a real postgres:19beta2 container via
-      # testcontainers-go and runs SQL/PGQ GRAPH_TABLE queries against it.
+      # The godog suites boot a real postgres:19beta2 container via
+      # testcontainers-go and run SQL/PGQ GRAPH_TABLE queries against it. The
+      # MCP suite (test/mcp) additionally drives a real MCP client against the
+      # server, in-process and over stdio against the built binary.
       - name: integration tests (godog + testcontainers)
         run: go test -v -timeout 20m ./...
 

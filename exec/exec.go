@@ -1,0 +1,119 @@
+// Package exec runs a compiled query against PostgreSQL and shapes the result.
+//
+// A query in gopgql is three steps: compile (compiler.CompileQuery) → execute
+// the SQL with its ordered bind parameters → regroup the flat rows into the
+// nested response (shape.Rows). The middle two are the same everywhere, and
+// were written out by hand in every integration suite; SPEC.md §4.1 reserves
+// this package for them.
+//
+// exec is also the seam where a different shaping strategy can be selected: the
+// Go-side shaper is the only one today, and an SQL-side json_agg strategy is
+// benchmarked against it in M8 (SPEC.md §3, decision 4).
+package exec
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/lega4e/gopgql/compiler"
+	"github.com/lega4e/gopgql/shape"
+)
+
+// Querier is the subset of a pgx connection pool exec needs. *pgxpool.Pool,
+// *pgx.Conn and pgx.Tx all satisfy it.
+type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// Query executes a compiled query and returns the nested GraphQL response.
+//
+// The compiled SQL carries placeholders for every argument; values travel as
+// bind parameters and are never interpolated into the statement.
+func Query(ctx context.Context, db Querier, cq *compiler.Compiled) (map[string]any, error) {
+	if cq == nil {
+		return nil, fmt.Errorf("exec: nil compiled query")
+	}
+	flat, err := Rows(ctx, db, cq.SQL, cq.Args...)
+	if err != nil {
+		return nil, err
+	}
+	return shape.Rows(cq.Projection, flat), nil
+}
+
+// Rows executes a statement and returns its rows as column-name maps, the flat
+// form the shaper consumes. It is exported for callers that want the rows
+// themselves — a hand-written statement in a test, or a future SQL-side shaper
+// whose result is already nested and must not go through a projection.
+func Rows(ctx context.Context, db Querier, sql string, args ...any) ([]map[string]any, error) {
+	rows, err := db.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	defer rows.Close()
+	return scan(rows)
+}
+
+// PoolOption adjusts the pool configuration OpenReadOnly builds — a tracer in a
+// test, a connection limit in a long-lived process.
+type PoolOption func(*pgxpool.Config)
+
+// OpenReadOnly opens a pool whose every session starts with
+// default_transaction_read_only=on, and pings it.
+//
+// The compiler emits nothing but a SELECT over GRAPH_TABLE, so there is no
+// write path to begin with; this is the second belt (SPEC.md §3, design D4): a
+// statement that somehow tried to write would be refused by the database
+// itself. It is also why a read-only database role is recommended rather than
+// required.
+//
+// The ping means an unreachable database is reported when the process starts,
+// not on every call it would otherwise fail.
+func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("exec: parse connection string: %w", err)
+	}
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("exec: open pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("exec: connect to the database: %w", err)
+	}
+	return pool, nil
+}
+
+// scan drains a result set into one map per row, keyed by output column name.
+func scan(rows pgx.Rows) ([]map[string]any, error) {
+	fds := rows.FieldDescriptions()
+	var out []map[string]any
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, fmt.Errorf("exec: read row: %w", err)
+		}
+		row := make(map[string]any, len(fds))
+		for i, fd := range fds {
+			if i < len(vals) {
+				row[fd.Name] = vals[i]
+			}
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	return out, nil
+}
