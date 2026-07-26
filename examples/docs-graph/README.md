@@ -10,7 +10,7 @@ across documents**. The corpus is three documents from one engineering org —
 an architecture doc, the incident review that followed an outage, and the
 runbook the review forced changes to — and the citations run between them.
 
-```
+```text
 Document ──has_section──▶ Section ──has_child──▶ Section
                               │
                               └──cites──▶ Section   (usually in another document)

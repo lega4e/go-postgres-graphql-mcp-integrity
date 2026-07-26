@@ -12,7 +12,7 @@ agent at:
 Every example has the same four pieces, so once you have read one compose file
 you have read all three:
 
-```
+```text
 schema.graphql      the SDL — the whole mapping
 seed.sql            the corpus
 docker-compose.yml  postgres + init (gopgql migrate) + seed + mcp

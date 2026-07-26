@@ -155,6 +155,21 @@ func TestFullIntrospectionQueryIsWellFormed(t *testing.T) {
 	}
 }
 
+// A newer graphql-js IntrospectionQuery selects isOneOf; an unknown field is a
+// hard error in the executor, so leaving it out would fail the whole query.
+func TestIsOneOfIsAnswered(t *testing.T) {
+	s := newTestServer(t)
+	data := introspect(t, s, `{ __type(name: "Person") { name isOneOf } __schema { types { name isOneOf } } }`)
+
+	typ := data["__type"].(map[string]any)
+	if v, ok := typ["isOneOf"]; !ok || v != nil {
+		t.Errorf("isOneOf on an object type = %v, want null", typ["isOneOf"])
+	}
+	if len(data["__schema"].(map[string]any)["types"].([]any)) == 0 {
+		t.Error("isOneOf must not break the types listing")
+	}
+}
+
 func TestQueryRootReportsWhatCompiles(t *testing.T) {
 	s := newTestServer(t)
 	data := introspect(t, s, `{ __type(name: "Query") { fields { name args { name type { kind name } } type { kind ofType { kind ofType { kind name } } } } } }`)

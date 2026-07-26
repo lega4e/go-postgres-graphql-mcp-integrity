@@ -3,7 +3,7 @@
 The MCP server querying itself. Packages contain files, files declare symbols,
 symbols call symbols, packages import packages:
 
-```
+```text
 Package ──contains──▶ File ──declares──▶ Symbol ──calls──▶ Symbol
    │
    └──imports──▶ Package

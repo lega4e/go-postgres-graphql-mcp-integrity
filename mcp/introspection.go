@@ -268,6 +268,16 @@ func (in *introspector) typeValue(name string) *introObject {
 			}
 			return list
 		},
+		// Newer graphql-js introspection queries select isOneOf, and an
+		// unknown field is a hard error here — so omitting it would fail the
+		// whole query rather than one field. Null everywhere but on an input
+		// object, where it reports the @oneOf directive.
+		"isOneOf": func(map[string]any) any {
+			if def.Kind != ast.InputObject {
+				return nil
+			}
+			return def.Directives.ForName("oneOf") != nil
+		},
 		"inputFields": func(args map[string]any) any {
 			if def.Kind != ast.InputObject {
 				return nil
@@ -314,6 +324,7 @@ func wrapperType(kind string, of *introObject) *introObject {
 		"possibleTypes":  constant(nil),
 		"enumValues":     constant(nil),
 		"inputFields":    constant(nil),
+		"isOneOf":        constant(nil),
 		"ofType":         constant(of),
 	}}
 }

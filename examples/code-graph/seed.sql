@@ -104,7 +104,7 @@ INSERT INTO symbols (id, name, kind, signature, doc, line) VALUES
    'Compiles an operation and returns the SQL, bind parameters and the projection used to shape the result.', 210),
   ('c0000000-0000-0000-0000-000000000015', 'run', 'func',
    'run(argv []string) error',
-   'The MCP binary''s entry point: parse the SDL, open the read-only pool, serve MCP over stdio.', 43)
+   'The MCP binary''s entry point: parse the SDL, open the read-only pool, serve MCP over stdio.', 44)
 ON CONFLICT DO NOTHING;
 
 INSERT INTO declares (source_id, target_id) VALUES

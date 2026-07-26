@@ -4,7 +4,7 @@ Chat is a graph pretending to be a list. Channels have members, threads live in
 channels, messages live in threads, people tag people, and threads point at
 earlier threads:
 
-```
+```text
 Person ──member_of──▶ Channel ◀──in_channel── Thread ──refers_to──▶ Thread
    │                                             ▲
    └──authored──▶ Message ──in_thread───────────┘
