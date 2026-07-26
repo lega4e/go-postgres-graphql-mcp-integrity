@@ -3,9 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>gopgql — playground</title>
-    <script type="module" crossorigin src="./assets/index-COU9DUEj.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-qTqsWIqk.css">
+    <meta name="theme-color" content="#000000" />
+    <title>gopgql — GraphQL to PostgreSQL 19 SQL/PGQ</title>
+    <meta
+      name="description"
+      content="One annotated GraphQL SDL document is the source of truth for both halves of a PostgreSQL 19 SQL/PGQ application: gopgql generates the DDL and property graph, and compiles GraphQL queries to GRAPH_TABLE. Try it in the browser — it runs as compiled Go."
+    />
+
+    <!-- Open Graph / link-preview metadata. Crawled at build time by
+         garutyunov.com's pet-projects section, which discovers this repo by its
+         `pet-project` topic and reads the card from these tags. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://gopgql.garutyunov.com/" />
+    <meta property="og:title" content="gopgql" />
+    <meta
+      property="og:description"
+      content="One annotated GraphQL SDL document → PostgreSQL 19 SQL/PGQ: generated DDL, compiled GRAPH_TABLE queries, and a browser playground running the real compiled Go."
+    />
+    <meta property="og:image" content="https://gopgql.garutyunov.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="article:published_time" content="2026-07-01" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="gopgql" />
+    <meta
+      name="twitter:description"
+      content="One annotated GraphQL SDL document → PostgreSQL 19 SQL/PGQ, with a browser playground running the real compiled Go."
+    />
+    <meta name="twitter:image" content="https://gopgql.garutyunov.com/og-image.png" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <script type="module" crossorigin src="./assets/index-BNrGB5G4.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
   </head>
   <body class="ga-theme">
     <main>
@@ -33,7 +63,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -48,13 +78,13 @@
           <div class="scenario">
             <div class="inputs">
               <label for="t-sdl">GraphQL SDL — schema</label>
-              <textarea id="t-sdl" class="code-input" rows="10" spellcheck="false"
+              <textarea id="t-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="t-query">GraphQL query</label>
-              <textarea id="t-query" class="code-input" rows="3" spellcheck="false"
+              <textarea id="t-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="t-vars">Variables (JSON)</label>
-              <textarea id="t-vars" class="code-input" rows="2" spellcheck="false"
+              <textarea id="t-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
             </div>
             <div class="action">
@@ -65,9 +95,9 @@
             </div>
             <div class="results">
               <label>Database schema</label>
-              <ga-code id="t-schema"></ga-code>
+              <ga-code id="t-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
-              <ga-code id="t-sql"></ga-code>
+              <ga-code id="t-sql" data-lang="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="t-params"></ga-code>
             </div>
@@ -90,13 +120,13 @@
           <div class="scenario">
             <div class="inputs">
               <label for="d-sdl">GraphQL SDL — schema</label>
-              <textarea id="d-sdl" class="code-input" rows="10" spellcheck="false"
+              <textarea id="d-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="d-query">GraphQL query — one hop too deep</label>
-              <textarea id="d-query" class="code-input" rows="3" spellcheck="false"
+              <textarea id="d-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="d-vars">Variables (JSON)</label>
-              <textarea id="d-vars" class="code-input" rows="2" spellcheck="false"
+              <textarea id="d-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
 
               <label for="d-max">Max depth (hops from the root field)</label>
@@ -111,9 +141,48 @@
             </div>
             <div class="results">
               <label>Database schema</label>
-              <ga-code id="d-schema"></ga-code>
+              <ga-code id="d-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
-              <ga-code id="d-sql"></ga-code>
+              <ga-code id="d-sql" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Directives: the M6 column overrides, uniqueness and indexes. -->
+        <div slot="directives">
+          <p class="panel-hint">
+            <code>@column(name:)</code> renames the physical column — and with it
+            the property the graph exposes, which is why the compiled query below
+            projects <code>name</code> while the GraphQL field is still
+            <code>title</code>. <code>@column(type:)</code> overrides the default
+            scalar mapping, <code>@unique</code> makes the database itself reject
+            a duplicate, and <code>@index</code> adds a secondary index with an
+            optional access method — bare, the name is derived from the table and
+            column.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="c-sdl">GraphQL SDL — schema</label>
+              <textarea id="c-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-query">GraphQL query</label>
+              <textarea id="c-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-vars">Variables (JSON)</label>
+              <textarea id="c-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="directives" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="c-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="c-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="c-sql" data-lang="sql"></ga-code>
             </div>
           </div>
         </div>
@@ -133,13 +202,13 @@
           <div class="scenario">
             <div class="inputs">
               <label for="p-sdl">GraphQL SDL — schema</label>
-              <textarea id="p-sdl" class="code-input" rows="10" spellcheck="false"
+              <textarea id="p-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="p-query">GraphQL query</label>
-              <textarea id="p-query" class="code-input" rows="3" spellcheck="false"
+              <textarea id="p-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="p-vars">Variables (JSON)</label>
-              <textarea id="p-vars" class="code-input" rows="2" spellcheck="false"
+              <textarea id="p-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
             </div>
             <div class="action">
@@ -150,9 +219,9 @@
             </div>
             <div class="results">
               <label>Database schema</label>
-              <ga-code id="p-schema"></ga-code>
+              <ga-code id="p-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
-              <ga-code id="p-sql"></ga-code>
+              <ga-code id="p-sql" data-lang="sql"></ga-code>
               <label>Bind parameters</label>
               <ga-code id="p-params"></ga-code>
             </div>
@@ -172,10 +241,10 @@
           <div class="scenario">
             <div class="inputs">
               <label for="i-sdl">GraphQL SDL — schema</label>
-              <textarea id="i-sdl" class="code-input" rows="14" spellcheck="false"
+              <textarea id="i-sdl" class="code-input" data-lang="graphql" rows="14" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
               <label for="i-query">GraphQL query</label>
-              <textarea id="i-query" class="code-input" rows="3" spellcheck="false"
+              <textarea id="i-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
             </div>
             <div class="action">
@@ -186,9 +255,9 @@
             </div>
             <div class="results">
               <label>Database schema</label>
-              <ga-code id="i-schema"></ga-code>
+              <ga-code id="i-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
-              <ga-code id="i-sql"></ga-code>
+              <ga-code id="i-sql" data-lang="sql"></ga-code>
             </div>
           </div>
         </div>
@@ -203,7 +272,7 @@
           <div class="scenario">
             <div class="inputs">
               <label for="m-sdl">GraphQL SDL — schema</label>
-              <textarea id="m-sdl" class="code-input" rows="10" spellcheck="false"
+              <textarea id="m-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
             </div>
             <div class="action">
@@ -214,7 +283,7 @@
             </div>
             <div class="results">
               <label>Initial migration <code>0001_init.sql</code></label>
-              <ga-code id="m-init"></ga-code>
+              <ga-code id="m-init" data-lang="sql"></ga-code>
             </div>
           </div>
 
@@ -229,7 +298,7 @@
           <div class="scenario">
             <div class="inputs">
               <label for="m-sdl2">GraphQL SDL — revised schema</label>
-              <textarea id="m-sdl2" class="code-input" rows="11" spellcheck="false"
+              <textarea id="m-sdl2" class="code-input" data-lang="graphql" rows="11" spellcheck="false"
                 autocapitalize="off" autocorrect="off"></textarea>
             </div>
             <div class="action">
@@ -240,7 +309,7 @@
             </div>
             <div class="results">
               <label>Delta migration <code>0002</code> (goose)</label>
-              <ga-code id="m-delta"></ga-code>
+              <ga-code id="m-delta" data-lang="sql"></ga-code>
             </div>
           </div>
         </div>
