@@ -26,6 +26,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -72,13 +74,9 @@ func TestMain(m *testing.M) {
 func mustModel(t *testing.T, src string) *schema.Schema {
 	t.Helper()
 	doc, err := sdl.Parse(src)
-	if err != nil {
-		t.Fatalf("sdl.Parse: %v", err)
-	}
+	require.NoError(t, err, "sdl.Parse")
 	m, err := generator.Build(doc, "")
-	if err != nil {
-		t.Fatalf("generator.Build: %v", err)
-	}
+	require.NoError(t, err, "generator.Build")
 	return m
 }
 
@@ -89,21 +87,15 @@ func freshDB(t *testing.T) (*pgxpool.Pool, string) {
 	ctx := context.Background()
 	name := "db_" + strings.ToLower(strings.NewReplacer("/", "", "-", "", " ", "").Replace(t.Name()))
 	admin, err := pgxpool.New(ctx, connString)
-	if err != nil {
-		t.Fatalf("admin pool: %v", err)
-	}
+	require.NoError(t, err, "admin pool")
 	defer admin.Close()
-	if _, err := admin.Exec(ctx, "DROP DATABASE IF EXISTS "+name); err != nil {
-		t.Fatalf("drop db: %v", err)
-	}
-	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatalf("create db: %v", err)
-	}
+	_, err = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+name)
+	require.NoError(t, err, "drop db")
+	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
+	require.NoError(t, err, "create db")
 	dsn := strings.Replace(connString, "/gopgql?", "/"+name+"?", 1)
 	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
+	require.NoError(t, err, "pool")
 	t.Cleanup(pool.Close)
 	return pool, dsn
 }
@@ -147,27 +139,20 @@ func TestGraphOverForeignTables(t *testing.T) {
 		`INSERT INTO follows (source_id, target_id) VALUES
 			('11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222')`,
 	} {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
-			t.Fatalf("seed: %v\n%s", err, stmt)
-		}
+		_, err := pool.Exec(ctx, stmt)
+		require.NoError(t, err, "seed: %s", stmt)
 	}
 
 	// gopgql supplies the graph half only.
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
-	if _, err := migrate.GenerateGraph(graphDir, mustModel(t, personSDL), "init"); err != nil {
-		t.Fatalf("GenerateGraph: %v", err)
-	}
+	_, err := migrate.GenerateGraph(graphDir, mustModel(t, personSDL), "init")
+	require.NoError(t, err, "GenerateGraph")
 	written, err := os.ReadFile(filepath.Join(graphDir, migrate.InitFilename))
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if strings.Contains(string(written), "CREATE TABLE") {
-		t.Fatalf("the graph half must not create tables:\n%s", written)
-	}
-	if err := applyDir(t, dsn, graphDir); err != nil {
-		t.Fatalf("apply graph half: %v", err)
-	}
+	require.NoError(t, err, "read migration")
+	require.NotContains(t, string(written), "CREATE TABLE",
+		"the graph half must not create tables")
+	require.NoError(t, applyDir(t, dsn, graphDir), "apply graph half")
 
 	// The graph works over tables gopgql never created.
 	var name string
@@ -175,12 +160,8 @@ func TestGraphOverForeignTables(t *testing.T) {
 		SELECT name FROM GRAPH_TABLE (app_graph
 			MATCH (p IS person)-[IS follows]->(q IS person)
 			COLUMNS (q.name AS name))`).Scan(&name)
-	if err != nil {
-		t.Fatalf("query the graph: %v", err)
-	}
-	if name != "Grace" {
-		t.Errorf("MATCH returned %q, want Grace", name)
-	}
+	require.NoError(t, err, "query the graph")
+	assert.Equal(t, "Grace", name, "MATCH must traverse tables gopgql never created")
 }
 
 // TestPartialProjectionLeavesTheRestAlone is the guarantee the SDL-as-projection
@@ -208,56 +189,41 @@ func TestPartialProjectionLeavesTheRestAlone(t *testing.T) {
 			VALUES ('11111111-1111-1111-1111-111111111111', 'Ada', 120, 'keep me')`,
 		`INSERT INTO payroll (amount) VALUES (42)`,
 	} {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
-			t.Fatalf("seed: %v\n%s", err, stmt)
-		}
+		_, err := pool.Exec(ctx, stmt)
+		require.NoError(t, err, "seed: %s", stmt)
 	}
 
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
 	model := mustModel(t, personSDL)
-	if _, err := migrate.GenerateGraph(graphDir, model, "init"); err != nil {
-		t.Fatalf("GenerateGraph: %v", err)
-	}
-	if err := applyDir(t, dsn, graphDir); err != nil {
-		t.Fatalf("apply graph half: %v", err)
-	}
+	_, err := migrate.GenerateGraph(graphDir, model, "init")
+	require.NoError(t, err, "GenerateGraph")
+	require.NoError(t, applyDir(t, dsn, graphDir), "apply graph half")
 
 	// Nothing the SDL did not mention was touched.
 	var note string
-	if err := pool.QueryRow(ctx, `SELECT private_note FROM persons`).Scan(&note); err != nil {
-		t.Fatalf("the undeclared column was removed: %v", err)
-	}
-	if note != "keep me" {
-		t.Errorf("private_note = %q, want %q", note, "keep me")
-	}
+	err = pool.QueryRow(ctx, `SELECT private_note FROM persons`).Scan(&note)
+	require.NoError(t, err, "a column the SDL never declared was removed")
+	assert.Equal(t, "keep me", note)
 	var amount int
-	if err := pool.QueryRow(ctx, `SELECT amount FROM payroll`).Scan(&amount); err != nil {
-		t.Fatalf("the undeclared table was removed: %v", err)
-	}
+	err = pool.QueryRow(ctx, `SELECT amount FROM payroll`).Scan(&amount)
+	require.NoError(t, err, "a table the SDL never mentioned was removed")
 
 	// A second run, with the database still holding what the SDL never
 	// mentioned, must still emit nothing: absence from the SDL is not a
 	// pending change.
 	path, err := migrate.GenerateGraph(graphDir, model, "again")
-	if err != nil {
-		t.Fatalf("second GenerateGraph: %v", err)
-	}
-	if path != "" {
-		data, _ := os.ReadFile(path)
-		t.Errorf("an unchanged schema emitted a migration:\n%s", data)
-	}
+	require.NoError(t, err, "second GenerateGraph")
+	assert.Empty(t, path,
+		"absence from the SDL is not a pending change: an unchanged schema must emit nothing")
 
 	// And the graph exposes only the declared properties.
 	var n int
-	if err := pool.QueryRow(ctx, `
+	err = pool.QueryRow(ctx, `
 		SELECT count(*) FROM GRAPH_TABLE (app_graph
-			MATCH (p IS person) COLUMNS (p.name AS name))`).Scan(&n); err != nil {
-		t.Fatalf("query the graph: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("graph returned %d rows, want 1", n)
-	}
+			MATCH (p IS person) COLUMNS (p.name AS name))`).Scan(&n)
+	require.NoError(t, err, "query the graph")
+	assert.Equal(t, 1, n)
 }
 
 // TestGraphBeforeTablesFailsLoudly documents the ordering constraint by
@@ -267,29 +233,19 @@ func TestGraphBeforeTablesFailsLoudly(t *testing.T) {
 
 	root := t.TempDir()
 	dirs, err := migrate.WriteInitSplit(root, mustModel(t, personSDL))
-	if err != nil {
-		t.Fatalf("WriteInitSplit: %v", err)
-	}
-	if filepath.Base(dirs[0]) != migrate.TablesDir || filepath.Base(dirs[1]) != migrate.GraphDir {
-		t.Fatalf("WriteInitSplit must return tables before graph, got %v", dirs)
-	}
+	require.NoError(t, err, "WriteInitSplit")
+	require.Equal(t, []string{migrate.TablesDir, migrate.GraphDir},
+		[]string{filepath.Base(dirs[0]), filepath.Base(dirs[1])},
+		"WriteInitSplit must return the halves in apply order")
 
 	// Applying the graph half first, against tables that do not exist.
 	err = applyDir(t, dsn, dirs[1])
-	if err == nil {
-		t.Fatal("applying the graph half before the tables must fail")
-	}
-	if !strings.Contains(err.Error(), "persons") {
-		t.Errorf("the error should name the missing table, got: %v", err)
-	}
+	require.Error(t, err, "applying the graph half before the tables must fail")
+	assert.Contains(t, err.Error(), "persons", "the error should name the missing table")
 
 	// In the right order it works.
-	if err := applyDir(t, dsn, dirs[0]); err != nil {
-		t.Fatalf("apply tables: %v", err)
-	}
-	if err := applyDir(t, dsn, dirs[1]); err != nil {
-		t.Fatalf("apply graph after tables: %v", err)
-	}
+	require.NoError(t, applyDir(t, dsn, dirs[0]), "apply tables")
+	require.NoError(t, applyDir(t, dsn, dirs[1]), "apply graph after tables")
 }
 
 // TestDropGraphKeepsTheData covers "drop the whole graph setup but keep the
@@ -301,49 +257,32 @@ func TestDropGraphKeepsTheData(t *testing.T) {
 	root := t.TempDir()
 	model := mustModel(t, personSDL)
 	dirs, err := migrate.WriteInitSplit(root, model)
-	if err != nil {
-		t.Fatalf("WriteInitSplit: %v", err)
-	}
+	require.NoError(t, err, "WriteInitSplit")
 	for _, d := range dirs {
-		if err := applyDir(t, dsn, d); err != nil {
-			t.Fatalf("apply %s: %v", d, err)
-		}
+		require.NoError(t, applyDir(t, dsn, d), "apply %s", d)
 	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO persons (id, name) VALUES ('11111111-1111-1111-1111-111111111111', 'Ada')`); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	_, err = pool.Exec(ctx,
+		`INSERT INTO persons (id, name) VALUES ('11111111-1111-1111-1111-111111111111', 'Ada')`)
+	require.NoError(t, err, "seed")
 
 	// The graph half, pointed at a schema that declares no graph.
 	graphless := &schema.Schema{VertexTables: model.VertexTables, EdgeTables: model.EdgeTables}
 	path, err := migrate.GenerateGraph(dirs[1], graphless, "drop graph")
-	if err != nil {
-		t.Fatalf("GenerateGraph (drop): %v", err)
-	}
-	if path == "" {
-		t.Fatal("dropping the graph should emit a migration")
-	}
+	require.NoError(t, err, "GenerateGraph (drop)")
+	require.NotEmpty(t, path, "dropping the graph should emit a migration")
 	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if strings.Contains(string(data), "DROP TABLE") || strings.Contains(string(data), "ALTER TABLE") {
-		t.Errorf("dropping the graph must not touch a table:\n%s", data)
-	}
-	if err := applyDir(t, dsn, dirs[1]); err != nil {
-		t.Fatalf("apply the drop: %v", err)
-	}
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "DROP TABLE", "dropping the graph must not touch a table")
+	assert.NotContains(t, string(data), "ALTER TABLE", "dropping the graph must not touch a table")
+	require.NoError(t, applyDir(t, dsn, dirs[1]), "apply the drop")
 
 	// The graph is gone; the row is not.
 	var n int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_propgraph_element`).Scan(&n); err == nil && n != 0 {
-		t.Errorf("property graph elements still present: %d", n)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_propgraph_element`).Scan(&n); err == nil {
+		assert.Zero(t, n, "the property graph should be gone")
 	}
 	var name string
-	if err := pool.QueryRow(ctx, `SELECT name FROM persons`).Scan(&name); err != nil {
-		t.Fatalf("the data did not survive dropping the graph: %v", err)
-	}
-	if name != "Ada" {
-		t.Errorf("name = %q, want Ada", name)
-	}
+	err = pool.QueryRow(ctx, `SELECT name FROM persons`).Scan(&name)
+	require.NoError(t, err, "the data must survive dropping the graph")
+	assert.Equal(t, "Ada", name)
 }

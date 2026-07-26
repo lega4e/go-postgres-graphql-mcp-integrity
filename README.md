@@ -118,8 +118,50 @@ state file ([`SPEC.md` §3](./SPEC.md) decision 6):
   `CREATE/DROP TABLE`, and a `DROP` + `CREATE PROPERTY GRAPH` (graphs are
   metadata, always recreated), with a `-- +goose Down` section that is the exact
   inverse.
-- **`migrate.Generate`** ties them together over a migration directory: fold what
-  is there, diff, and write `NNNN_<name>.sql`.
+- **`migrate.GenerateTables` / `migrate.GenerateGraph`** tie them together over a
+  migration directory: fold what is there, diff, and write `NNNN_<name>.sql`.
+
+### Migrations are split in two
+
+`gopgql generate --dir migrations` writes **two** directories:
+
+```
+migrations/tables/0001_init.sql   CREATE TABLE, CREATE INDEX
+migrations/graph/0001_init.sql    CREATE PROPERTY GRAPH
+```
+
+They are generated, versioned and applied independently, and either can be
+turned off with `--no-tables` or `--no-graph`. Which half a directory owns is
+decided by its path — nothing is recorded inside the files, so a directory
+cannot disagree with itself about what it manages.
+
+Two reasons this matters more than tidiness:
+
+**Someone else may own the tables.** A database managed by Atlas, Flyway or a
+DBA can still have a property graph over it: generate with `--no-tables` and
+gopgql supplies the `CREATE PROPERTY GRAPH` and nothing else.
+
+**The SDL may describe only part of a database.** A database can hold far more
+than a service needs to expose, and the SDL is then the source of truth for the
+slice that is surfaced as a graph — a read-only projection. With the tables half
+off, **absence from the SDL is not evidence of absence from the database**:
+gopgql never drops or alters a table or column it was not told about.
+
+The asymmetry is worth stating plainly, because it is the one way to get this
+wrong: with the tables half **on**, gopgql *is* managing those tables, and a
+column absent from the SDL is a column it will remove.
+
+#### Order matters, twice
+
+`gopgql migrate` sequences both halves for you. Applying them yourself, the
+rules are:
+
+1. **Tables before the graph.** The graph references the tables; applying it
+   first is refused by the database.
+2. **Take the graph down before changing tables it exposes.** PostgreSQL will
+   not drop or retype a column a live property graph exposes. The order is
+   *graph down → tables up → graph up*, which is exactly what the single
+   combined migration used to do in one file.
 
 This builds on **M1** (from `@node`, `@relationship`, `@hasInverse`, `@ignore`;
 surrogate `uuid` keys; the default scalar mapping): **`sdl`** parses/validates

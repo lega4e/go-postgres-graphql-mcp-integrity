@@ -68,6 +68,30 @@ No tool exists that generates SQL/PGQ property-graph DDL from GraphQL SDL, and n
 |9 |Test harness         |**godog** BDD over `testcontainers-go`, against real `postgres:19beta2`.                                                                          |
 |10|GitHub Pages         |Docs site with embedded WASM playground. Branch mode + PR previews.                                                                               |
 
+### 3.0 Split migrations
+
+Generation emits two migration directories — `<dir>/tables/` and `<dir>/graph/` —
+applied in that order, either turnable off with `--no-tables` / `--no-graph`.
+A directory's path is the only record of what it owns.
+
+This makes two things representable that were not:
+
+- a property graph over tables gopgql does not manage;
+- an SDL that describes **part** of a database — the slice surfaced as a graph.
+  With the tables half off, absence from the SDL says nothing about the
+  database, and nothing it does not mention is ever dropped or altered. With the
+  tables half on, gopgql manages those tables and a column absent from the SDL
+  is removed.
+
+Two ordering constraints follow from PostgreSQL, not from gopgql: tables must
+exist before the graph that references them, and a live graph must come down
+before the columns it exposes can change. `gopgql migrate` sequences both.
+
+Each half records itself in its own goose version table
+(`goose_db_version_tables`, `goose_db_version_graph`) — both start at `0001`, so
+a shared table would make goose treat the second half's initial migration as
+already applied and silently skip it.
+
 ### 3.1 Rationale notes
 
 **On rejecting deep traversal (3).** PG19 cannot express variable-length paths. The alternatives were a `WITH RECURSIVE` emitter (a second, structurally different code path over raw edge tables) or silent truncation. Rejecting keeps every emitted query a pure `GRAPH_TABLE`, keeps the library honest about PostgreSQL’s actual ceiling, and leaves a clean upgrade path when native quantified paths land.
