@@ -296,17 +296,25 @@ func (e *env) gooseUp() {
 }
 
 // mustExec runs a statement that is expected to succeed.
-func (e *env) mustExec(query string, args ...any) {
+//
+// The statements these helpers run are written out in full, with their values
+// inline and no bind parameters, and that is deliberate: they stand in for the
+// writes gopgql never sees — what a psql session, an ETL job or an ORM sharing
+// the database would issue — which is precisely what makes them evidence that
+// the database is enforcing something rather than gopgql. The suite's claim
+// about bind parameters (7.2) is a claim about the *compiler's* output, and is
+// asserted there, on cq.SQL and cq.Args.
+func (e *env) mustExec(query string) {
 	e.t.Helper()
-	_, err := e.pool.Exec(e.ctx, query, args...)
+	_, err := e.pool.Exec(e.ctx, query)
 	require.NoError(e.t, err, "statement failed: %s", query)
 }
 
 // execErr runs a statement that is expected to be rejected, and returns the
 // rejection.
-func (e *env) execErr(query string, args ...any) error {
+func (e *env) execErr(query string) error {
 	e.t.Helper()
-	_, err := e.pool.Exec(e.ctx, query, args...)
+	_, err := e.pool.Exec(e.ctx, query)
 	return err
 }
 
@@ -323,10 +331,10 @@ func (e *env) run(query string, vars map[string]any) (map[string]any, *compiler.
 }
 
 // scalar reads a single value out of the database.
-func scalar[T any](e *env, query string, args ...any) T {
+func scalar[T any](e *env, query string) T {
 	e.t.Helper()
 	var out T
-	require.NoError(e.t, e.pool.QueryRow(e.ctx, query, args...).Scan(&out), "query: %s", query)
+	require.NoError(e.t, e.pool.QueryRow(e.ctx, query).Scan(&out), "query: %s", query)
 	return out
 }
 
