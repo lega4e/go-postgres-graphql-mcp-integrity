@@ -10,6 +10,68 @@ See [`SPEC.md`](./SPEC.md) for the full design and milestone plan.
 
 ## Status
 
+**M7 — SDL widening: full, plus conformance.** The SDL can now describe a
+*schema*, not just a graph ([`SPEC.md` §5](./SPEC.md), [§7](./SPEC.md) → M7):
+
+- **`@default(value:)`** is the column's DDL default, emitted **verbatim**:
+  `joinedAt: DateTime! @default(value: "now()")` reaches the database as
+  `DEFAULT now()`, so a row inserted without the column gets its value from
+  PostgreSQL and not from anything gopgql supplies.
+- **`@check(expr:)`** is a constraint the database enforces — on a field for a
+  column-level check, on a type for one spanning columns. Every check is emitted
+  under a name gopgql derives itself (`<table>_<column>_check`,
+  `<table>_check_<n>`), because a later delta drops a constraint *by name* and an
+  anonymous one would first have to be looked up in a live database.
+- **Both are raw SQL, deliberately.** gopgql never parses an expression or a
+  default: an invalid one is PostgreSQL's error at migration time, which is the
+  right place and the right message. That also means they name **columns**, not
+  GraphQL fields — a check on a field mapped with `@column(name: "left_at")`
+  writes `left_at`. It is an escape hatch, defensible because whoever writes the
+  SDL already owns the schema, and indefensible for user input.
+- **`@key(fields:)`** is a natural key **alongside** the surrogate `id`, not a
+  replacement for it. The table keeps `id uuid PRIMARY KEY`, gains
+  `CONSTRAINT <table>_key UNIQUE (…)`, and the key's columns are listed in the
+  property graph's `KEY (...)` clause — so a `MATCH` can select a vertex by its
+  data while edge tables go on referencing `id`. Making a natural key *the*
+  identity would rewrite the compiler's three `id` projection sites, `shape`'s
+  parent dedup and every edge reference; it is recorded as an open question
+  ([`SPEC.md` §9](./SPEC.md)) rather than smuggled into this milestone.
+- **`@renamedFrom(name:)`** is a **hint, never an inference.** A differ that sees
+  one name disappear and another appear cannot tell a rename from a genuine
+  drop-and-add, and guessing wrong destroys the rows one way or loses them the
+  other — so nothing is inferred, and without the hint the old behaviour stands.
+  The hint carries the previous **GraphQL** name (a type name on a type, a field
+  name on a field); gopgql derives the candidate physical names from it and
+  accepts one only when the folded prior state actually holds it. A hint naming
+  something the prior state does not have emits nothing, which is what lets the
+  same SDL keep generating cleanly after its own rename has landed; a hint naming
+  something the SDL *still declares* is an error, because that is two objects and
+  not one moved one.
+- **The fold learned to read a rename back — the invisible half.** Emitting
+  `ALTER TABLE … RENAME` alone would be worse than not emitting it: prior state
+  is reconstructed by re-parsing gopgql's own migrations, so the *next* delta
+  would be computed as though the rename never happened and would drop the
+  renamed column. `internal/ddl` grew `RENAME TO`, `RENAME COLUMN … TO` and
+  `ADD`/`DROP CONSTRAINT` first, and `migrate.Fold` grew the visitor with them.
+- **`gopgql conform`** closes the assumption the whole migration story rests on
+  — that nobody alters the database out of band. It reflects the live property
+  graph and reports **typed** findings, and its exit status is its answer
+  ([below](#check-the-database-still-matches)).
+
+The M7 suite runs each of the issue's acceptance criteria against a real
+`postgres:19beta2` container, every test on its own freshly created database: a
+`@check` rejects a violating row with SQLSTATE 23514 under the derived
+constraint name; a natural-key vertex is **matched by its key columns**, on a
+graph PostgreSQL accepts with the natural key as the vertex `KEY` while its
+edges still reference the surrogate `id`; a duplicate natural key is refused by
+the database; a rename is applied as `ALTER TABLE … RENAME` with the seeded rows
+still present afterwards; folding the emitted migrations back across a rename
+reconstructs the same schema as a direct apply; conformance is quiet on a clean
+database and names the finding when a property is dropped from the graph behind
+gopgql's back; and a row inserted without a column gets its declared default.
+The playground's **Constraints** and **Conformance** tabs show the generated
+DDL, the rename delta and the report's structure.
+
 **M6 — SDL widening: moderate.** The SDL stops being structure-only
 ([`SPEC.md` §5](./SPEC.md), [§7](./SPEC.md) → M6):
 
@@ -151,10 +213,12 @@ PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
 |---------------|------------------------------------------------------------------------------------------------------|
 | *Traversal*   | The three-hop exit query: one `GRAPH_TABLE`, bind parameters, isomorphism guards.                     |
 | *Directives*  | The M6 mapping directives in the generated DDL: a renamed column, an overridden type, a UNIQUE, and two indexes. |
+| *Constraints* | Two stacked scenarios: the M7 constraint surface — defaults, named checks, a natural key beside the surrogate `id` — with a query selecting a vertex **by that key**; then the same schema revised with `@renamedFrom`, whose delta *moves* the column. Delete the hint and watch the delta become `DROP COLUMN` + `ADD COLUMN`. |
 | *Multi-pattern* | A branching query split into one `GRAPH_TABLE` per branch, `LEFT JOIN`ed on projected ids; the status line counts the calls. |
 | *Depth limit* | A four-hop query refused with the typed `*DepthExceededError`; move the `MaxDepth` control and watch it flip. |
 | *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
 | *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|
+| *Conformance* | The graph mapping `conform` compares — generated here, and visibly *not* containing the defaults, checks and unique the same schema declares — beside a **fixture** report showing all five finding kinds. A browser has no database, so this is the one output on the page that is not generated, and the panel says so. |
 
 ## Connect an AI agent (MCP)
 
@@ -237,13 +301,23 @@ Findings print one per line, each carrying the kind a reader acts on, with
 `SDL` and `DATABASE` naming which side said what and `-` meaning nothing there:
 
 ```
-gopgql: property graph "app_graph" has drifted from schema.graphql — 3 findings
+$ gopgql conform --sdl schema.graphql --dsn "$GOPGQL_DSN"; echo "exit $?"
+KIND             ELEMENT    PROPERTY  SDL            DATABASE
+MissingElement   companies  -         company        -
+LabelMismatch    persons    -         actor, person  human
+MissingProperty  persons    email     email          -
 
-KIND             ELEMENT  PROPERTY  SDL            DATABASE
-MissingElement   company  -         company        -
-LabelMismatch    person   -         actor, person  human
-MissingProperty  person   email     email          -
+gopgql: compared elements, labels and properties only; defaults, constraints and indexes are not covered.
+gopgql: property graph "app_graph" has drifted from schema.graphql: 3 findings
+exit 2
 ```
+
+The findings and the coverage note go to stdout; the one-line summary rides out
+on stderr as the process's error, so redirecting the report to a file still
+leaves the terminal saying what happened. The note is printed on *both*
+outcomes, not only on drift — "conforms" is the sentence most likely to be
+over-read, and a caveat that appears only when something is already wrong is a
+caveat nobody sees.
 
 `--sdl` and `--dsn` fall back to `GOPGQL_SDL` and `GOPGQL_DSN` as they do for
 every other subcommand, and a flag wins over the environment. `--graph` names

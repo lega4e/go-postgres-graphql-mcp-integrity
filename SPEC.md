@@ -114,11 +114,14 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`compiler`  |GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.                                           |
 |`shape`     |Flat rows → nested GraphQL response (Go-side; SQL-side added M8).                                      |
 |`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool.        |
+|`conform`   |Reflect the live property graph out of `pg_propgraph_*`; diff it against the generated model; report typed findings.|
 |`mcp`       |Model Context Protocol server: GraphQL introspection over the SDL, plus a query tool over `exec`.      |
-|`cmd/gopgql`|CLI: `generate` (SDL → migration) and `migrate` (generate + apply). `compile` is not implemented yet.  |
+|`cmd/gopgql`|CLI: `generate` (SDL → migration), `migrate` (generate + apply) and `conform` (drift check). `compile` is not implemented yet.|
 |`cmd/gopgql-mcp`|The MCP server binary: one SDL, one DSN, stdio or streamable-HTTP transport.                       |
 
-`sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `mcp` and `cmd/gopgql-mcp` build on `exec` and so are not part of the WASM surface either.
+`sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `conform` reflects a live catalog and so imports it too; `mcp` and `cmd/gopgql-mcp` build on `exec`. None of those four are part of the WASM surface, and nothing on the WASM side may import them — the boundary is what makes the browser playground possible at all.
+
+`conform` reflects **into `schema.Schema`**, the same model `generator` builds from SDL, so a drift check is a comparison of two values of one type rather than a model-versus-database special case. That is also why it can sit outside the WASM surface without splitting the model: the shared type is on the database-free side, and only the reflection is not. The playground therefore shows the SDL half of the comparison — the generated `CREATE PROPERTY GRAPH` — beside a recorded report, and says which is which.
 
 ### 4.2 Dependencies
 
@@ -153,12 +156,19 @@ directive @column(name: String, type: String) on FIELD_DEFINITION
 directive @index(name: String, using: String) on FIELD_DEFINITION | OBJECT
 directive @unique on FIELD_DEFINITION
 
-# --- M7: full expressiveness ---
+# --- M7: full expressiveness (implemented) ---
 directive @default(value: String!) on FIELD_DEFINITION
 directive @check(expr: String!) on FIELD_DEFINITION | OBJECT
-directive @key(fields: [String!]!) on OBJECT     # composite / natural key
+directive @key(fields: [String!]!) on OBJECT     # natural key, alongside id
 directive @renamedFrom(name: String!) on OBJECT | FIELD_DEFINITION  # rename hint
 ```
+
+Every directive above is implemented. The four added in M7 carry semantics worth stating precisely, because each is easy to read as something slightly different:
+
+- **`@default(value:)`** and **`@check(expr:)`** are **raw SQL, emitted verbatim** — `@default(value: "now()")` reaches the DDL as `DEFAULT now()`. gopgql never parses them; an invalid expression is PostgreSQL's error when the migration is applied, which is the right place and the right message. They therefore live in the *column* namespace: a check on a field mapped with `@column(name: "left_at")` writes `left_at`, not the GraphQL field name. This is a deliberate escape hatch on the same footing as `graphql-to-sql`'s `@sql` (§2.3), and it is defensible only because whoever writes the SDL already owns the schema. It would be indefensible for user input.
+- **`@check`** may appear once per field (column-level) and any number of times on a type (table-level, for a constraint spanning columns). Every check is emitted **named** — `<table>_<column>_check`, `<table>_check_<n>` — because a later delta drops a constraint by name, and an anonymous one would first have to be looked up in a live database.
+- **`@key(fields:)`** is a **natural key alongside the surrogate `id`, not a replacement for it.** The table keeps `id uuid PRIMARY KEY`, gains `CONSTRAINT <table>_key UNIQUE (…)` over the named columns, and lists those columns in the property graph's `KEY (...)` clause so a `MATCH` can select a vertex by its data. Edge tables continue to reference `id`. The surrogate key is load-bearing in the compiler (three projection sites) and in `shape`'s parent dedup; making a natural key *the* identity is a different, larger change and is recorded in §9 rather than smuggled into M7.
+- **`@renamedFrom(name:)`** is a **hint, never an inference.** A differ that sees one name disappear and another appear cannot tell a rename from a drop-and-add, and guessing wrong destroys the rows one way or loses them the other — so nothing is inferred, and without the hint the old drop-and-add behaviour stands. Its value is the previous **GraphQL** name (a type name on `OBJECT`, a field name on `FIELD_DEFINITION`); the generator derives candidate *physical* names from it, and the differ accepts one only when the folded prior state actually holds it. A hint naming something the prior state does not have emits nothing — which is what lets the same SDL, hint included, keep generating cleanly after its rename has landed. A hint naming something the SDL *still declares* is an error: that is two objects, not one moved one.
 
 ### 5.1 Default scalar mapping
 
@@ -378,9 +388,10 @@ Parser complicates: nesting and arguments.
 
 ### M7 — SDL widening: full, plus conformance
 
-- `@default`, `@check`, `@key(fields:)` composite/natural keys, `@renamedFrom` rename hints.
-- Composite keys flow into `KEY (...)` clauses and multi-column `SOURCE KEY`/`DESTINATION KEY`.
-- **Conformance check:** reflect `pg_propgraph_element`, `pg_propgraph_label`, `pg_propgraph_property` and compare to the SDL directive model; report structured drift.
+- `@default`, `@check`, `@key(fields:)` natural keys, `@renamedFrom` rename hints.
+- Composite keys flow into `KEY (...)` clauses. **Narrowed during implementation:** `SOURCE KEY`/`DESTINATION KEY` stay single-column on the surrogate `id`. A natural key is a uniqueness constraint *alongside* `id`, not a replacement for it (§5), so edge tables keep referencing `id` and the compiler's three `id` projection sites are untouched. Making a natural key the physical identity is §9's open question, not this milestone's.
+- **`internal/ddl` first.** Emitting `ALTER TABLE … RENAME` without teaching the fold parser to read it back would corrupt the *next* delta: prior state would be reconstructed as though the rename never happened, and the differ would drop the renamed column. The parser, the AST and the fold visitor learn `RENAME TO`, `RENAME COLUMN … TO` and `ADD`/`DROP CONSTRAINT` before anything emits one.
+- **Conformance check:** reflect `pg_propgraph_element`, `pg_propgraph_label`, `pg_propgraph_property` and compare to the SDL directive model; report structured drift. Findings are typed (`MissingElement`, `UnexpectedElement`, `MissingProperty`, `UnexpectedProperty`, `LabelMismatch`) so a caller branches on a kind rather than parsing English. Scope is the graph and only the graph: defaults, `CHECK` and `UNIQUE` constraints, indexes, column types and any table the graph does not expose are in other catalogs and are **not** compared, so an empty report means the graph mapping matches the SDL — not that the tables underneath it do. `gopgql conform` exits `0` when it conforms, `2` when it ran and found drift, and `1` when it could not run at all; the last two are separate because an unreachable database and a drifted one demand different responses.
 
 **Exit:** Scenarios — a `@check` constraint rejects invalid data; a composite-key vertex is matchable by `MATCH`; `@renamedFrom` produces `ALTER TABLE ... RENAME` rather than drop+add, with data preserved; the conformance check detects deliberately injected out-of-band drift and passes on a clean database.
 
@@ -488,7 +499,8 @@ Integration tests run on `ubuntu-latest` with Docker available; `postgres:19beta
 Carried forward, to be resolved before or during the milestone that needs them:
 
 1. **Module layout** — proposed as a single module with the §4.1 packages; separate modules for `exec` (to keep `pgx` out of WASM consumers’ dependency graph) is an alternative.
-1. **Rename hint ergonomics** — `@renamedFrom` is proposed; an alternative is an explicit rename manifest consumed by `migrate diff`.
+1. **Rename hint ergonomics** — **resolved in M7: `@renamedFrom`.** The hint lives in the SDL rather than in a manifest, so the rename travels with the declaration it describes and cannot be lost from a separate file; it names the previous *GraphQL* name and the differ resolves candidate physical names against the folded prior state (§5). A manifest remains the better answer only if renames ever need to be expressed for objects the SDL does not declare, which has not come up.
+1. **Natural keys as the physical identity** — opened by M7. `@key(fields:)` is currently a uniqueness constraint alongside the surrogate `id`. Making it the identity instead means the compiler's three `id` projection sites, `shape`'s parent dedup, and every edge table's references all become multi-column, and would be a milestone of its own.
 1. **Table naming convention** — pluralisation rules for deriving table names from type names, and whether `@node(table:)` is required or optional.
 1. **Goose embedding** — whether `gopgql` embeds `goose` as a library for a `migrate up` convenience command, or only emits files.
 1. **Default `MaxDepth`** — **resolved in M4: 3.** A 3-hop pattern rewrites to a 7-way join, which the M4 suite executes against `postgres:19beta2` well inside the scenario budget. The ceiling is per-`Compiler` configuration (`compiler.WithMaxDepth`), so a deployment can lower it without a code change; 4 hops remains rejected by default.
