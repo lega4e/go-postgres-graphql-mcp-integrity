@@ -202,6 +202,62 @@ The server never migrates and never writes. The compiler emits nothing but a
 pool opens with `default_transaction_read_only=on` — so a write is refused by
 the database itself. A read-only database role is recommended, not required.
 
+## Check the database still matches
+
+`gopgql conform` reads the property graph back out of a live database and
+reports how it differs from the SDL:
+
+```sh
+gopgql conform --sdl schema.graphql --dsn "$GOPGQL_DSN"
+```
+
+Nothing else in gopgql can notice that the database stopped agreeing with the
+SDL. Prior state is reconstructed by folding gopgql's own migrations in memory
+([`SPEC.md` §3.1](./SPEC.md)), which is sound only while nobody alters the
+database out of band — the generator, the differ and the compiler would go on
+agreeing with each other indefinitely while the database quietly diverged.
+`conform` is the check on that assumption.
+
+The answer is the **exit status**, so it gates a pipeline with no wrapper
+interpreting its output:
+
+| Status | Meaning |
+|--------|---------|
+| `0` | The graph matches the SDL. |
+| `1` | The check did not run: a schema that would not parse, a database it could not reach, a property graph it could not find. |
+| `2` | The check ran, and the database has drifted. |
+
+`1` and `2` are separate on purpose. "The database is unreachable" and "the
+database has drifted" call for completely different next moves, and a CI step
+should not have to parse English to tell them apart — the same reason the
+findings are structured rather than prose. Every failure that is *not* a
+verdict says `conformance check did not run` before anything else.
+
+Findings print one per line, each carrying the kind a reader acts on, with
+`SDL` and `DATABASE` naming which side said what and `-` meaning nothing there:
+
+```
+gopgql: property graph "app_graph" has drifted from schema.graphql — 3 findings
+
+KIND             ELEMENT  PROPERTY  SDL            DATABASE
+MissingElement   company  -         company        -
+LabelMismatch    person   -         actor, person  human
+MissingProperty  person   email     email          -
+```
+
+`--sdl` and `--dsn` fall back to `GOPGQL_SDL` and `GOPGQL_DSN` as they do for
+every other subcommand, and a flag wins over the environment. `--graph` names
+the property graph when it is not the generator's default.
+
+The check covers the **property graph**: which elements exist, the labels they
+carry, and the properties they expose — the whole of what
+`pg_propgraph_element`, `pg_propgraph_label` and `pg_propgraph_property`
+record. Column defaults, `CHECK` and `UNIQUE` constraints, indexes and column
+types live in other catalogs and are **not** compared. So an empty report means
+the graph mapping matches the SDL; it does not mean the tables underneath it
+do. Overstating that would be worse than the gap, because an operator would
+stop looking.
+
 ## Layout
 
 | Path             | Purpose                                                            |
@@ -214,9 +270,10 @@ the database itself. A read-only database role is recommended, not required.
 | `compiler/`      | GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.      |
 | `shape/`         | Flat rows → nested GraphQL response.                              |
 | `exec/`          | Compiled query → `pgx` execution → shaped response; read-only pool.|
+| `conform/`       | Reflect the live property graph; report drift as typed findings.  |
 | `mcp/`           | MCP server: GraphQL introspection over the SDL + a query tool.     |
 | `cmd/gopgql-mcp/`| The MCP server binary (stdio or HTTP).                             |
-| `cmd/gopgql/`    | Schema CLI: generate migrations from SDL and apply them.          |
+| `cmd/gopgql/`    | Schema CLI: generate migrations, apply them, check conformance.    |
 | `examples/`      | Three runnable graphs (docs, code, chat) as docker compose stacks.|
 | `playground/`    | Pure driver wiring the pipeline for the WASM playground.          |
 | `cmd/wasm/`      | WebAssembly entry point exposing `playground` to the docs site.  |
@@ -241,7 +298,7 @@ skip path — SPEC.md §10):
 
 ```sh
 go build ./... && go vet ./...
-go test ./compiler/... ./shape/... ./sdl/... ./generator/... ./migrate/... ./playground/... ./internal/...
+go test ./compiler/... ./shape/... ./sdl/... ./generator/... ./migrate/... ./playground/... ./internal/... ./conform/... ./cmd/gopgql/...
 ```
 
 ## Playground locally
