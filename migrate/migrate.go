@@ -48,7 +48,19 @@ func dropGraphStmt(name string) string {
 // directories, that step has to be taken explicitly.
 func DropGraphSQL(name string) string { return dropGraphStmt(name) }
 
-// InitFilename is the goose filename for the initial migration.
+// CreateGraphSQL is DropGraphSQL's counterpart: the statement an applier runs
+// to put a property graph back.
+//
+// It is needed because the halves need not be the same length. When the tables
+// half has a generation the graph half does not — a new index, a column no
+// label exposes — the graph is taken down so the tables can move and no graph
+// migration follows to recreate it. The applier then recreates the graph the
+// graph half still describes, folded from its own migrations (gopgql#38).
+func CreateGraphSQL(m *schema.Schema) string { return generator.GraphDDL(m) }
+
+// InitFilename is the goose filename for the initial migration of a fresh
+// directory — generation 1. A half turned on later starts at the generation it
+// was turned on in and gets NNNN_init.sql instead (NextVersion).
 const InitFilename = "0001_init.sql"
 
 // The two migration subdirectories. A directory's path is the only thing that
@@ -80,10 +92,10 @@ func VersionTable(subdir string) string {
 func WriteInitSplit(root string, m *schema.Schema) ([]string, error) {
 	tablesDir := filepath.Join(root, TablesDir)
 	graphDir := filepath.Join(root, GraphDir)
-	if _, err := writeInit(tablesDir, InitTables(m)); err != nil {
+	if _, err := writeInit(tablesDir, 1, InitTables(m)); err != nil {
 		return nil, err
 	}
-	if _, err := writeInit(graphDir, InitGraph(m)); err != nil {
+	if _, err := writeInit(graphDir, 1, InitGraph(m)); err != nil {
 		return nil, err
 	}
 	return []string{tablesDir, graphDir}, nil
@@ -128,12 +140,17 @@ func section(up, down string) string {
 	return b.String()
 }
 
-// writeInit writes content to dir/0001_init.sql, creating dir if necessary.
-func writeInit(dir, content string) (string, error) {
+// writeInit writes content to dir/NNNN_init.sql, creating dir if necessary.
+//
+// Version 1 gives InitFilename, which is what a fresh migration directory
+// gets. A half turned on later — --no-graph for the first few generations, then
+// not — starts at the generation it was turned on in instead, so its number
+// still says which state of the tables it was generated against.
+func writeInit(dir string, version int, content string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("migrate: create dir: %w", err)
 	}
-	path := filepath.Join(dir, InitFilename)
+	path := filepath.Join(dir, fmt.Sprintf("%04d_init.sql", version))
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("migrate: write %s: %w", path, err)
 	}
@@ -145,11 +162,17 @@ func writeInit(dir, content string) (string, error) {
 // with nothing to migrate contributes an empty string, so the caller can tell
 // "no change" from "wrote a file" per half.
 func GenerateSplit(root string, desired *schema.Schema, name string) ([]string, error) {
-	tablesPath, err := GenerateTables(filepath.Join(root, TablesDir), desired, name)
+	// One version for the generation, read before either half is written, so
+	// the two halves agree on which edit of the SDL they are.
+	version, err := NextVersion(root)
 	if err != nil {
 		return nil, err
 	}
-	graphPath, err := GenerateGraph(filepath.Join(root, GraphDir), desired, name)
+	tablesPath, err := GenerateTables(filepath.Join(root, TablesDir), desired, name, version)
+	if err != nil {
+		return nil, err
+	}
+	graphPath, err := GenerateGraph(filepath.Join(root, GraphDir), desired, name, version)
 	if err != nil {
 		return nil, err
 	}
@@ -160,17 +183,17 @@ func GenerateSplit(root string, desired *schema.Schema, name string) ([]string, 
 // returns its path.
 //
 // It folds the migrations already in dir into the prior schema (Fold), diffs
-// that against desired, and emits the delta as NNNN_<name>.sql — where NNNN is
-// one past the highest version present. When dir holds no migrations yet the
-// prior schema is empty, so Generate emits the full initial migration as
-// 0001_init.sql, identical to WriteInit.
+// that against desired, and emits the delta as NNNN_<name>.sql, where NNNN is
+// version — the generation counter both halves share (NextVersion). When dir
+// holds no migrations yet the prior schema is empty, so it emits the full
+// initial migration as NNNN_init.sql, identical to WriteInit.
 //
 // name is the goose descriptive suffix (e.g. "add_age"); it is sanitised to a
 // safe snake_case token. When the folded and desired schemas are already
 // identical Generate makes no change and returns ("", nil): there is nothing to
-// migrate.
-func GenerateTables(dir string, desired *schema.Schema, name string) (string, error) {
-	return generate(dir, desired, name, InitTables, DeltaTables)
+// migrate, and this half simply has no file at this generation.
+func GenerateTables(dir string, desired *schema.Schema, name string, version int) (string, error) {
+	return generate(dir, desired, name, version, InitTables, DeltaTables)
 }
 
 // GenerateGraph writes the next migration for the graph half into dir.
@@ -179,8 +202,8 @@ func GenerateTables(dir string, desired *schema.Schema, name string) (string, er
 // state has none. That is the guarantee a graph-only setup rests on: the SDL
 // describes the slice of a database that is surfaced as a graph, and what it
 // does not mention may still exist and must be left alone (gopgql#38).
-func GenerateGraph(dir string, desired *schema.Schema, name string) (string, error) {
-	return generate(dir, desired, name, InitGraph, DeltaGraph)
+func GenerateGraph(dir string, desired *schema.Schema, name string, version int) (string, error) {
+	return generate(dir, desired, name, version, InitGraph, DeltaGraph)
 }
 
 // generate is the shared body of GenerateTables and GenerateGraph. The caller's
@@ -191,6 +214,7 @@ func generate(
 	dir string,
 	desired *schema.Schema,
 	name string,
+	version int,
 	initFn func(*schema.Schema) string,
 	deltaFn func(from, to *schema.Schema) (string, string, bool),
 ) (string, error) {
@@ -198,10 +222,15 @@ func generate(
 	if err != nil {
 		return "", err
 	}
+	// A caller working from a stale count cannot be allowed to overwrite this
+	// half's own history; the shared counter can only ever run ahead of it.
+	if n := len(files); n > 0 && version <= files[n-1].version {
+		version = files[n-1].version + 1
+	}
 
 	if len(files) == 0 {
-		// No history yet: this is the initial migration.
-		return writeInit(dir, initFn(desired))
+		// No history yet: this is the initial migration for this half.
+		return writeInit(dir, version, initFn(desired))
 	}
 
 	contents := make([]string, len(files))
@@ -222,7 +251,6 @@ func generate(
 		return "", nil
 	}
 
-	version := files[len(files)-1].version + 1
 	filename := fmt.Sprintf("%04d_%s.sql", version, sanitizeName(name))
 	path := filepath.Join(dir, filename)
 	content := "-- +goose Up\n" + up + "\n-- +goose Down\n" + down

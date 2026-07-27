@@ -80,7 +80,7 @@ func TestWriteInit(t *testing.T) {
 		t.Fatalf("generator.Build: %v", err)
 	}
 	dir := t.TempDir()
-	path, err := migrate.GenerateTables(dir, m, "init")
+	path, err := migrate.GenerateTables(dir, m, "init", 1)
 	if err != nil {
 		t.Fatalf("GenerateTables: %v", err)
 	}

@@ -148,7 +148,9 @@ func TestGraphOverForeignTables(t *testing.T) {
 	// gopgql supplies the graph half only.
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
-	_, err := migrate.GenerateGraph(graphDir, mustModel(t), "init")
+	version, err := migrate.NextVersion(root)
+	require.NoError(t, err, "NextVersion")
+	_, err = migrate.GenerateGraph(graphDir, mustModel(t), "init", version)
 	require.NoError(t, err, "GenerateGraph")
 	written, err := os.ReadFile(filepath.Join(graphDir, migrate.InitFilename))
 	require.NoError(t, err, "read migration")
@@ -198,7 +200,9 @@ func TestPartialProjectionLeavesTheRestAlone(t *testing.T) {
 	root := t.TempDir()
 	graphDir := filepath.Join(root, migrate.GraphDir)
 	model := mustModel(t)
-	_, err := migrate.GenerateGraph(graphDir, model, "init")
+	version, err := migrate.NextVersion(root)
+	require.NoError(t, err, "NextVersion")
+	_, err = migrate.GenerateGraph(graphDir, model, "init", version)
 	require.NoError(t, err, "GenerateGraph")
 	require.NoError(t, applyDir(t, dsn, graphDir), "apply graph half")
 
@@ -214,7 +218,9 @@ func TestPartialProjectionLeavesTheRestAlone(t *testing.T) {
 	// A second run, with the database still holding what the SDL never
 	// mentioned, must still emit nothing: absence from the SDL is not a
 	// pending change.
-	path, err := migrate.GenerateGraph(graphDir, model, "again")
+	next, err := migrate.NextVersion(root)
+	require.NoError(t, err, "NextVersion")
+	path, err := migrate.GenerateGraph(graphDir, model, "again", next)
 	require.NoError(t, err, "second GenerateGraph")
 	assert.Empty(t, path,
 		"absence from the SDL is not a pending change: an unchanged schema must emit nothing")
@@ -269,7 +275,9 @@ func TestDropGraphKeepsTheData(t *testing.T) {
 
 	// The graph half, pointed at a schema that declares no graph.
 	graphless := &schema.Schema{VertexTables: model.VertexTables, EdgeTables: model.EdgeTables}
-	path, err := migrate.GenerateGraph(dirs[1], graphless, "drop graph")
+	next, err := migrate.NextVersion(root)
+	require.NoError(t, err, "NextVersion")
+	path, err := migrate.GenerateGraph(dirs[1], graphless, "drop graph", next)
 	require.NoError(t, err, "GenerateGraph (drop)")
 	require.NotEmpty(t, path, "dropping the graph should emit a migration")
 	data, err := os.ReadFile(path)

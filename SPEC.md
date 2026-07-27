@@ -71,7 +71,7 @@ No tool exists that generates SQL/PGQ property-graph DDL from GraphQL SDL, and n
 ### 3.0 Split migrations
 
 Generation emits two migration directories — `<dir>/tables/` and `<dir>/graph/` —
-applied in that order, either turnable off with `--no-tables` / `--no-graph`.
+applied in lockstep, either turnable off with `--no-tables` / `--no-graph`.
 A directory's path is the only record of what it owns.
 
 This makes two things representable that were not:
@@ -83,14 +83,34 @@ This makes two things representable that were not:
   tables half on, gopgql manages those tables and a column absent from the SDL
   is removed.
 
+The halves are applied **pairwise by generation** — `tables/0001`,
+`graph/0001`, `tables/0002`, `graph/0002`, … — never all of one and then all of
+the other. Each graph migration names the columns of its own generation, so a
+graph directory replayed after the tables have moved on runs a historical
+`CREATE PROPERTY GRAPH` against a current schema and is refused.
+
 Two ordering constraints follow from PostgreSQL, not from gopgql: tables must
 exist before the graph that references them, and a live graph must come down
-before the columns it exposes can change. `gopgql migrate` sequences both.
+before the columns it exposes can change. Both hold *per generation*, so a
+generation with table work applies as *graph/<n-1> down → tables/<n> up →
+graph/<n> up* while a generation with no table work never touches the graph —
+which is what keeps re-running `gopgql migrate` a no-op. The halves need not be
+the same length; when the tables half has a generation the graph half does not,
+`gopgql migrate` rebuilds the graph the graph half describes once the tables
+have landed.
 
 Each half records itself in its own goose version table
 (`goose_db_version_tables`, `goose_db_version_graph`) — both start at `0001`, so
 a shared table would make goose treat the second half's initial migration as
 already applied and silently skip it.
+
+They do share a **version counter**: the next migration takes one past the
+highest version in *either* directory, so `tables/0002` and `graph/0002` are
+always the same edit of the SDL. A half with nothing to emit for a generation
+leaves a gap rather than renumbering the next one down. Numbering each half by
+its own file count would let the two drift, and since the applier walks them by
+version it would then pair a graph migration with the wrong generation of
+tables — one that has not created the column it exposes.
 
 ### 3.1 Rationale notes
 

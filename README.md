@@ -151,17 +151,40 @@ The asymmetry is worth stating plainly, because it is the one way to get this
 wrong: with the tables half **on**, gopgql *is* managing those tables, and a
 column absent from the SDL is a column it will remove.
 
-#### Order matters, twice
+#### Order matters, generation by generation
 
-`gopgql migrate` sequences both halves for you. Applying them yourself, the
-rules are:
+`gopgql migrate` sequences both halves for you, and the sequence is **pairwise**:
 
-1. **Tables before the graph.** The graph references the tables; applying it
-   first is refused by the database.
+```
+tables/0001 → graph/0001 → tables/0002 → graph/0002 → …
+```
+
+Applying every table migration and then every graph migration looks equivalent
+and is not. A graph migration names the columns of *its own* generation, so
+replaying `graph/0001` once the tables have already reached `0002` runs a
+historical graph definition against a current schema — it exposes a column
+`0002` dropped or renamed, and PostgreSQL refuses it.
+
+Applying the halves yourself, the two rules are:
+
+1. **Tables before the graph, within a generation.** The graph references the
+   tables; applying it first is refused by the database.
 2. **Take the graph down before changing tables it exposes.** PostgreSQL will
-   not drop or retype a column a live property graph exposes. The order is
-   *graph down → tables up → graph up*, which is exactly what the single
-   combined migration used to do in one file.
+   not drop or retype a column a live property graph exposes. So a generation
+   with table work reads *graph/<n-1> down → tables/<n> up → graph/<n> up*, and
+   a generation with no table work leaves the graph alone — which is what keeps
+   re-running `gopgql migrate` a genuine no-op.
+
+The halves need not be the same length: a change no `CREATE PROPERTY GRAPH`
+statement mentions — a new index, say — gives the tables half a generation the
+graph half skips. The graph still has to come down for those tables to move, so
+`gopgql migrate` rebuilds the graph the graph half still describes once they
+have landed.
+
+Which is why the two halves share a version counter rather than each numbering
+its own files: `tables/0002` and `graph/0002` are the same edit of the SDL, and
+a half with nothing to say about a generation leaves a gap instead of
+renumbering the next one down into somebody else's generation.
 
 This builds on **M1** (from `@node`, `@relationship`, `@hasInverse`, `@ignore`;
 surrogate `uuid` keys; the default scalar mapping): **`sdl`** parses/validates

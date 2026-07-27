@@ -134,7 +134,7 @@ func TestGenerateWritesDelta(t *testing.T) {
 	dir := t.TempDir()
 
 	// 0001 from the base SDL. A directory holds one half; this is a tables one.
-	p1, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "init")
+	p1, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "init", 1)
 	if err != nil {
 		t.Fatalf("GenerateTables: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestGenerateWritesDelta(t *testing.T) {
 	}
 
 	// 0002 delta from the widened SDL.
-	p2, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "add age")
+	p2, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "add age", 2)
 	if err != nil {
 		t.Fatalf("GenerateTables: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestGenerateWritesDelta(t *testing.T) {
 	}
 
 	// A second Generate with no changes writes nothing.
-	p3, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "noop")
+	p3, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "noop", 3)
 	if err != nil {
 		t.Fatalf("GenerateTables (noop): %v", err)
 	}
@@ -182,7 +182,7 @@ func TestGenerateWritesDelta(t *testing.T) {
 // migration when there is no history.
 func TestGenerateOnEmptyDirWritesInit(t *testing.T) {
 	dir := t.TempDir()
-	p, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "ignored")
+	p, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "ignored", 1)
 	if err != nil {
 		t.Fatalf("GenerateTables: %v", err)
 	}
