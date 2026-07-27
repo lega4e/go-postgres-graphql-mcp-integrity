@@ -145,7 +145,13 @@ type CreatePropertyGraphStmt struct {
 // PROPERTIES ( <properties> )", optionally followed by further LABEL clauses.
 // Label and Properties are the first clause; ExtraLabels holds the rest.
 type VertexTableDef struct {
-	Table      string
+	Table string
+	// Key is the "KEY ( <columns> )" clause a vertex table carries when its type
+	// declares a natural key (design D1), or nil. The same columns also appear as
+	// a named UNIQUE constraint on the table, which is what the fold reconstructs
+	// the key from; this is read so the statement parses, and so the reader is a
+	// complete counterpart to what the emitter writes.
+	Key        []string
 	Label      string
 	Properties []string
 	// ExtraLabels are any further "LABEL <label> PROPERTIES (...)" clauses on

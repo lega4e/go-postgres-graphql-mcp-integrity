@@ -569,6 +569,11 @@ func (p *parser) vertexTableDef() (VertexTableDef, error) {
 	if v.Table, err = p.ident("vertex table"); err != nil {
 		return v, err
 	}
+	if p.acceptKeyword("KEY") {
+		if v.Key, err = p.parenIdentList(); err != nil {
+			return v, err
+		}
+	}
 	first, err := p.labelClause("vertex label")
 	if err != nil {
 		return v, err

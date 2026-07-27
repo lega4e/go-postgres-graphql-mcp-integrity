@@ -138,6 +138,53 @@ func (f *Field) ColumnName() string {
 	return f.Name
 }
 
+// PriorColumnNames derives the physical column names this field may have had
+// before the rename its @renamedFrom declares, most likely first. It is nil when
+// the field declares no rename.
+//
+// @renamedFrom(name:) states the previous *GraphQL field name* (see
+// Document.validateRenameHints), and the differ needs a *column* name, so the
+// two have to be bridged somewhere; sdl is where, because sdl owns the rule that
+// a field with no @column(name:) maps to a column of its own name. That rule run
+// backwards gives exactly one candidate: the hint itself.
+//
+// A field that kept its column while its GraphQL name changed therefore yields a
+// candidate that is still present in the desired schema, and the differ declines
+// to rename anything — correctly, because nothing physical moved.
+func (f *Field) PriorColumnNames() []string {
+	if f.RenamedFrom == "" || !f.IsScalarColumn() {
+		return nil
+	}
+	return []string{f.RenamedFrom}
+}
+
+// PriorTableNames derives the physical table names this type may have had before
+// the rename its @renamedFrom declares, most likely first. It is nil when the
+// type declares no rename.
+//
+// The GraphQL → physical bridge is looser here than for a field, because a
+// type's table is pluralize(@node(label:)) and the label is independent of the
+// type name. Two candidates cover what an author can reasonably have meant:
+//
+//   - the table a type of that name conventionally produced — the pluralized,
+//     lowercased prior type name;
+//   - the hint read literally, for a schema whose @node(table:) was explicit and
+//     whose author wrote the physical name.
+//
+// Offering both is safe precisely because a rename is resolved against the prior
+// state (design D2): a candidate that names nothing that is actually there emits
+// nothing, so a wrong guess costs a no-op rather than a wrong rename.
+func (n *Node) PriorTableNames() []string {
+	if n.RenamedFrom == "" {
+		return nil
+	}
+	out := []string{pluralize(strings.ToLower(n.RenamedFrom))}
+	if n.RenamedFrom != out[0] {
+		out = append(out, n.RenamedFrom)
+	}
+	return out
+}
+
 // Node is a GraphQL object type carrying @node.
 type Node struct {
 	// TypeName is the GraphQL type name (e.g. "Person").

@@ -118,13 +118,29 @@ type folder struct {
 	// they were created so the folded schema is deterministic.
 	indexes  map[string]schema.Index
 	idxOrder []string
+	// cons maps a table name to its named constraints by constraint name: the
+	// natural key's UNIQUE and every CHECK. A single-column UNIQUE is not here —
+	// it folds onto its column's Unique flag, which is where the model keeps it.
+	cons map[string]map[string]foldedConstraint
 	// graph is the most recent CREATE PROPERTY GRAPH, which classifies tables as
 	// vertices or edges and carries labels, properties and edge key metadata.
 	graph *ddl.CreatePropertyGraphStmt
 }
 
+// foldedConstraint is a named constraint as the reader saw it. A DROP carries
+// only a name, so the body is whatever the matching ADD (or CREATE TABLE) said.
+type foldedConstraint struct {
+	kind    string   // "UNIQUE" or "CHECK"
+	columns []string // UNIQUE
+	expr    string   // CHECK
+}
+
 func newFolder() *folder {
-	return &folder{cols: map[string][]schema.Column{}, indexes: map[string]schema.Index{}}
+	return &folder{
+		cols:    map[string][]schema.Column{},
+		indexes: map[string]schema.Index{},
+		cons:    map[string]map[string]foldedConstraint{},
+	}
 }
 
 // apply interprets a single parsed statement.
@@ -177,6 +193,21 @@ func (f *folder) applyCreateTable(s *ddl.CreateTableStmt) error {
 		cols = append(cols, column(c))
 	}
 	f.cols[s.Name] = cols
+	delete(f.cons, s.Name)
+	// A vertex table arrives with its natural key and its checks written inline,
+	// so the same constraints have to be read out of CREATE TABLE as out of a
+	// later ALTER — otherwise a schema that declared them at birth would fold
+	// back without them and the differ would propose them a second time.
+	// PRIMARY KEY (…) on an edge table is anonymous and structural, and is
+	// already carried by the columns, so it is skipped.
+	for _, c := range s.Constraints {
+		if c.Name == "" {
+			continue
+		}
+		if err := f.applyConstraint(s.Name, c.Name, c.Kind, c.Columns, c.Expr, true); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -189,11 +220,11 @@ func (f *folder) applyAlterTable(s *ddl.AlterTableStmt) error {
 		f.cols[s.Name] = removeColumn(f.cols[s.Name], a.Name)
 		return nil
 	case *ddl.AddConstraint:
-		return f.applyConstraint(s.Name, a.Name, a.Kind, a.Columns, true)
+		return f.applyConstraint(s.Name, a.Name, a.Kind, a.Columns, a.Expr, true)
 	case *ddl.DropConstraint:
-		// A DROP carries only the name; the kind and columns are recovered from
-		// the naming convention the emitter and PostgreSQL share.
-		return f.applyConstraint(s.Name, a.Name, "", nil, false)
+		// A DROP carries only the name; the kind, columns and body are recovered
+		// from the naming convention the emitter and PostgreSQL share.
+		return f.applyConstraint(s.Name, a.Name, "", nil, "", false)
 	case *ddl.RenameTable:
 		return f.renameTable(s.Name, a.NewName)
 	case *ddl.RenameColumn:
@@ -220,63 +251,57 @@ func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
 // applyConstraint folds an ADD or DROP CONSTRAINT back onto the model. present
 // says whether the constraint exists after the statement.
 //
-// Exactly one constraint kind has somewhere to live in the model today: the
-// single-column UNIQUE that @unique maps to, which folds onto schema.Column's
-// Unique (SPEC.md §7 → M6). The M7 forms — a CHECK body, and the multi-column
-// UNIQUE of a natural key — are read and then dropped on the floor, because
-// schema.Column and schema.VertexTable have no field to hold them yet (design
-// D6 gives them one in the generator's half of the milestone).
+// Every constraint gopgql emits now has somewhere to live. The single-column
+// UNIQUE that @unique maps to folds onto schema.Column's Unique (SPEC.md §7 →
+// M6); the M7 forms — a CHECK body and the multi-column UNIQUE of a natural key
+// — are held here by name and assembled in build() into schema.Column.Check,
+// schema.VertexTable.Checks and schema.VertexTable.NaturalKey (design D6).
 //
-// They are deliberately *not* an error. Refusing a statement gopgql itself
-// emitted would make the entire prior state unreadable — every table, every
-// column, every graph — to preserve a constraint the model cannot represent.
-// The failure mode of ignoring it is bounded and visible instead: the differ
-// proposes a constraint the database already has, and PostgreSQL refuses the
-// duplicate name. That stops the milestone; it does not lose data.
-func (f *folder) applyConstraint(table, name, kind string, cols []string, present bool) error {
+// Which of those a statement is, is decided by its *name*, via
+// schema.ClassifyConstraint: a DROP carries nothing else, so the naming rule the
+// emitter follows is the only channel through which a drop can say what it
+// dropped. An ADD states its kind and body outright, and those are what get
+// stored; the name still decides where.
+//
+// A name that fits none of the rules is deliberately *not* an error. Refusing a
+// statement gopgql itself emitted would make the entire prior state unreadable —
+// every table, every column, every graph — to preserve one constraint. The
+// failure mode of ignoring it is bounded: the differ proposes a constraint the
+// database already has, PostgreSQL refuses the duplicate name, and a migration
+// stops without losing data.
+func (f *folder) applyConstraint(table, name, kind string, cols []string, expr string, present bool) error {
 	tcols := f.cols[table]
 	if tcols == nil {
 		return fmt.Errorf("ALTER TABLE %s: constraint %s on an unknown table", table, name)
 	}
-	target, ok := uniqueColumn(table, name, kind, cols)
-	if !ok {
-		return nil
-	}
-	for i := range tcols {
-		if tcols[i].Name == target {
-			tcols[i].Unique = present
-			f.cols[table] = tcols
+	role, column, _ := schema.ClassifyConstraint(table, name)
+	switch role {
+	case schema.RoleColumnUnique:
+		for i := range tcols {
+			if tcols[i].Name == column {
+				tcols[i].Unique = present
+				f.cols[table] = tcols
+				return nil
+			}
+		}
+		return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, name, column)
+	case schema.RoleNaturalKey, schema.RoleColumnCheck, schema.RoleTableCheck:
+		if !present {
+			if m := f.cons[table]; m != nil {
+				delete(m, name)
+			}
 			return nil
 		}
+		if f.cons[table] == nil {
+			f.cons[table] = map[string]foldedConstraint{}
+		}
+		f.cons[table][name] = foldedConstraint{
+			kind: strings.ToUpper(kind), columns: append([]string(nil), cols...), expr: expr,
+		}
+		return nil
+	default:
+		return nil
 	}
-	return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, name, target)
-}
-
-// uniqueColumn reports the single column a UNIQUE constraint covers, and whether
-// the constraint is that kind at all. An ADD states its columns outright; a DROP
-// states only a name, so the column is recovered from the convention gopgql and
-// PostgreSQL share (schema.UniqueConstraintName) — which is exactly why gopgql
-// spells its constraint names out rather than letting the database invent them.
-func uniqueColumn(table, name, kind string, cols []string) (string, bool) {
-	if strings.EqualFold(kind, "CHECK") {
-		return "", false
-	}
-	if len(cols) == 1 {
-		return cols[0], true
-	}
-	if len(cols) > 1 {
-		// A natural key's UNIQUE spans several columns and belongs to the table,
-		// not to any one column.
-		return "", false
-	}
-	// "<table>_key" is the natural key's own name, not a column's.
-	if name == table+"_key" {
-		return "", false
-	}
-	if !strings.HasPrefix(name, table+"_") || !strings.HasSuffix(name, "_key") {
-		return "", false
-	}
-	return strings.TrimSuffix(strings.TrimPrefix(name, table+"_"), "_key"), true
 }
 
 // renameTable moves a table, and everything the database keeps pointing at it,
@@ -296,6 +321,14 @@ func (f *folder) renameTable(from, to string) error {
 	}
 	delete(f.cols, from)
 	f.cols[to] = cols
+	// Constraints follow the table but keep their names: PostgreSQL renames no
+	// constraint when a table is renamed. The folded model must show the same,
+	// so the delta that renamed the table can be seen to have dropped the
+	// stale-named constraints and added their new-named replacements.
+	if c := f.cons[from]; c != nil {
+		delete(f.cons, from)
+		f.cons[to] = c
+	}
 	for _, tcols := range f.cols {
 		for i := range tcols {
 			if r := tcols[i].References; r != nil && r.Table == from {
@@ -350,6 +383,21 @@ func (f *folder) renameColumn(table, from, to string) error {
 		idx.Columns = renamed
 		f.indexes[n] = idx
 	}
+	// A UNIQUE constraint's column list follows the rename too, for the same
+	// reason: the constraint is defined on the column, not on its name.
+	for name, c := range f.cons[table] {
+		if len(c.columns) == 0 {
+			continue
+		}
+		moved := append([]string(nil), c.columns...)
+		for i, col := range moved {
+			if col == from {
+				moved[i] = to
+			}
+		}
+		c.columns = moved
+		f.cons[table][name] = c
+	}
 	return nil
 }
 
@@ -374,6 +422,7 @@ func (f *folder) setDefault(table, column, expr string) error {
 
 func (f *folder) applyDropTable(s *ddl.DropTableStmt) error {
 	delete(f.cols, s.Name)
+	delete(f.cons, s.Name)
 	// Indexes on a dropped table go with it.
 	for _, idx := range f.indexList() {
 		if idx.Table == s.Name {
@@ -427,13 +476,17 @@ func (f *folder) build() (*schema.Schema, error) {
 		for _, l := range v.ExtraLabels {
 			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
 		}
-		m.VertexTables = append(m.VertexTables, schema.VertexTable{
+		vt := schema.VertexTable{
 			Name:        v.Table,
 			Label:       v.Label,
 			Columns:     cols,
 			Properties:  v.Properties,
 			ExtraLabels: extra,
-		})
+		}
+		if err := f.attachConstraints(&vt); err != nil {
+			return nil, err
+		}
+		m.VertexTables = append(m.VertexTables, vt)
 	}
 	for _, e := range f.graph.Edges {
 		cols, ok := f.cols[e.Table]
@@ -455,6 +508,64 @@ func (f *folder) build() (*schema.Schema, error) {
 	}
 	m.Indexes = f.indexList()
 	return m, nil
+}
+
+// attachConstraints moves the named constraints accumulated for a table onto the
+// vertex table the graph classified: a column check onto its column, a
+// table-level check into Checks (ordered by the ordinal in its name), and the
+// natural key into NaturalKey.
+//
+// This is the reconstruction half of design D6, and it is what makes the round
+// trip close: a schema that declares a check or a natural key generates DDL,
+// folds back into a model that still carries them, and therefore diffs to no
+// migration on the second run. Without it the differ would re-propose a
+// constraint the database already has and PostgreSQL would refuse the duplicate
+// name.
+func (f *folder) attachConstraints(vt *schema.VertexTable) error {
+	byName := f.cons[vt.Name]
+	if len(byName) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	type numbered struct {
+		n    int
+		expr string
+	}
+	var tableChecks []numbered
+	for _, name := range names {
+		c := byName[name]
+		role, column, ordinal := schema.ClassifyConstraint(vt.Name, name)
+		switch role {
+		case schema.RoleNaturalKey:
+			vt.NaturalKey = &schema.NaturalKey{
+				Name: name, Columns: append([]string(nil), c.columns...),
+			}
+		case schema.RoleColumnCheck:
+			found := false
+			for i := range vt.Columns {
+				if vt.Columns[i].Name == column {
+					vt.Columns[i].Check = c.expr
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("migrate: constraint %s on %q checks unknown column %q", name, vt.Name, column)
+			}
+		case schema.RoleTableCheck:
+			tableChecks = append(tableChecks, numbered{n: ordinal, expr: c.expr})
+		}
+	}
+	sort.Slice(tableChecks, func(i, j int) bool { return tableChecks[i].n < tableChecks[j].n })
+	for _, tc := range tableChecks {
+		vt.Checks = append(vt.Checks, tc.expr)
+	}
+	return nil
 }
 
 // upSection returns the -- +goose Up portion of a goose migration file: the
