@@ -163,8 +163,8 @@ func TestDefaultAddedChangedRemoved(t *testing.T) {
 		require.True(t, changed)
 		assert.Contains(t, up, `ALTER TABLE persons ALTER COLUMN age SET DEFAULT 0;`)
 		assert.Contains(t, down, `ALTER TABLE persons ALTER COLUMN age DROP DEFAULT;`)
-		assertNoColumnChurn(t, up, "age")
-		assertNoColumnChurn(t, down, "age")
+		assertNoColumnChurn(t, up)
+		assertNoColumnChurn(t, down)
 	})
 
 	t.Run("changed", func(t *testing.T) {
@@ -172,7 +172,7 @@ func TestDefaultAddedChangedRemoved(t *testing.T) {
 		require.True(t, changed)
 		assert.Contains(t, up, `ALTER TABLE persons ALTER COLUMN age SET DEFAULT 18;`)
 		assert.Contains(t, down, `ALTER TABLE persons ALTER COLUMN age SET DEFAULT 0;`)
-		assertNoColumnChurn(t, up, "age")
+		assertNoColumnChurn(t, up)
 	})
 
 	t.Run("removed", func(t *testing.T) {
@@ -180,19 +180,21 @@ func TestDefaultAddedChangedRemoved(t *testing.T) {
 		require.True(t, changed)
 		assert.Contains(t, up, `ALTER TABLE persons ALTER COLUMN age DROP DEFAULT;`)
 		assert.Contains(t, down, `ALTER TABLE persons ALTER COLUMN age SET DEFAULT 0;`)
-		assertNoColumnChurn(t, up, "age")
+		assertNoColumnChurn(t, up)
 	})
 }
 
 // assertNoColumnChurn is the load-bearing half of task 4.1: whatever the delta
-// does about a default, it must not drop and re-add the column, which would throw
-// away every row's value to change what happens to future rows.
-func assertNoColumnChurn(t *testing.T, body, column string) {
+// does about a default or a constraint, it must not touch the columns themselves,
+// which would throw away every row's value to change what happens to future rows.
+// The statement is deliberately absolute — no column is dropped or added at all,
+// not merely "not the one this test changed".
+func assertNoColumnChurn(t *testing.T, body string) {
 	t.Helper()
-	assert.NotContains(t, body, "DROP COLUMN "+column,
-		"a default change must never drop the column")
-	assert.NotContains(t, body, "ADD COLUMN "+column,
-		"a default change must never re-add the column")
+	assert.NotContains(t, body, "DROP COLUMN",
+		"a default or constraint change must never drop a column")
+	assert.NotContains(t, body, "ADD COLUMN",
+		"a default or constraint change must never re-add a column")
 }
 
 // --- Task 4.2: checks ---
@@ -212,7 +214,7 @@ func TestCheckAddedAndRemoved(t *testing.T) {
 		assert.Contains(t, up, `ALTER TABLE persons ADD CONSTRAINT persons_check_1 CHECK (age < 200);`)
 		assert.Contains(t, down, `ALTER TABLE persons DROP CONSTRAINT persons_age_check;`)
 		assert.Contains(t, down, `ALTER TABLE persons DROP CONSTRAINT persons_check_1;`)
-		assertNoColumnChurn(t, up, "age")
+		assertNoColumnChurn(t, up)
 	})
 
 	t.Run("removed", func(t *testing.T) {

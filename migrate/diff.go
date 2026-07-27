@@ -341,7 +341,9 @@ func staleAsConstraints(stale []staleConstraint) []constraintChange {
 	}
 	out := make([]constraintChange, len(stale))
 	for i, s := range stale {
-		out[i] = constraintChange{Table: s.Table, Name: s.Name, Kind: s.Kind, Columns: s.Columns, Expr: s.Expr}
+		// The two structs are field-for-field identical, so a conversion says
+		// "this is the same record, re-labelled" without listing every field.
+		out[i] = constraintChange(s)
 	}
 	return out
 }
