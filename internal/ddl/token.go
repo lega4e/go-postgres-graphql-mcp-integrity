@@ -13,8 +13,12 @@
 //
 // It is deliberately NOT a general PostgreSQL parser. It understands precisely
 // the statements gopgql writes — CREATE TABLE, ALTER TABLE ADD/DROP COLUMN,
-// CREATE/DROP INDEX, DROP TABLE, and CREATE/DROP PROPERTY GRAPH — and reports an
-// error on anything else. The emitter (generator + migrate) and this reader are
+// ALTER TABLE ADD/DROP CONSTRAINT, ALTER TABLE RENAME TO / RENAME COLUMN,
+// ALTER TABLE ALTER COLUMN SET/DROP DEFAULT, CREATE/DROP INDEX, DROP TABLE, and
+// CREATE/DROP PROPERTY GRAPH — and reports an error on anything else. Every one
+// of those is here because the writer emits it: a statement the writer can emit
+// and the reader cannot read is not a gap, it is a corrupted prior state (design
+// D3). The emitter (generator + migrate) and this reader are
 // two halves of one contract; keeping them as separate lex/parse/AST layers is
 // what lets each grow a new statement by adding a node and a production rather
 // than by threading another special case through string surgery.

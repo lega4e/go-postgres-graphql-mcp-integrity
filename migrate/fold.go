@@ -1,7 +1,8 @@
 // Fold reconstructs a schema.Schema from gopgql's own prior goose migrations.
 //
 // It is an interpreter over the canonical statement set gopgql emits — CREATE
-// TABLE, ALTER TABLE ADD/DROP COLUMN, CREATE/DROP INDEX, CREATE/DROP PROPERTY
+// TABLE, ALTER TABLE ADD/DROP COLUMN, ADD/DROP CONSTRAINT, RENAME TO / RENAME
+// COLUMN, ALTER COLUMN SET/DROP DEFAULT, CREATE/DROP INDEX, CREATE/DROP PROPERTY
 // GRAPH — not a general DDL parser (SPEC.md §7 → M2). The reading is done by the
 // internal/ddl lexer+parser, which turns each statement into a typed AST node;
 // this file is the interpreter that walks those nodes. Folding replays the
@@ -188,11 +189,19 @@ func (f *folder) applyAlterTable(s *ddl.AlterTableStmt) error {
 		f.cols[s.Name] = removeColumn(f.cols[s.Name], a.Name)
 		return nil
 	case *ddl.AddConstraint:
-		// gopgql only ever emits a single-column UNIQUE, which folds back onto
-		// the column it constrains (SPEC.md §7 → M6).
-		return f.setUnique(s.Name, a, true)
+		return f.applyConstraint(s.Name, a.Name, a.Kind, a.Columns, true)
 	case *ddl.DropConstraint:
-		return f.setUnique(s.Name, &ddl.AddConstraint{Name: a.Name, Kind: "UNIQUE"}, false)
+		// A DROP carries only the name; the kind and columns are recovered from
+		// the naming convention the emitter and PostgreSQL share.
+		return f.applyConstraint(s.Name, a.Name, "", nil, false)
+	case *ddl.RenameTable:
+		return f.renameTable(s.Name, a.NewName)
+	case *ddl.RenameColumn:
+		return f.renameColumn(s.Name, a.Name, a.NewName)
+	case *ddl.SetDefault:
+		return f.setDefault(s.Name, a.Column, a.Default)
+	case *ddl.DropDefault:
+		return f.setDefault(s.Name, a.Column, "")
 	default:
 		return fmt.Errorf("ALTER TABLE %s: unsupported action %T", s.Name, s.Action)
 	}
@@ -208,33 +217,159 @@ func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
 	return nil
 }
 
-// setUnique folds a UNIQUE constraint statement back onto its column. The
-// constraint carries the column list when it is added; a DROP carries only the
-// name, so the column is recovered from the naming convention gopgql and
-// PostgreSQL share (schema.UniqueConstraintName).
-func (f *folder) setUnique(table string, c *ddl.AddConstraint, unique bool) error {
-	cols := f.cols[table]
-	if cols == nil {
-		return fmt.Errorf("ALTER TABLE %s: constraint %s on an unknown table", table, c.Name)
+// applyConstraint folds an ADD or DROP CONSTRAINT back onto the model. present
+// says whether the constraint exists after the statement.
+//
+// Exactly one constraint kind has somewhere to live in the model today: the
+// single-column UNIQUE that @unique maps to, which folds onto schema.Column's
+// Unique (SPEC.md §7 → M6). The M7 forms — a CHECK body, and the multi-column
+// UNIQUE of a natural key — are read and then dropped on the floor, because
+// schema.Column and schema.VertexTable have no field to hold them yet (design
+// D6 gives them one in the generator's half of the milestone).
+//
+// They are deliberately *not* an error. Refusing a statement gopgql itself
+// emitted would make the entire prior state unreadable — every table, every
+// column, every graph — to preserve a constraint the model cannot represent.
+// The failure mode of ignoring it is bounded and visible instead: the differ
+// proposes a constraint the database already has, and PostgreSQL refuses the
+// duplicate name. That stops the milestone; it does not lose data.
+func (f *folder) applyConstraint(table, name, kind string, cols []string, present bool) error {
+	tcols := f.cols[table]
+	if tcols == nil {
+		return fmt.Errorf("ALTER TABLE %s: constraint %s on an unknown table", table, name)
 	}
-	target := ""
-	switch {
-	case len(c.Columns) == 1:
-		target = c.Columns[0]
-	case strings.HasPrefix(c.Name, table+"_") && strings.HasSuffix(c.Name, "_key"):
-		target = strings.TrimSuffix(strings.TrimPrefix(c.Name, table+"_"), "_key")
-	default:
-		return fmt.Errorf("ALTER TABLE %s: cannot tell which column constraint %q covers; "+
-			"gopgql names single-column UNIQUE constraints <table>_<column>_key", table, c.Name)
+	target, ok := uniqueColumn(table, name, kind, cols)
+	if !ok {
+		return nil
+	}
+	for i := range tcols {
+		if tcols[i].Name == target {
+			tcols[i].Unique = present
+			f.cols[table] = tcols
+			return nil
+		}
+	}
+	return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, name, target)
+}
+
+// uniqueColumn reports the single column a UNIQUE constraint covers, and whether
+// the constraint is that kind at all. An ADD states its columns outright; a DROP
+// states only a name, so the column is recovered from the convention gopgql and
+// PostgreSQL share (schema.UniqueConstraintName) — which is exactly why gopgql
+// spells its constraint names out rather than letting the database invent them.
+func uniqueColumn(table, name, kind string, cols []string) (string, bool) {
+	if strings.EqualFold(kind, "CHECK") {
+		return "", false
+	}
+	if len(cols) == 1 {
+		return cols[0], true
+	}
+	if len(cols) > 1 {
+		// A natural key's UNIQUE spans several columns and belongs to the table,
+		// not to any one column.
+		return "", false
+	}
+	// "<table>_key" is the natural key's own name, not a column's.
+	if name == table+"_key" {
+		return "", false
+	}
+	if !strings.HasPrefix(name, table+"_") || !strings.HasSuffix(name, "_key") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(name, table+"_"), "_key"), true
+}
+
+// renameTable moves a table, and everything the database keeps pointing at it,
+// to its new name.
+//
+// PostgreSQL renames by identity: foreign keys and indexes follow the table
+// without being restated. The folded model has to follow it too, or the next
+// delta reads a column whose REFERENCES names a table that no longer exists and
+// rebuilds it — which is the drop-and-recreate the rename existed to avoid. The
+// property graph needs no such fixup: every delta drops and recreates it
+// (SPEC.md §7 → M2), so the graph in the folded state always comes from the
+// same migration as the rename.
+func (f *folder) renameTable(from, to string) error {
+	cols, ok := f.cols[from]
+	if !ok {
+		return fmt.Errorf("ALTER TABLE %s: rename of a table that was never created", from)
+	}
+	delete(f.cols, from)
+	f.cols[to] = cols
+	for _, tcols := range f.cols {
+		for i := range tcols {
+			if r := tcols[i].References; r != nil && r.Table == from {
+				r.Table = to
+			}
+		}
+	}
+	for _, n := range f.idxOrder {
+		if idx := f.indexes[n]; idx.Table == from {
+			idx.Table = to
+			f.indexes[n] = idx
+		}
+	}
+	return nil
+}
+
+// renameColumn renames a column and the references and index entries that name
+// it, for the same reason renameTable does.
+func (f *folder) renameColumn(table, from, to string) error {
+	cols, ok := f.cols[table]
+	if !ok {
+		return fmt.Errorf("ALTER TABLE %s: rename of a column on a table that was never created", table)
+	}
+	found := false
+	for i := range cols {
+		if cols[i].Name == from {
+			cols[i].Name = to
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("ALTER TABLE %s: rename of unknown column %q", table, from)
+	}
+	for _, tcols := range f.cols {
+		for i := range tcols {
+			if r := tcols[i].References; r != nil && r.Table == table && r.Column == from {
+				r.Column = to
+			}
+		}
+	}
+	for _, n := range f.idxOrder {
+		idx := f.indexes[n]
+		if idx.Table != table {
+			continue
+		}
+		renamed := append([]string(nil), idx.Columns...)
+		for i, c := range renamed {
+			if c == from {
+				renamed[i] = to
+			}
+		}
+		idx.Columns = renamed
+		f.indexes[n] = idx
+	}
+	return nil
+}
+
+// setDefault records a column's default, or clears it when expr is empty. A
+// default is a property of the column, so changing one must never be folded (or
+// emitted) as a drop and an add: the column's data has nothing to do with it
+// (design D6).
+func (f *folder) setDefault(table, column, expr string) error {
+	cols, ok := f.cols[table]
+	if !ok {
+		return fmt.Errorf("ALTER TABLE %s: default on a table that was never created", table)
 	}
 	for i := range cols {
-		if cols[i].Name == target {
-			cols[i].Unique = unique
+		if cols[i].Name == column {
+			cols[i].Default = expr
 			f.cols[table] = cols
 			return nil
 		}
 	}
-	return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, c.Name, target)
+	return fmt.Errorf("ALTER TABLE %s: default on unknown column %q", table, column)
 }
 
 func (f *folder) applyDropTable(s *ddl.DropTableStmt) error {
