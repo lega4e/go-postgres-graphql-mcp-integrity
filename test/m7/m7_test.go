@@ -40,7 +40,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -191,13 +190,12 @@ type env struct {
 	dsn string
 	// pool is the handle every assertion reads through.
 	pool *pgxpool.Pool
-	// dir is the migration root; halves are its two subdirectories, in apply
-	// order (gopgql#38). The graph references the tables, so the tables half
-	// always goes first and comes back last.
-	dir    string
-	halves []string
-	doc    *sdl.Document
-	model  *schema.Schema
+	// dir is the migration directory — one directory, one goose history, with
+	// the graph teardown and rebuild numbered around the table DDL of their own
+	// generation (gopgql#38).
+	dir   string
+	doc   *sdl.Document
+	model *schema.Schema
 }
 
 // dbUnsafe matches everything CREATE DATABASE will not take unquoted.
@@ -253,36 +251,41 @@ func newEnv(t *testing.T) *env {
 // parameter. Only ever applied to names this file constructs.
 func pgQuote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
-// applyInit parses src, writes each half's 0001_init.sql and applies both. It is
-// the whole gopgql pipeline — SDL, model, DDL, goose — so a schema that
-// PostgreSQL refuses fails here rather than in an assertion further down.
+// applyInit parses src, writes the first generation and applies it. It is the
+// whole gopgql pipeline — SDL, model, DDL, goose — so a schema that PostgreSQL
+// refuses fails here rather than in an assertion further down.
 func (e *env) applyInit(src string) {
 	e.t.Helper()
 	e.build(src)
-	dirs, err := migrate.WriteInitSplit(e.dir, e.model)
+	paths, err := migrate.Generate(e.dir, e.model, "init", migrate.Halves{})
 	require.NoError(e.t, err)
-	e.halves = dirs
-	for _, d := range dirs {
-		require.FileExists(e.t, filepath.Join(d, migrate.InitFilename))
-	}
+	require.Len(e.t, paths, 2, "a first generation is the tables, then the graph")
 	e.gooseUp()
 }
 
 // applyDelta folds the migrations written so far, diffs them against src,
-// applies the delta and returns the *tables* half's migration file so a caller
-// can assert on what it says (7.4).
+// applies the generation and returns the *tables* migration of it so a caller can
+// assert on what it says (7.4).
 //
-// The tables half is the one under test throughout this suite: every statement
-// M7 is about — a rename, a constraint, a default — is table work, and the graph
-// half only ever drops and recreates the property graph (gopgql#38).
+// The tables migration is the one under test throughout this suite: every
+// statement M7 is about — a rename, a constraint, a default — is table work, and
+// the two graph migrations around it only take the property graph down and put it
+// back (gopgql#38).
 func (e *env) applyDelta(src string) string {
 	e.t.Helper()
 	e.build(src)
-	paths, err := migrate.GenerateSplit(e.dir, e.model, "delta")
+	paths, err := migrate.Generate(e.dir, e.model, "delta", migrate.Halves{})
 	require.NoError(e.t, err, "generate delta")
-	require.NotEmpty(e.t, paths[0], "expected a tables delta, but the schemas were identical")
+	require.NotEmpty(e.t, paths, "expected a delta, but the schemas were identical")
 
-	content, err := os.ReadFile(paths[0]) //nolint:gosec // path is one this test just wrote
+	tables := ""
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_"+migrate.SuffixTables+".sql") {
+			tables = p
+		}
+	}
+	require.NotEmpty(e.t, tables, "expected table work in %v", paths)
+	content, err := os.ReadFile(tables) //nolint:gosec // path is one this test just wrote
 	require.NoError(e.t, err)
 	e.gooseUp()
 	return string(content)
@@ -298,22 +301,18 @@ func (e *env) build(src string) {
 	e.doc, e.model = doc, m
 }
 
-// gooseUp applies every unapplied migration in this env's halves, through a
+// gooseUp applies every unapplied migration in this env's directory, through a
 // database handle of its own.
 //
-// Each half is recorded in a version table of its own: both directories start at
-// 0001, so with goose's single shared table the tables half records version 1 and
-// the graph half's 0001 is then considered already applied and silently skipped
-// (migrate.VersionTable).
+// A plain forward apply in version order, against goose's own default version
+// table. That is enough because a generation's files are numbered in the order
+// they have to run in (gopgql#38, design D3).
 func (e *env) gooseUp() {
 	e.t.Helper()
 	db, err := sql.Open("pgx", e.dsn)
 	require.NoError(e.t, err)
 	defer db.Close()
-	for _, d := range e.halves {
-		goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
-		require.NoError(e.t, goose.UpContext(e.ctx, db, d), "apply %s", d)
-	}
+	require.NoError(e.t, goose.UpContext(e.ctx, db, e.dir), "apply %s", e.dir)
 }
 
 // mustExec runs a statement that is expected to succeed.
@@ -614,11 +613,9 @@ func TestRenameMovesDataInsteadOfDroppingIt(t *testing.T) {
 		e.applyDelta(renameColumnSDL)
 
 		e.build(renameColumnSDL)
-		paths, err := migrate.GenerateSplit(e.dir, e.model, "delta")
+		paths, err := migrate.Generate(e.dir, e.model, "delta", migrate.Halves{})
 		require.NoError(t, err)
-		for _, p := range paths {
-			assert.Empty(t, p, "the same SDL, hint and all, still generates cleanly")
-		}
+		assert.Empty(t, paths, "the same SDL, hint and all, still generates cleanly")
 	})
 }
 
@@ -674,9 +671,9 @@ func TestFoldAcrossARenameMatchesADirectApply(t *testing.T) {
 // It reads the catalogs rather than information_schema for the constraint
 // definitions, because pg_get_constraintdef is the database's own rendering of
 // what a constraint means and so cannot agree with a wrong constraint that
-// happens to have the right name. goose's bookkeeping tables are excluded — one
-// per half since the split (migrate.VersionTable), hence the prefix match: they
-// record how a schema was reached, which is precisely the difference under test.
+// happens to have the right name. goose's bookkeeping table is excluded: it
+// records how a schema was reached, which is precisely the difference under
+// test.
 //
 // PostgreSQL's implicit NOT NULL constraints (contype 'n') are excluded, and
 // only their names would have differed. Since PostgreSQL 18 a NOT NULL is a

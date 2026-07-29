@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -113,10 +112,11 @@ type scenarioState struct {
 	doc   *sdl.Document
 	model *schema.Schema
 	dir   string
-	// halves are the migration directories in apply order: tables, then graph.
-	halves   []string
-	response map[string]any
-	lastSQL  string
+	// lastGeneration is how many migrations the most recent generation emitted,
+	// which is how many a rollback of it has to undo.
+	lastGeneration int
+	response       map[string]any
+	lastSQL        string
 	// lastErr holds an error a step expected the database to raise.
 	lastErr error
 	dirs    []string
@@ -196,18 +196,15 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 	}
 	st.dirs = append(st.dirs, dir)
 	st.dir = dir
-	// Both halves, in apply order: the graph references the tables, so the
-	// tables directory has to go first.
-	dirs, err := migrate.WriteInitSplit(dir, st.model)
+	// One directory, one history: the tables, then the property graph over them.
+	paths, err := migrate.Generate(dir, st.model, "init", migrate.Halves{})
 	if err != nil {
 		return err
 	}
-	st.halves = dirs
-	for _, d := range dirs {
-		if _, err := os.Stat(filepath.Join(d, migrate.InitFilename)); err != nil {
-			return fmt.Errorf("missing %s in %s: %w", migrate.InitFilename, d, err)
-		}
+	if len(paths) != 2 {
+		return fmt.Errorf("a first generation is two migrations, got %v", paths)
 	}
+	st.lastGeneration = len(paths)
 	return st.goose(ctx, "up")
 }
 
@@ -226,19 +223,14 @@ func (st *scenarioState) generateAndApplyDelta(ctx context.Context, src *godog.D
 	if err != nil {
 		return err
 	}
-	paths, err := migrate.GenerateSplit(st.dir, desired, "delta")
+	paths, err := migrate.Generate(st.dir, desired, "delta", migrate.Halves{})
 	if err != nil {
 		return fmt.Errorf("generate delta: %w", err)
 	}
-	wrote := false
-	for _, p := range paths {
-		if p != "" {
-			wrote = true
-		}
-	}
-	if !wrote {
+	if len(paths) == 0 {
 		return fmt.Errorf("expected a delta migration, but the schemas were identical")
 	}
+	st.lastGeneration = len(paths)
 	st.doc, st.model = doc, desired
 	return st.goose(ctx, "up")
 }
@@ -256,20 +248,15 @@ func (st *scenarioState) goose(ctx context.Context, cmd string) error {
 	defer db.Close()
 	switch cmd {
 	case "up":
-		// Tables then graph, each recorded in its own version table: both
-		// start at 0001, so a shared one makes goose skip the second half.
-		for _, d := range st.halves {
-			goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
-			if err := goose.UpContext(ctx, db, d); err != nil {
-				return err
-			}
-		}
-		return nil
+		// A plain forward apply: one directory, one history, one version table.
+		return goose.UpContext(ctx, db, st.dir)
 	case "down":
-		// The reverse: the graph has to go before the tables it references.
-		for i := len(st.halves) - 1; i >= 0; i-- {
-			goose.SetTableName(migrate.VersionTable(filepath.Base(st.halves[i])))
-			if err := goose.DownContext(ctx, db, st.halves[i]); err != nil {
+		// Rolling a generation back means undoing each of its migrations,
+		// newest first — the graph it built, then the tables, then the graph it
+		// had taken down. Each file's Down is the inverse of its own Up, so the
+		// sequence walked in reverse is the whole of the reversal.
+		for i := 0; i < st.lastGeneration; i++ {
+			if err := goose.DownContext(ctx, db, st.dir); err != nil {
 				return err
 			}
 		}

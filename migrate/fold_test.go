@@ -138,11 +138,12 @@ func TestFoldEmptyIsEmptySchema(t *testing.T) {
 	}
 }
 
-// TestFoldTablesOnlyDirectory covers a tables-half directory: it folds to its
-// tables, with no graph, and does not error.
+// TestFoldTablesOnlyDirectory covers a history generated with --no-graph: it
+// folds to its tables, with no graph, and does not error.
 func TestFoldTablesOnlyDirectory(t *testing.T) {
 	m := mustSchema(t, baseSDL)
-	folded, err := migrate.FoldContent([]string{migrate.InitTables(m)})
+	folded, err := migrate.FoldContent(planContents(migrate.Plan(
+		nil, m, "init", 1, migrate.Halves{NoGraph: true})))
 	if err != nil {
 		t.Fatalf("FoldContent(tables half): %v", err)
 	}

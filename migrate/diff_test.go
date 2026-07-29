@@ -1,11 +1,13 @@
 package migrate_test
 
 import (
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/schema"
@@ -130,65 +132,37 @@ func TestDeltaNoChange(t *testing.T) {
 	}
 }
 
+// TestGenerateWritesDelta walks a tables-only directory — every generation with
+// --no-graph, which is the "someone else owns the graph, or nobody does" case —
+// through two generations and a no-op third.
 func TestGenerateWritesDelta(t *testing.T) {
 	dir := t.TempDir()
+	tablesOnly := migrate.Halves{NoGraph: true}
 
-	// 0001 from the base SDL. A directory holds one half; this is a tables one.
-	p1, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "init", 1)
-	if err != nil {
-		t.Fatalf("GenerateTables: %v", err)
-	}
-	if filepath.Base(p1) != "0001_init.sql" {
-		t.Fatalf("first migration = %s, want 0001_init.sql", filepath.Base(p1))
-	}
+	first, err := migrate.Generate(dir, mustSchema(t, baseSDL), "init", tablesOnly)
+	require.NoError(t, err, "first Generate")
+	require.Len(t, first, 1, "with the graph half off there is only the tables file")
+	require.Equal(t, "0001_init_tables.sql", filepath.Base(first[0]))
 
-	// 0002 delta from the widened SDL.
-	p2, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "add age", 2)
-	if err != nil {
-		t.Fatalf("GenerateTables: %v", err)
-	}
-	if got := filepath.Base(p2); got != "0002_add_age.sql" {
-		t.Errorf("delta migration = %s, want 0002_add_age.sql", got)
-	}
-	data, err := os.ReadFile(p2)
-	if err != nil {
-		t.Fatalf("read delta: %v", err)
-	}
-	content := string(data)
-	if !strings.HasPrefix(content, "-- +goose Up\n") || !strings.Contains(content, "\n-- +goose Down\n") {
-		t.Errorf("delta is not goose-formatted:\n%s", content)
-	}
+	second, err := migrate.Generate(dir, mustSchema(t, widenedSDL), "add age", tablesOnly)
+	require.NoError(t, err, "second Generate")
+	require.Len(t, second, 1)
+	assert.Equal(t, "0002_add_age_tables.sql", filepath.Base(second[0]),
+		"the version is one past the highest already in the directory")
+
+	content := readFile(t, second[0])
+	assert.True(t, strings.HasPrefix(content, "-- +goose Up\n"), "not goose-formatted:\n%s", content)
+	assert.Contains(t, content, "\n-- +goose Down\n")
 
 	// Folding the whole directory reproduces the widened schema.
 	folded, err := migrate.Fold(dir)
-	if err != nil {
-		t.Fatalf("Fold: %v", err)
-	}
-	if !hasPersonColumn(folded, "age") {
-		t.Errorf("folded directory missing age column: %+v", folded)
-	}
+	require.NoError(t, err, "Fold")
+	assert.True(t, hasPersonColumn(folded, "age"), "folded directory missing age column: %+v", folded)
 
-	// A second Generate with no changes writes nothing.
-	p3, err := migrate.GenerateTables(dir, mustSchema(t, widenedSDL), "noop", 3)
-	if err != nil {
-		t.Fatalf("GenerateTables (noop): %v", err)
-	}
-	if p3 != "" {
-		t.Errorf("no-op Generate should not write a file, wrote %s", p3)
-	}
-}
-
-// TestGenerateOnEmptyDirWritesInit checks that Generate emits the initial
-// migration when there is no history.
-func TestGenerateOnEmptyDirWritesInit(t *testing.T) {
-	dir := t.TempDir()
-	p, err := migrate.GenerateTables(dir, mustSchema(t, baseSDL), "ignored", 1)
-	if err != nil {
-		t.Fatalf("GenerateTables: %v", err)
-	}
-	if filepath.Base(p) != "0001_init.sql" {
-		t.Errorf("initial Generate = %s, want 0001_init.sql", filepath.Base(p))
-	}
+	// A third generation against an unchanged schema writes nothing at all.
+	third, err := migrate.Generate(dir, mustSchema(t, widenedSDL), "noop", tablesOnly)
+	require.NoError(t, err, "third Generate")
+	assert.Empty(t, third, "an unchanged schema must emit no migration")
 }
 
 func hasPersonColumn(m *schema.Schema, col string) bool {

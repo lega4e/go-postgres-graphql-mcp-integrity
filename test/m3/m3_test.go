@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -183,16 +182,14 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	// Both halves, in apply order: the graph references the tables, so the
-	// tables directory has to go first.
-	dirs, err := migrate.WriteInitSplit(dir, st.model)
+	// One directory, one history: the tables, then the property graph over
+	// them. Nothing here decides an order — the file numbering is the order.
+	paths, err := migrate.Generate(dir, st.model, "init", migrate.Halves{})
 	if err != nil {
 		return err
 	}
-	for _, d := range dirs {
-		if _, err := os.Stat(filepath.Join(d, migrate.InitFilename)); err != nil {
-			return fmt.Errorf("missing %s in %s: %w", migrate.InitFilename, d, err)
-		}
+	if len(paths) != 2 {
+		return fmt.Errorf("a first generation is two migrations, got %v", paths)
 	}
 
 	db, err := sql.Open("pgx", connString)
@@ -200,7 +197,7 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return fmt.Errorf("open sql.DB for goose: %w", err)
 	}
 	defer db.Close()
-	if err := upAll(ctx, db, dirs); err != nil {
+	if err := upAll(ctx, db, dir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
@@ -359,16 +356,12 @@ func header(table *godog.Table) map[string]int {
 	return cols
 }
 
-// upAll applies the migration directories in the order given — tables before
-// the graph that references them.
-func upAll(ctx context.Context, db *sql.DB, dirs []string) error {
-	for _, d := range dirs {
-		// Each half has its own version table — both start at 0001, so a
-		// shared one makes goose skip the second half entirely.
-		goose.SetTableName(migrate.VersionTable(filepath.Base(d)))
-		if err := goose.UpContext(ctx, db, d); err != nil {
-			return err
-		}
-	}
-	return nil
+// upAll applies every pending migration in dir, in ascending version order.
+//
+// A plain forward apply against goose's own default version table is all it
+// takes. The migrations are one chronological history, so the order they need
+// is the order goose already applies them in — no half to interleave, no
+// version table to select (gopgql#38, design D3).
+func upAll(ctx context.Context, db *sql.DB, dir string) error {
+	return goose.UpContext(ctx, db, dir)
 }

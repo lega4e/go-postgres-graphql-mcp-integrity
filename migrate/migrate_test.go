@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/sdl"
@@ -70,28 +73,36 @@ func TestInitGooseFormat(t *testing.T) {
 	}
 }
 
-func TestWriteInit(t *testing.T) {
+// TestGenerateWritesTheFirstGeneration covers a fresh directory: the tables
+// migration, then the graph migration over them, both in the directory itself.
+func TestGenerateWritesTheFirstGeneration(t *testing.T) {
 	doc, err := sdl.Parse(exampleSDL)
-	if err != nil {
-		t.Fatalf("sdl.Parse: %v", err)
-	}
+	require.NoError(t, err, "sdl.Parse")
 	m, err := generator.Build(doc, "")
-	if err != nil {
-		t.Fatalf("generator.Build: %v", err)
-	}
+	require.NoError(t, err, "generator.Build")
+
 	dir := t.TempDir()
-	path, err := migrate.GenerateTables(dir, m, "init", 1)
-	if err != nil {
-		t.Fatalf("GenerateTables: %v", err)
+	paths, err := migrate.Generate(dir, m, "init", migrate.Halves{})
+	require.NoError(t, err, "Generate")
+	require.Len(t, paths, 2, "a first generation has nothing to tear down")
+
+	assert.Equal(t, []string{"0001_init_tables.sql", "0002_init_graph.sql"},
+		[]string{filepath.Base(paths[0]), filepath.Base(paths[1])})
+	for _, p := range paths {
+		assert.Equal(t, dir, filepath.Dir(p), "everything goes into --dir itself")
 	}
-	if filepath.Base(path) != migrate.InitFilename {
-		t.Errorf("filename = %s, want %s", filepath.Base(path), migrate.InitFilename)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if string(data) != migrate.InitTables(m) {
-		t.Error("written file content differs from migrate.InitTables")
-	}
+
+	tables, graph := readFile(t, paths[0]), readFile(t, paths[1])
+	assert.Contains(t, tables, "CREATE TABLE persons")
+	assert.NotContains(t, tables, "PROPERTY GRAPH", "no migration mixes the two")
+	assert.Contains(t, graph, "CREATE PROPERTY GRAPH")
+	assert.NotContains(t, graph, "CREATE TABLE", "no migration mixes the two")
+}
+
+// readFile reads a file the caller has just had written.
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // a path the test just generated
+	require.NoError(t, err, "read %s", path)
+	return string(data)
 }

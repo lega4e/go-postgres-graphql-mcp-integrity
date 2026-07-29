@@ -75,8 +75,10 @@ func TestRenameDeltaMovesTheColumn(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, changed)
 
-	up, down, ok := strings.Cut(delta, "-- +goose Down")
-	require.True(t, ok, "delta must carry a Down section")
+	// The generation is three files; the rename is in the tables one, between
+	// the graph teardown and the rebuild.
+	up, down, ok := strings.Cut(tablesMigration(t, delta), "-- +goose Down")
+	require.True(t, ok, "the tables migration must carry a Down section")
 
 	assert.Contains(t, up, "ALTER TABLE employees RENAME COLUMN email TO work_email;")
 	assert.NotContains(t, delta, "DROP COLUMN")
@@ -188,4 +190,19 @@ func TestConformanceReportIsNotFiction(t *testing.T) {
 	assert.Contains(t, playground.ExampleConformanceReport, "exit 2")
 	assert.Contains(t, playground.ExampleConformanceReport,
 		"compared elements, labels and properties only; defaults, constraints and indexes are not covered.")
+}
+
+// tablesMigration picks the tables migration out of a rendered generation. The
+// playground shows the whole run of files in one pane, and only one of them ever
+// carries table DDL (gopgql#38, design D2).
+func tablesMigration(t *testing.T, rendered string) string {
+	t.Helper()
+	for _, block := range strings.Split(rendered, "-- migrations/") {
+		name, _, ok := strings.Cut(block, "\n")
+		if ok && strings.HasSuffix(name, "_tables.sql") {
+			return block
+		}
+	}
+	require.FailNow(t, "no tables migration in:\n"+rendered)
+	return ""
 }
