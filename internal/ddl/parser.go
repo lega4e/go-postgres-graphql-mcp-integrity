@@ -299,12 +299,24 @@ func (p *parser) isTableConstraintStart() bool {
 	return t.Type == TokenWord && tableConstraintWords[strings.ToUpper(t.Value)]
 }
 
-// tableConstraint parses a table-level constraint item. gopgql emits only
-// "PRIMARY KEY (a, b)" on edge tables; for that the column list is captured. Any
-// other constraint kind is recognised by its leading keyword and its balanced
-// parenthesised body (if any) is skipped — enough to keep parsing the rest of
-// the table.
+// tableConstraint parses a table-level constraint item, with or without a
+// leading "CONSTRAINT <name>" clause. gopgql emits "PRIMARY KEY (a, b)" on edge
+// tables and, from M7, named UNIQUE and CHECK constraints for a natural key and
+// a table-level check; for each of those the body is captured. Any other kind is
+// recognised by its leading keyword and its balanced parenthesised body (if any)
+// is skipped — enough to keep parsing the rest of the table.
 func (p *parser) tableConstraint() (TableConstraint, error) {
+	var c TableConstraint
+	// A name is read before the kind is folded to upper case: it is an
+	// identifier, and a later delta drops the constraint by that exact name.
+	if p.keywordAt(0, "CONSTRAINT") {
+		p.advance()
+		name, err := p.ident("constraint name")
+		if err != nil {
+			return TableConstraint{}, err
+		}
+		c.Name = name
+	}
 	var words []string
 	for p.at(TokenWord) && !p.at(TokenLParen) {
 		w := strings.ToUpper(p.peek().Value)
@@ -314,15 +326,22 @@ func (p *parser) tableConstraint() (TableConstraint, error) {
 			break
 		}
 	}
-	c := TableConstraint{Kind: strings.Join(words, " ")}
+	c.Kind = strings.Join(words, " ")
 	if p.at(TokenLParen) {
-		if c.Kind == "PRIMARY KEY" || c.Kind == "UNIQUE" {
+		switch c.Kind {
+		case "PRIMARY KEY", "UNIQUE":
 			cols, err := p.parenIdentList()
 			if err != nil {
 				return TableConstraint{}, err
 			}
 			c.Columns = cols
-		} else {
+		case "CHECK":
+			expr, err := p.parenExpr("check expression")
+			if err != nil {
+				return TableConstraint{}, err
+			}
+			c.Expr = expr
+		default:
 			p.consumeBalanced()
 		}
 	}
@@ -374,26 +393,94 @@ func (p *parser) alterTable() (Statement, error) {
 		}
 		return &AlterTableStmt{Name: name, Action: &DropColumn{Name: col}}, nil
 	case p.acceptKeyword("ADD", "CONSTRAINT"):
-		cname, err := p.ident("constraint name")
-		if err != nil {
-			return nil, err
-		}
-		if err := p.expectKeyword("UNIQUE"); err != nil {
-			return nil, err
-		}
-		cols, err := p.parenIdentList()
-		if err != nil {
-			return nil, err
-		}
-		return &AlterTableStmt{Name: name, Action: &AddConstraint{Name: cname, Kind: "UNIQUE", Columns: cols}}, nil
+		return p.addConstraint(name)
 	case p.acceptKeyword("DROP", "CONSTRAINT"):
 		cname, err := p.ident("constraint name")
 		if err != nil {
 			return nil, err
 		}
 		return &AlterTableStmt{Name: name, Action: &DropConstraint{Name: cname}}, nil
+	case p.acceptKeyword("RENAME", "COLUMN"):
+		// Ordered before "RENAME TO": both start with RENAME, and only the
+		// following token tells them apart.
+		old, err := p.ident("column name")
+		if err != nil {
+			return nil, err
+		}
+		if err := p.expectKeyword("TO"); err != nil {
+			return nil, err
+		}
+		fresh, err := p.ident("new column name")
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Name: name, Action: &RenameColumn{Name: old, NewName: fresh}}, nil
+	case p.acceptKeyword("RENAME", "TO"):
+		fresh, err := p.ident("new table name")
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{Name: name, Action: &RenameTable{NewName: fresh}}, nil
+	case p.acceptKeyword("ALTER", "COLUMN"):
+		return p.alterColumn(name)
 	default:
 		return nil, p.errorf("unsupported ALTER TABLE action at %q", p.peek().Value)
+	}
+}
+
+// addConstraint parses the body of "ADD CONSTRAINT <name> …". gopgql names every
+// constraint it emits, so the anonymous form PostgreSQL also allows is not part
+// of this grammar: a constraint whose name the emitter did not choose cannot be
+// dropped by a later delta without asking the database what name it invented.
+func (p *parser) addConstraint(table string) (Statement, error) {
+	cname, err := p.ident("constraint name")
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case p.acceptKeyword("UNIQUE"):
+		cols, err := p.parenIdentList()
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{
+			Name:   table,
+			Action: &AddConstraint{Name: cname, Kind: "UNIQUE", Columns: cols},
+		}, nil
+	case p.acceptKeyword("CHECK"):
+		expr, err := p.parenExpr("check expression")
+		if err != nil {
+			return nil, err
+		}
+		return &AlterTableStmt{
+			Name:   table,
+			Action: &AddConstraint{Name: cname, Kind: "CHECK", Expr: expr},
+		}, nil
+	default:
+		return nil, p.errorf("unsupported constraint kind at %q (gopgql emits UNIQUE and CHECK)", p.peek().Value)
+	}
+}
+
+// alterColumn parses the body of "ALTER COLUMN <name> …". Only the default is
+// alterable in gopgql's dialect: a type or nullability change is a different
+// migration with different data consequences, and is not something the emitter
+// produces (SPEC.md §7 → M7).
+func (p *parser) alterColumn(table string) (Statement, error) {
+	col, err := p.ident("column name")
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case p.acceptKeyword("SET", "DEFAULT"):
+		expr := p.defaultExpr()
+		if expr == "" {
+			return nil, p.errorf("expected a default expression, got %q", p.peek().Value)
+		}
+		return &AlterTableStmt{Name: table, Action: &SetDefault{Column: col, Default: expr}}, nil
+	case p.acceptKeyword("DROP", "DEFAULT"):
+		return &AlterTableStmt{Name: table, Action: &DropDefault{Column: col}}, nil
+	default:
+		return nil, p.errorf("unsupported ALTER COLUMN action at %q", p.peek().Value)
 	}
 }
 
@@ -481,6 +568,11 @@ func (p *parser) vertexTableDef() (VertexTableDef, error) {
 	var err error
 	if v.Table, err = p.ident("vertex table"); err != nil {
 		return v, err
+	}
+	if p.acceptKeyword("KEY") {
+		if v.Key, err = p.parenIdentList(); err != nil {
+			return v, err
+		}
 	}
 	first, err := p.labelClause("vertex label")
 	if err != nil {
@@ -585,6 +677,45 @@ func (p *parser) parenIdentList() ([]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// parenExpr parses "( <anything balanced> )" and returns the raw source text
+// between the parentheses, whitespace-normalised.
+//
+// A CHECK body is arbitrary SQL that gopgql deliberately does not parse (design,
+// Non-Goals): PostgreSQL is the authority on whether an expression is valid, and
+// it says so at migration time with a better error than a hand-written parser
+// would. So the body is carried verbatim, exactly as the emitter wrote it, which
+// is also what lets a folded schema compare equal to a freshly built one.
+func (p *parser) parenExpr(what string) (string, error) {
+	if err := p.expectPunct(TokenLParen, "("); err != nil {
+		return "", err
+	}
+	start := p.peek().Pos
+	end := start
+	depth := 1
+	for {
+		t := p.peek()
+		switch t.Type {
+		case TokenEOF:
+			return "", p.errorf("unterminated %s, expected %q", what, ")")
+		case TokenLParen:
+			depth++
+		case TokenRParen:
+			depth--
+		}
+		if depth == 0 {
+			p.advance() // the closing ')'
+			break
+		}
+		end = t.End
+		p.advance()
+	}
+	expr := normalizeSpaces(p.src[start:end])
+	if expr == "" {
+		return "", p.errorf("expected a %s, got %q", what, ")")
+	}
+	return expr, nil
 }
 
 // consumeBalanced consumes a parenthesised group starting at the current '(' and

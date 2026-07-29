@@ -26,6 +26,13 @@
 // positions in one pattern could bind the same row and so need an
 // edge-isomorphism guard (SPEC.md §2.2).
 //
+// M7 adds the constraint directives (SPEC.md §7 → M7): @default and @check
+// carry raw SQL through to the DDL, @key declares a natural key *alongside* the
+// surrogate id rather than replacing it, and @renamedFrom is a hint the differ
+// needs because a rename can never be inferred from a disappeared name and an
+// appeared one. This package parses and validates them; emitting and diffing
+// them belong to generator and migrate.
+//
 // It has no database dependency and compiles to WASM.
 package sdl
 
@@ -93,6 +100,16 @@ type Field struct {
 	Unique bool
 	// Index is the secondary index requested with @index, or nil.
 	Index *IndexSpec
+	// Default is the column default from @default(value:); empty means none.
+	// It is raw SQL, emitted verbatim (design D6) — `'unknown'`, `now()`, `0`.
+	Default string
+	// Check is the column constraint expression from @check(expr:); empty means
+	// none. Also raw SQL: gopgql does not parse it, so an invalid expression is
+	// PostgreSQL's error at migration time, not a parse error here.
+	Check string
+	// RenamedFrom is the field's previous name from @renamedFrom(name:); empty
+	// means none. It is a hint to the differ, never an inference (design D2).
+	RenamedFrom string
 }
 
 // IndexSpec is a per-field @index request: an optional explicit name and access
@@ -121,6 +138,53 @@ func (f *Field) ColumnName() string {
 	return f.Name
 }
 
+// PriorColumnNames derives the physical column names this field may have had
+// before the rename its @renamedFrom declares, most likely first. It is nil when
+// the field declares no rename.
+//
+// @renamedFrom(name:) states the previous *GraphQL field name* (see
+// Document.validateRenameHints), and the differ needs a *column* name, so the
+// two have to be bridged somewhere; sdl is where, because sdl owns the rule that
+// a field with no @column(name:) maps to a column of its own name. That rule run
+// backwards gives exactly one candidate: the hint itself.
+//
+// A field that kept its column while its GraphQL name changed therefore yields a
+// candidate that is still present in the desired schema, and the differ declines
+// to rename anything — correctly, because nothing physical moved.
+func (f *Field) PriorColumnNames() []string {
+	if f.RenamedFrom == "" || !f.IsScalarColumn() {
+		return nil
+	}
+	return []string{f.RenamedFrom}
+}
+
+// PriorTableNames derives the physical table names this type may have had before
+// the rename its @renamedFrom declares, most likely first. It is nil when the
+// type declares no rename.
+//
+// The GraphQL → physical bridge is looser here than for a field, because a
+// type's table is pluralize(@node(label:)) and the label is independent of the
+// type name. Two candidates cover what an author can reasonably have meant:
+//
+//   - the table a type of that name conventionally produced — the pluralized,
+//     lowercased prior type name;
+//   - the hint read literally, for a schema whose @node(table:) was explicit and
+//     whose author wrote the physical name.
+//
+// Offering both is safe precisely because a rename is resolved against the prior
+// state (design D2): a candidate that names nothing that is actually there emits
+// nothing, so a wrong guess costs a no-op rather than a wrong rename.
+func (n *Node) PriorTableNames() []string {
+	if n.RenamedFrom == "" {
+		return nil
+	}
+	out := []string{pluralize(strings.ToLower(n.RenamedFrom))}
+	if n.RenamedFrom != out[0] {
+		out = append(out, n.RenamedFrom)
+	}
+	return out
+}
+
 // Node is a GraphQL object type carrying @node.
 type Node struct {
 	// TypeName is the GraphQL type name (e.g. "Person").
@@ -133,6 +197,18 @@ type Node struct {
 	Table string
 	// Fields are the type's fields in declaration order.
 	Fields []*Field
+	// Checks are the table-level constraint expressions from @check(expr:) on
+	// the type, in declaration order — the form that spans more than one
+	// column. Raw SQL, like Field.Check.
+	Checks []string
+	// NaturalKey names the fields of a @key(fields:), in the declared order: a
+	// uniqueness constraint over existing scalar properties, *alongside* the
+	// surrogate id, which stays the physical identity edges reference
+	// (design D1). Nil means the type declares no natural key.
+	NaturalKey []string
+	// RenamedFrom is the type's previous name from @renamedFrom(name:); empty
+	// means none.
+	RenamedFrom string
 }
 
 // Interface is a GraphQL interface implemented by @node types. It maps the
@@ -226,7 +302,7 @@ func (d *Document) RootFields() []string {
 }
 
 // prelude declares the gopgql directive vocabulary and custom scalars so
-// gqlparser recognises and validates them. It is the M1 subset of SPEC.md §5.
+// gqlparser recognises and validates them. It is SPEC.md §5 through M7.
 const prelude = `directive @node(label: String!, table: String) on OBJECT | INTERFACE
 directive @relationship(type: String!, direction: RelDirection, table: String) on FIELD_DEFINITION
 directive @hasInverse(field: String!) on FIELD_DEFINITION
@@ -234,6 +310,10 @@ directive @ignore on FIELD_DEFINITION
 directive @column(name: String, type: String) on FIELD_DEFINITION
 directive @index(name: String, using: String) on FIELD_DEFINITION | OBJECT
 directive @unique on FIELD_DEFINITION
+directive @default(value: String!) on FIELD_DEFINITION
+directive @check(expr: String!) on FIELD_DEFINITION | OBJECT
+directive @key(fields: [String!]!) on OBJECT
+directive @renamedFrom(name: String!) on OBJECT | FIELD_DEFINITION
 enum RelDirection { OUT IN }
 scalar DateTime
 scalar JSON
@@ -270,7 +350,11 @@ func Parse(src string) (*Document, error) {
 		switch def.Kind {
 		case ast.Object:
 			if nodeDir := def.Directives.ForName("node"); nodeDir != nil {
-				doc.Nodes = append(doc.Nodes, buildNode(def, nodeDir))
+				n, err := buildNode(def, nodeDir)
+				if err != nil {
+					return nil, err
+				}
+				doc.Nodes = append(doc.Nodes, n)
 			}
 		case ast.Interface:
 			ifaceDefs = append(ifaceDefs, def)
@@ -333,7 +417,11 @@ func (d *Document) buildInterfaces(schema *ast.Schema, defs []*ast.Definition) e
 			}
 		}
 
-		iface := &Interface{TypeName: def.Name, Fields: buildFields(def), Implementors: impls}
+		fields, err := buildFields(def)
+		if err != nil {
+			return err
+		}
+		iface := &Interface{TypeName: def.Name, Fields: fields, Implementors: impls}
 		if nodeDir := def.Directives.ForName("node"); nodeDir != nil {
 			iface.Label = argString(nodeDir, "label")
 			iface.RootField = pluralize(iface.Label)
@@ -389,7 +477,7 @@ func (d *Document) buildTargets() error {
 	return nil
 }
 
-func buildNode(def *ast.Definition, nodeDir *ast.Directive) *Node {
+func buildNode(def *ast.Definition, nodeDir *ast.Directive) (*Node, error) {
 	// label is required by the directive definition, so gqlparser guarantees a
 	// non-empty value here.
 	label := argString(nodeDir, "label")
@@ -397,12 +485,43 @@ func buildNode(def *ast.Definition, nodeDir *ast.Directive) *Node {
 	if table == "" {
 		table = pluralize(label)
 	}
-	return &Node{TypeName: def.Name, Label: label, Table: table, Fields: buildFields(def)}
+	fields, err := buildFields(def)
+	if err != nil {
+		return nil, err
+	}
+	n := &Node{TypeName: def.Name, Label: label, Table: table, Fields: fields}
+
+	// A type may carry several @check directives — one constraint per
+	// expression, each named separately in the DDL so a later delta can drop it
+	// (design D6) — but only one @key and one @renamedFrom, because the model
+	// holds one of each.
+	for _, dir := range def.Directives.ForNames("check") {
+		expr, err := requiredArg(dir, "expr", def.Name)
+		if err != nil {
+			return nil, err
+		}
+		n.Checks = append(n.Checks, expr)
+	}
+	if keys := def.Directives.ForNames("key"); len(keys) > 0 {
+		if err := atMostOne(keys, "@key", def.Name); err != nil {
+			return nil, err
+		}
+		n.NaturalKey = argStringList(keys[0], "fields")
+	}
+	if renames := def.Directives.ForNames("renamedFrom"); len(renames) > 0 {
+		if err := atMostOne(renames, "@renamedFrom", def.Name); err != nil {
+			return nil, err
+		}
+		if n.RenamedFrom, err = requiredArg(renames[0], "name", def.Name); err != nil {
+			return nil, err
+		}
+	}
+	return n, nil
 }
 
 // buildFields reads a type's (or interface's) fields into the mapping model,
 // skipping GraphQL introspection meta-fields.
-func buildFields(def *ast.Definition) []*Field {
+func buildFields(def *ast.Definition) ([]*Field, error) {
 	var fields []*Field
 	for _, fd := range def.Fields {
 		if strings.HasPrefix(fd.Name, "__") {
@@ -427,6 +546,31 @@ func buildFields(def *ast.Definition) []*Field {
 		if idxDir := fd.Directives.ForName("index"); idxDir != nil {
 			f.Index = &IndexSpec{Name: argString(idxDir, "name"), Using: argString(idxDir, "using")}
 		}
+		// A field holds one default, one check and one rename hint. gqlparser
+		// already rejects a repeated directive at a field location, so unlike
+		// the type-level directives these need no cardinality guard of their
+		// own; two column checks are expressed as one `a AND b`, or moved to a
+		// type-level @check.
+		where := def.Name + "." + fd.Name
+		for _, spec := range []struct {
+			name string
+			arg  string
+			into *string
+		}{
+			{"default", "value", &f.Default},
+			{"check", "expr", &f.Check},
+			{"renamedFrom", "name", &f.RenamedFrom},
+		} {
+			dir := fd.Directives.ForName(spec.name)
+			if dir == nil {
+				continue
+			}
+			v, err := requiredArg(dir, spec.arg, where)
+			if err != nil {
+				return nil, err
+			}
+			*spec.into = v
+		}
 		if relDir := fd.Directives.ForName("relationship"); relDir != nil {
 			rel := &Relationship{
 				Type:      argString(relDir, "type"),
@@ -443,7 +587,33 @@ func buildFields(def *ast.Definition) []*Field {
 		}
 		fields = append(fields, f)
 	}
-	return fields
+	return fields, nil
+}
+
+// atMostOne rejects a repeated directive on a type definition. gqlparser
+// enforces single use at field locations but not at definitions, so without
+// this a second @key or @renamedFrom would be read and silently discarded — a
+// declared constraint vanishing without a word.
+func atMostOne(dirs []*ast.Directive, name, where string) error {
+	if len(dirs) > 1 {
+		return fmt.Errorf("sdl: %s carries %d %s directives; only one is allowed", where, len(dirs), name)
+	}
+	return nil
+}
+
+// requiredArg returns a directive argument the schema declares as non-null, and
+// rejects an empty one. GraphQL requires the argument to be *present*; it has no
+// opinion about `""`, and an empty expression, default or previous name would
+// each become nonsense the generator emits verbatim.
+//
+// The value itself is returned unchanged: an expression and a default are raw
+// SQL, so trimming them is not this package's call.
+func requiredArg(dir *ast.Directive, arg, where string) (string, error) {
+	v := argString(dir, arg)
+	if strings.TrimSpace(v) == "" {
+		return "", fmt.Errorf("sdl: %s: @%s(%s:) is empty", where, dir.Name, arg)
+	}
+	return v, nil
 }
 
 // validate enforces gopgql's semantic rules beyond GraphQL well-formedness.
@@ -470,6 +640,12 @@ func (d *Document) validate() error {
 			}
 		}
 		if err := validateColumnNames(n); err != nil {
+			return err
+		}
+		if err := validateNaturalKey(n); err != nil {
+			return err
+		}
+		if err := d.validateRenameHints(n); err != nil {
 			return err
 		}
 	}
@@ -561,15 +737,17 @@ func validateImplementors(iface *Interface, f *Field) error {
 	return nil
 }
 
-// validateKey requires the surrogate key `id: ID!`. Interfaces need it too: the
-// compiler projects it as every level's hidden key column and compares it
-// between vertex positions to exclude self-matches.
-// validateMappingDirectives checks the M6 column directives sit on fields that
+// validateMappingDirectives checks the column directives sit on fields that
 // actually map to a column, and that they do not contradict the surrogate key.
 // A directive on a relationship or an @ignore field is a mistake with no
 // possible effect, so it is rejected rather than ignored (SPEC.md §10).
+//
+// @renamedFrom is deliberately absent from this rule: it describes the prior
+// name of a declaration, not a property of a column, so it is meaningful on
+// every field.
 func validateMappingDirectives(typeName string, f *Field) error {
-	has := f.Column != "" || f.ColumnType != "" || f.Unique || f.Index != nil
+	has := f.Column != "" || f.ColumnType != "" || f.Unique || f.Index != nil ||
+		f.Default != "" || f.Check != ""
 	if !has {
 		return nil
 	}
@@ -578,7 +756,7 @@ func validateMappingDirectives(typeName string, f *Field) error {
 		if f.Ignore {
 			what = "@ignore"
 		}
-		return fmt.Errorf("sdl: %s.%s carries @column/@index/@unique, but it is %s and maps to no column",
+		return fmt.Errorf("sdl: %s.%s carries @column/@index/@unique/@default/@check, but it is %s and maps to no column",
 			typeName, f.Name, what)
 	}
 	if f.Name == "id" {
@@ -590,6 +768,9 @@ func validateMappingDirectives(typeName string, f *Field) error {
 		}
 		if f.Index != nil {
 			return fmt.Errorf("sdl: %s.id is already indexed by its primary key; drop the @index", typeName)
+		}
+		if f.Default != "" {
+			return fmt.Errorf("sdl: %s.id already defaults to a generated uuid; drop the @default", typeName)
 		}
 	}
 	if f.Column != "" && pgident.NeedsQuote(f.Column) {
@@ -617,6 +798,104 @@ func validateColumnNames(n *Node) error {
 	return nil
 }
 
+// validateNaturalKey checks that @key(fields:) names stored scalar columns of
+// the declaring type. The natural key becomes a UNIQUE constraint over those
+// columns and their names are listed in the property graph's KEY clause
+// (design D1), so a name that maps to no column has nothing to constrain — a
+// relationship lives on an edge table and an @ignore field is not in the
+// database at all. Catching it here is the difference between a parse error
+// naming the field and a PostgreSQL error naming a column nobody wrote.
+func validateNaturalKey(n *Node) error {
+	if n.NaturalKey == nil {
+		return nil
+	}
+	if len(n.NaturalKey) == 0 {
+		return fmt.Errorf("sdl: %s: @key(fields:) is empty; a natural key must name at least one field", n.TypeName)
+	}
+	seen := map[string]bool{}
+	for _, name := range n.NaturalKey {
+		if seen[name] {
+			return fmt.Errorf("sdl: %s: @key names field %q twice", n.TypeName, name)
+		}
+		seen[name] = true
+
+		var f *Field
+		for _, cand := range n.Fields {
+			if cand.Name == name {
+				f = cand
+				break
+			}
+		}
+		if f == nil {
+			return fmt.Errorf("sdl: %s: @key names field %q, which %s does not declare", n.TypeName, name, n.TypeName)
+		}
+		if !f.IsScalarColumn() {
+			what := "a relationship"
+			if f.Ignore {
+				what = "@ignore"
+			}
+			return fmt.Errorf("sdl: %s.%s: @key names it, but it is %s and maps to no column on %s",
+				n.TypeName, name, what, n.Table)
+		}
+	}
+	return nil
+}
+
+// validateRenameHints enforces the one thing a rename hint can be wrong about
+// (design D2). @renamedFrom is a claim about the *prior* state — "this used to
+// be called X" — so an SDL that still declares X is describing two objects, not
+// one renamed one, and the differ would be asked to rename something into a
+// name that is already taken.
+//
+// The converse is deliberately not an error: a hint naming something absent
+// from the prior state is a no-op. The hint stays in the SDL after the rename
+// has been applied, and that same SDL has to keep generating cleanly — every
+// later delta re-reads it. Rejecting an unmatched hint would make a schema stop
+// parsing the moment its own migration landed.
+//
+// Both namespaces are checked, because a rename is declared in GraphQL names
+// but applied to physical ones: naming a still-declared field is a
+// contradiction, and so is naming a column another field still maps to.
+func (d *Document) validateRenameHints(n *Node) error {
+	if from := n.RenamedFrom; from != "" {
+		if d.byType[from] != nil {
+			return fmt.Errorf("sdl: %s: @renamedFrom(name: %q), but the SDL still declares the type %s; "+
+				"that is two types, not a rename", n.TypeName, from, from)
+		}
+		if d.byIface[from] != nil {
+			return fmt.Errorf("sdl: %s: @renamedFrom(name: %q), but the SDL still declares the interface %s; "+
+				"that is two types, not a rename", n.TypeName, from, from)
+		}
+		if other := d.byTable[from]; other != nil && other != n {
+			return fmt.Errorf("sdl: %s: @renamedFrom(name: %q), but %s still maps to table %q; "+
+				"that is two tables, not a rename", n.TypeName, from, other.TypeName, from)
+		}
+	}
+
+	for _, f := range n.Fields {
+		from := f.RenamedFrom
+		if from == "" {
+			continue
+		}
+		for _, other := range n.Fields {
+			if other.Name == from {
+				return fmt.Errorf("sdl: %s.%s: @renamedFrom(name: %q), but %s still declares the field %s; "+
+					"that is two fields, not a rename", n.TypeName, f.Name, from, n.TypeName, from)
+			}
+			// A field keeping its own column while its GraphQL name changes is
+			// a rename with nothing to rename physically, so it is exempt.
+			if other != f && other.IsScalarColumn() && other.ColumnName() == from {
+				return fmt.Errorf("sdl: %s.%s: @renamedFrom(name: %q), but %s.%s still maps to column %q; "+
+					"that is two columns, not a rename", n.TypeName, f.Name, from, n.TypeName, other.Name, from)
+			}
+		}
+	}
+	return nil
+}
+
+// validateKey requires the surrogate key `id: ID!`. Interfaces need it too: the
+// compiler projects it as every level's hidden key column and compares it
+// between vertex positions to exclude self-matches.
 func validateKey(typeName, kind string, fields []*Field) error {
 	for _, f := range fields {
 		if f.Name != "id" {
@@ -664,6 +943,27 @@ func argString(dir *ast.Directive, name string) string {
 		return a.Value.Raw
 	}
 	return ""
+}
+
+// argStringList returns the elements of a list-valued directive argument. A
+// list value carries no Raw of its own, so the elements come from its children;
+// GraphQL also coerces a bare value to a one-element list, which is why a
+// non-list value is returned as one element rather than as nothing. The result
+// is non-nil whenever the argument is present, so an empty list stays
+// distinguishable from an absent directive.
+func argStringList(dir *ast.Directive, name string) []string {
+	a := dir.Arguments.ForName(name)
+	if a == nil || a.Value == nil {
+		return nil
+	}
+	if a.Value.Kind != ast.ListValue {
+		return []string{a.Value.Raw}
+	}
+	out := make([]string, 0, len(a.Value.Children))
+	for _, child := range a.Value.Children {
+		out = append(out, child.Value.Raw)
+	}
+	return out
 }
 
 // namedType strips list and non-null wrappers to the underlying named type.

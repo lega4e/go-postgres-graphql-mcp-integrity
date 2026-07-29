@@ -10,7 +10,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 4
+const REQUIRED_API_VERSION = 5
 
 const el = (id) => document.getElementById(id)
 
@@ -117,6 +117,56 @@ function renderDirectives() {
   setStatus('c-status', ok, ok ? 'generated' : 'see errors')
 }
 
+// renderConstraints shows the M7 constraint directives in the generated DDL —
+// defaults, named checks, and a natural key that arrives *alongside* the
+// surrogate id — next to a query that selects a vertex by that key, which is
+// what the KEY (...) clause in the graph makes possible.
+function renderConstraints() {
+  const sdl = valueOf('k-sdl')
+  let ok = renderSchema('k-schema', sdl)
+
+  const cmp = globalThis.gopgqlCompile(sdl, valueOf('k-query'), valueOf('k-vars'))
+  setCode('k-sql', cmp.error || cmp.sql)
+  setCode('k-params', cmp.error ? '—' : cmp.params)
+  if (cmp.error) ok = false
+
+  setStatus('k-status', ok, ok ? 'generated' : 'see errors')
+}
+
+// renderRename diffs the revised schema against the one in the scenario above
+// it, the same way the Migration tab does. The status line reports which of the
+// two outcomes the delta took — a rename, or the drop-and-add a differ with no
+// hint to go on has to fall back to — because that difference is the whole
+// point of the scenario and is easy to miss in a wall of SQL.
+function renderRename() {
+  const dl = globalThis.gopgqlDelta(valueOf('k-sdl'), valueOf('k-sdl2'))
+  setCode('k-delta', dl.error || dl.delta)
+  if (dl.error) {
+    setStatus('k-status2', false, 'see errors')
+    return
+  }
+  if (!dl.changed) {
+    setStatus('k-status2', true, 'no schema change')
+    return
+  }
+  const renamed = dl.delta.includes('RENAME COLUMN') || dl.delta.includes('RENAME TO')
+  const dropped = dl.delta.includes('DROP COLUMN')
+  setStatus('k-status2', renamed && !dropped,
+    renamed && !dropped ? 'renamed — the data moves with the column' : 'dropped and added — the data is gone')
+}
+
+// renderConformance generates the half of the check a browser can do: the graph
+// mapping the SDL describes, which is the entire surface conform compares. The
+// report beside it is a fixture — the conform package needs a live database and
+// so is not part of the WASM surface (SPEC.md §4.1) — and both the panel and
+// the label say so rather than letting it pass as a live result.
+function renderConformance() {
+  setCode('f-sdl', globalThis.gopgqlExampleConstraintsSDL ?? '')
+  const out = globalThis.gopgqlGraph(globalThis.gopgqlExampleConstraintsSDL ?? '')
+  setCode('f-graph', out.error || out.graph)
+  setCode('f-report', globalThis.gopgqlConformanceReport ?? '')
+}
+
 // depthLimit reads the Max depth input, falling back to the compiler's own
 // default when it is blank or not a number. Negatives are clamped here the way
 // the compiler clamps them, so the ceiling reported back is the one applied.
@@ -181,6 +231,12 @@ const scenarios = {
   traversal: { render: renderTraversal, inputs: ['t-sdl', 't-query', 't-vars'] },
   multipattern: { render: renderMultiPattern, inputs: ['p-sdl', 'p-query', 'p-vars'] },
   directives: { render: renderDirectives, inputs: ['c-sdl', 'c-query', 'c-vars'] },
+  constraints: { render: renderConstraints, inputs: ['k-sdl', 'k-query', 'k-vars'] },
+  rename: { render: renderRename, inputs: ['k-sdl', 'k-sdl2'] },
+  // The Conformance panel has no editable input: its report is a recording
+  // taken against one schema, and letting that schema be edited would make the
+  // report describe something that is no longer on the page.
+  conformance: { render: renderConformance, inputs: [] },
   depth: { render: renderDepth, inputs: ['d-sdl', 'd-query', 'd-vars', 'd-max'] },
   interfaces: { render: renderInterfaces, inputs: ['i-sdl', 'i-query'] },
   migration: { render: renderMigration, inputs: ['m-sdl'] },
@@ -298,6 +354,11 @@ async function boot() {
     seed('c-sdl', globalThis.gopgqlExampleDirectivesSDL)
     seed('c-query', globalThis.gopgqlExampleDirectivesQuery)
     seed('c-vars', globalThis.gopgqlExampleDirectivesVars)
+
+    seed('k-sdl', globalThis.gopgqlExampleConstraintsSDL)
+    seed('k-query', globalThis.gopgqlExampleConstraintsQuery)
+    seed('k-vars', globalThis.gopgqlExampleConstraintsVars)
+    seed('k-sdl2', globalThis.gopgqlRevisedConstraintsSDL)
 
     seed('d-sdl', globalThis.gopgqlExampleSDL)
     seed('d-query', globalThis.gopgqlExampleDeepQuery)
