@@ -7,14 +7,15 @@
 //	gopgql conform  --sdl schema.graphql --dsn postgres://…
 //
 // `generate` folds whatever migrations already exist in --dir, diffs them
-// against the schema the SDL describes, and writes the next migration —
-// 0001_init.sql on an empty directory, NNNN_<name>.sql thereafter, nothing at
-// all when the two already agree.
+// against the schema the SDL describes, and writes the generation that closes
+// the gap: consecutive single-purpose migrations, each doing exactly one thing,
+// into --dir itself. Nothing at all when the two already agree.
 //
-// `migrate` does that and then applies the directory with goose. It is what an
-// init container runs: with an ephemeral --dir it regenerates 0001_init.sql
-// every time, and goose skips the versions it has already applied, so running
-// it repeatedly against the same database is a no-op.
+// `migrate` does that and then applies the directory with goose — a plain
+// forward apply in version order, with no ordering of gopgql's own. It is what
+// an init container runs: with an ephemeral --dir it regenerates the whole
+// history every time, and goose skips the versions it has already applied, so
+// running it repeatedly against the same database is a no-op.
 //
 // `conform` reads the property graph back out of the database and reports how
 // it differs from the SDL. Everything else here reasons from the SDL alone and
@@ -32,8 +33,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"slices"
 	"text/tabwriter"
 
 	// Registers the "pgx" database/sql driver goose runs through.
@@ -66,16 +65,26 @@ Flags:
   --sdl    Path to the SDL schema.                     (env GOPGQL_SDL)
   --dsn    PostgreSQL connection string.               (env GOPGQL_DSN)
   --dir    Migration directory. Default "migrations".  (env GOPGQL_MIGRATIONS)
-           Holds two subdirectories:
-             <dir>/tables/  CREATE TABLE and its indexes
-             <dir>/graph/   CREATE PROPERTY GRAPH
-           They are applied in lockstep, one generation at a time —
-           tables/0001, graph/0001, tables/0002, graph/0002, … — so every
-           graph migration lands on the tables of its own generation.
+           One directory, one goose history, one goose_db_version table. No
+           migration ever mixes table DDL with property-graph DDL: one edit of
+           the SDL emits consecutive single-purpose migrations, applied in that
+           order —
+             0003_add_email_graph_down.sql  DROP PROPERTY GRAPH IF EXISTS …
+             0004_add_email_tables.sql      ALTER TABLE …
+             0005_add_email_graph.sql       CREATE PROPERTY GRAPH …
+           The graph comes down first because PostgreSQL refuses to alter a
+           column a live property graph exposes, and goes back up last over the
+           tables of its own generation. gopgql migrate is that plain forward
+           apply; a generation is not atomic, so an interrupted run may leave
+           the graph down — re-run it and it continues from where it stopped.
   --no-tables  Skip the tables half — someone else owns the tables, and the
                SDL describes only the slice surfaced as a graph. Nothing about
                a table is read, diffed or emitted. (env GOPGQL_NO_TABLES)
   --no-graph   Skip the property-graph half. (env GOPGQL_NO_GRAPH)
+           The flags scope a directory's first generation; after that the
+           directory's own history decides which halves it manages, and a flag
+           that contradicts it is an error. They scope what is *generated* —
+           applying is always the whole directory.
   --name   Descriptive suffix for a generated delta. Default "schema".
   --graph  Property-graph name. Default is the generator's.
 A flag wins over its environment variable.
@@ -185,7 +194,7 @@ func run(argv []string) error {
 	if *noTables && *noGraph {
 		return errors.New("--no-tables and --no-graph together leave nothing to do")
 	}
-	halves := selectedHalves(*noTables, *noGraph)
+	halves := migrate.Halves{NoTables: *noTables, NoGraph: *noGraph}
 
 	switch command {
 	case "generate":
@@ -202,7 +211,7 @@ func run(argv []string) error {
 				return err
 			}
 		}
-		return applyHalves(*dir, halves, *dsn)
+		return apply(*dir, *dsn)
 	case "conform":
 		// Both sides are required: the check is a comparison, and with either
 		// half missing there is nothing to compare rather than a default to
@@ -223,54 +232,60 @@ func run(argv []string) error {
 	}
 }
 
-// half is one of the two independently generated and applied parts of a
-// schema. Which one a migration directory holds is decided by its path and
-// nothing else — no marker is written into the files and none is read back, so
-// a directory cannot disagree with itself about what it owns.
-type half struct {
-	subdir   string
-	generate func(dir string, desired *schema.Schema, name string, version int) (string, error)
-}
-
-// selectedHalves returns the halves to generate and apply, in dependency order
-// within a generation: tables before the graph that references them.
-func selectedHalves(noTables, noGraph bool) []half {
-	var hs []half
-	if !noTables {
-		hs = append(hs, half{subdir: migrate.TablesDir, generate: migrate.GenerateTables})
-	}
-	if !noGraph {
-		hs = append(hs, half{subdir: migrate.GraphDir, generate: migrate.GenerateGraph})
-	}
-	return hs
-}
-
-// generate writes the next migration for each selected half into its own
-// subdirectory of dir.
-func generate(sdlPath, dir, name, graph string, halves []half) error {
+// generate writes the generation the SDL calls for into dir.
+func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
 	model, err := build(sdlPath, graph)
 	if err != nil {
 		return err
 	}
-	// One version for both halves, read before either is written: the number is
-	// the generation, not this half's file count (migrate.NextVersion).
-	version, err := migrate.NextVersion(dir)
+	paths, err := migrate.Generate(dir, model, name, halves)
 	if err != nil {
-		return err
+		return disownGuidance(err, halves)
 	}
-	for _, h := range halves {
-		sub := filepath.Join(dir, h.subdir)
-		path, err := h.generate(sub, model, name, version)
-		if err != nil {
-			return err
-		}
-		if path == "" {
-			fmt.Printf("gopgql: %s is already up to date with %s\n", sub, sdlPath)
-			continue
-		}
-		fmt.Printf("gopgql: wrote %s\n", path)
+	if len(paths) == 0 {
+		fmt.Printf("gopgql: %s is already up to date with %s\n", dir, sdlPath)
+		return nil
+	}
+	for _, p := range paths {
+		fmt.Printf("gopgql: wrote %s\n", p)
 	}
 	return nil
+}
+
+// The guidance printed when a turned-off half contradicts the directory's own
+// history (design D4a). The refusal itself says what the contradiction is; this
+// says what to do instead, which differs per half — and for --no-graph the
+// legitimate reason to want it is to get rid of the graph, so the message names
+// the deliberate way to do that.
+const (
+	graphDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
+		"To drop the property graph, generate from a desired schema that declares no\n" +
+		"graph: that emits the graph-teardown migration and no rebuild, so the drop is\n" +
+		"recorded in the history and reviewable in the diff."
+
+	tablesDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
+		"To hand the tables to another tool from now on, generate the graph half into a\n" +
+		"fresh --dir: suppressing table DDL in a directory that creates tables would\n" +
+		"leave the graph half naming columns nothing creates."
+)
+
+// disownGuidance appends the per-half guidance to the sentinel refusal.
+//
+// The refusal is migrate's, because that is where the history is read; the
+// guidance is the CLI's, because it is about flags. Which half was turned off is
+// known here and nowhere else, so the branch belongs here too.
+func disownGuidance(err error, halves migrate.Halves) error {
+	if !errors.Is(err, migrate.ErrHalfDisowned) {
+		return err
+	}
+	switch {
+	case halves.NoGraph:
+		return fmt.Errorf("%w\n\n%s", err, graphDisownGuidance)
+	case halves.NoTables:
+		return fmt.Errorf("%w\n\n%s", err, tablesDisownGuidance)
+	default:
+		return err
+	}
 }
 
 // build parses and validates the SDL and returns the physical schema model.
@@ -286,125 +301,22 @@ func build(sdlPath, graph string) (*schema.Schema, error) {
 	return generator.Build(doc, graph)
 }
 
-// applyHalves applies the selected halves in lockstep, one generation at a
-// time:
+// apply applies every pending migration in dir, in ascending version order.
 //
-//	tables/0001 → graph/0001 → tables/0002 → graph/0002 → …
+// That is the whole of it: goose's ordinary forward apply against goose's own
+// default version table. gopgql neither reorders the migrations nor decides that
+// any of them is to be skipped, because the order is the file numbering and the
+// numbering is chronological by construction (design D3). A turned-off half
+// changes what `generate` writes and never what this applies — a flag that could
+// skip part of an applied history is precisely the class of bug the per-half
+// version tables created.
 //
-// Not all of one half and then all of the other. A graph migration describes
-// the columns of its own generation, so replaying graph/0001 once the tables
-// have already moved on to 0002 runs a historical graph definition against a
-// current schema: it names a column 0002 dropped or renamed, and PostgreSQL
-// refuses it. Each generation of the graph has to land on the tables it was
-// generated against (gopgql#38).
-//
-// The graph is still taken down before the tables move, but per generation
-// rather than once at the front. What blocks tables/<n> is the live graph
-// graph/<n-1> built — PostgreSQL will not drop or retype a column a live
-// property graph exposes — and graph/<n> puts the right one back immediately
-// after. So a generation with table work reads
-//
-//	graph/<n-1> down → tables/<n> up → graph/<n> up
-//
-// and a generation with no table work does not touch the graph at all. That is
-// what makes re-running `gopgql migrate` against an already-migrated database
-// the no-op it is documented to be: with nothing pending, nothing is dropped.
-//
-// The halves need not be the same length. A generation one half skipped is
-// simply not a step for that half; when the tables half outruns the graph half
-// the graph is rebuilt at the end (restoreGraph). With one half turned off
-// there is nothing to interleave and the other applies in version order.
-func applyHalves(dir string, halves []half, dsn string) error {
-	var tablesDir, graphDir string
-	for _, h := range halves {
-		switch h.subdir {
-		case migrate.TablesDir:
-			tablesDir = filepath.Join(dir, h.subdir)
-		case migrate.GraphDir:
-			graphDir = filepath.Join(dir, h.subdir)
-		}
-	}
-	switch {
-	case tablesDir == "":
-		return applyAll(graphDir, migrate.GraphDir, dsn)
-	case graphDir == "":
-		return applyAll(tablesDir, migrate.TablesDir, dsn)
-	default:
-		return applyInterleaved(tablesDir, graphDir, dsn)
-	}
-}
-
-// applyInterleaved is applyHalves' both-halves case: the lockstep walk over the
-// generations the two directories hold between them.
-func applyInterleaved(tablesDir, graphDir, dsn string) error {
-	ctx := context.Background()
-	if err := checkDir(tablesDir); err != nil {
-		return err
-	}
-	if err := checkDir(graphDir); err != nil {
-		return err
-	}
-	tableVersions, err := migrate.Versions(tablesDir)
-	if err != nil {
-		return err
-	}
-	graphVersions, err := migrate.Versions(graphDir)
-	if err != nil {
-		return err
-	}
-
-	db, err := connect(dsn)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	tablesAt, err := halfVersion(ctx, db, migrate.TablesDir)
-	if err != nil {
-		return err
-	}
-	graphAt, err := halfVersion(ctx, db, migrate.GraphDir)
-	if err != nil {
-		return err
-	}
-
-	// graphDown stays true from the moment the graph is taken down until a
-	// graph migration puts one back, so the walk drops at most once per run of
-	// consecutive table-only generations — and never on a database with
-	// nothing pending.
-	graphDown := false
-	for _, v := range mergeVersions(tableVersions, graphVersions) {
-		if slices.Contains(tableVersions, v) && v > tablesAt {
-			if !graphDown {
-				dropped, err := releaseGraph(ctx, db, graphDir, graphAt)
-				if err != nil {
-					return err
-				}
-				graphDown = dropped
-			}
-			if err := upTo(ctx, db, tablesDir, migrate.TablesDir, v); err != nil {
-				return err
-			}
-			tablesAt = v
-		}
-		if slices.Contains(graphVersions, v) && v > graphAt {
-			if err := upTo(ctx, db, graphDir, migrate.GraphDir, v); err != nil {
-				return err
-			}
-			graphAt = v
-			graphDown = false
-		}
-	}
-	if graphDown {
-		return restoreGraph(ctx, db, graphDir, graphAt)
-	}
-	return nil
-}
-
-// applyAll applies a whole directory in version order. It is the single-half
-// case: with the other half turned off there is no second half to interleave
-// with, and no property graph of gopgql's to take down first.
-func applyAll(dir, subdir, dsn string) error {
+// A generation is several files and goose runs each in its own transaction, so an
+// interrupted run can stop between the graph teardown and the rebuild, leaving a
+// database whose tables have moved and which has no property graph. Re-running
+// closes the window; queries against the graph fail loudly until then rather than
+// returning wrong rows.
+func apply(dir, dsn string) error {
 	if err := checkDir(dir); err != nil {
 		return err
 	}
@@ -413,101 +325,10 @@ func applyAll(dir, subdir, dsn string) error {
 		return err
 	}
 	defer db.Close()
-	goose.SetTableName(migrate.VersionTable(subdir))
 	if err := goose.UpContext(context.Background(), db, dir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	fmt.Printf("gopgql: applied %s\n", dir)
-	return nil
-}
-
-// mergeVersions is the ascending union of the two halves' version lists: every
-// generation the lockstep walk has to consider, from either directory.
-func mergeVersions(a, b []int64) []int64 {
-	out := make([]int64, 0, len(a)+len(b))
-	out = append(out, a...)
-	out = append(out, b...)
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-// releaseGraph takes down the property graph the graph half has built so far,
-// so the tables half can alter the columns it exposes. It reports whether there
-// was one to take down.
-//
-// It is deliberately not a goose rollback. Rolling the graph directory back to
-// zero and replaying it would re-run historical CREATE PROPERTY GRAPH
-// statements against tables that have since moved on. Only the graph that is
-// live right now has to go — the one folded from graph migrations 1…at, which
-// is why the fold is bounded by the applied version rather than reading the
-// whole directory.
-func releaseGraph(ctx context.Context, db *sql.DB, graphDir string, at int64) (bool, error) {
-	folded, err := migrate.FoldUpTo(graphDir, at)
-	if err != nil {
-		return false, fmt.Errorf("read %s: %w", graphDir, err)
-	}
-	if folded == nil || folded.GraphName == "" {
-		return false, nil
-	}
-	if _, err := db.ExecContext(ctx, migrate.DropGraphSQL(folded.GraphName)); err != nil {
-		return false, fmt.Errorf("release the property graph before altering its tables: %w", err)
-	}
-	return true, nil
-}
-
-// restoreGraph rebuilds the property graph when the tables half had a
-// generation the graph half does not — tables/0003 against a graph directory
-// that ends at 0002, which happens whenever a table changes in a way the graph
-// statement does not mention (a new index, a column no label exposes). The
-// graph came down so the tables could move and nothing followed to put it back,
-// so the applier recreates the graph the graph half still describes.
-//
-// Without this the graph would silently disappear from a database whose table
-// half simply ran ahead.
-func restoreGraph(ctx context.Context, db *sql.DB, graphDir string, at int64) error {
-	folded, err := migrate.FoldUpTo(graphDir, at)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", graphDir, err)
-	}
-	if folded == nil || folded.GraphName == "" {
-		return nil
-	}
-	if _, err := db.ExecContext(ctx, migrate.CreateGraphSQL(folded)); err != nil {
-		return fmt.Errorf("rebuild the property graph after the tables moved: %w", err)
-	}
-	fmt.Printf("gopgql: rebuilt property graph %s\n", folded.GraphName)
-	return nil
-}
-
-// halfVersion reads the version a half's own goose table records.
-//
-// Each half needs its own table: both directories start at 0001, so with
-// goose's single shared table the tables half records version 1 and the graph
-// half's 0001 is then considered already applied and silently skipped — the
-// database ends up with tables and no property graph, and nothing reports a
-// problem.
-func halfVersion(ctx context.Context, db *sql.DB, subdir string) (int64, error) {
-	goose.SetTableName(migrate.VersionTable(subdir))
-	v, err := goose.GetDBVersionContext(ctx, db)
-	if err != nil {
-		if errors.Is(err, goose.ErrNoNextVersion) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read the %s half's migration version: %w", subdir, err)
-	}
-	if v < 0 {
-		return 0, nil
-	}
-	return v, nil
-}
-
-// upTo applies dir up to and including version — one generation of one half.
-func upTo(ctx context.Context, db *sql.DB, dir, subdir string, version int64) error {
-	goose.SetTableName(migrate.VersionTable(subdir))
-	if err := goose.UpToContext(ctx, db, dir, version); err != nil {
-		return fmt.Errorf("goose up %s to %04d: %w", dir, version, err)
-	}
-	fmt.Printf("gopgql: applied %s up to %04d\n", dir, version)
 	return nil
 }
 
