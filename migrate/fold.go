@@ -19,7 +19,6 @@ package migrate
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -70,89 +69,94 @@ func migrationFiles(dir string) ([]migFile, error) {
 	return files, nil
 }
 
-// NextVersion is the version the next generation of migrations takes: one past
-// the highest version either half under root already holds.
-//
-// The two halves share this counter rather than each numbering its own files,
-// so tables/0002 and graph/0002 are always the same edit of the SDL. A half
-// with nothing to emit for a generation leaves a gap at that number, which
-// goose is content with — it only objects to a migration appearing *below* a
-// version it has already applied.
-//
-// Numbering each half by its own file count instead lets the two drift, and the
-// drift is not cosmetic. A generation that changes only the tables — an index,
-// a UNIQUE — advances one half and not the other, and a later graph migration
-// then carries a number lower than the tables migration it was generated
-// against. Since the applier walks the halves by version (gopgql#38), that
-// graph migration is paired with an earlier generation of tables and names a
-// column those tables have not created yet.
-//
-// It is computed once per generation, before either half is written. Deriving
-// it inside each half would cascade: the second half would read the number the
-// first had just written and land a generation further on.
-func NextVersion(root string) (int, error) {
-	last := 0
-	for _, subdir := range []string{TablesDir, GraphDir} {
-		files, err := migrationFiles(filepath.Join(root, subdir))
-		if err != nil {
-			return 0, err
-		}
-		if n := len(files); n > 0 && files[n-1].version > last {
-			last = files[n-1].version
-		}
+// readMigrations reads the Up/Down text of every migration file, in ascending
+// version order — the order folding and ownership both have to read them in.
+func readMigrations(files []migFile) ([]string, error) {
+	if len(files) == 0 {
+		return nil, nil
 	}
-	return last + 1, nil
+	contents := make([]string, len(files))
+	for i, f := range files {
+		data, err := os.ReadFile(f.path)
+		if err != nil {
+			return nil, fmt.Errorf("migrate: read %s: %w", f.path, err)
+		}
+		contents[i] = string(data)
+	}
+	return contents, nil
 }
 
-// Versions lists the goose migration versions present in dir, ascending. A
-// missing or empty directory has none: nothing has been generated for that half
-// yet.
+// Ownership is the set of halves a migration history manages.
 //
-// It is exported because an applier walks the two halves' version lists in
-// lockstep — tables/0001, graph/0001, tables/0002, … — rather than applying
-// either directory whole (gopgql#38).
-func Versions(dir string) ([]int64, error) {
-	files, err := migrationFiles(dir)
-	if err != nil {
-		return nil, err
+// It is read out of the statements the migrations hold, because nothing is
+// recorded: no mode marker, no half marker, no sidecar state (design D1). The
+// evidence that a directory owns the graph half is a CREATE PROPERTY GRAPH in
+// it; the evidence that it owns the tables half is a CREATE TABLE. Neither can
+// drift out of agreement with the SQL beside it, because it *is* the SQL.
+type Ownership struct {
+	Tables bool
+	Graph  bool
+}
+
+// OwnershipOf reads which halves an ordered list of migration contents manages.
+//
+// A directory with no history owns neither, which is what makes the flags scope
+// a directory's *first* generation and nothing after it (design D4a).
+func OwnershipOf(contents []string) (Ownership, error) {
+	var own Ownership
+	for i, content := range contents {
+		stmts, err := ddl.Parse(upSection(content))
+		if err != nil {
+			return own, fmt.Errorf("migrate: read migration %d: %w", i+1, err)
+		}
+		for _, stmt := range stmts {
+			switch stmt.(type) {
+			case *ddl.CreateTableStmt:
+				own.Tables = true
+			case *ddl.CreatePropertyGraphStmt:
+				own.Graph = true
+			}
+		}
 	}
-	out := make([]int64, 0, len(files))
-	for _, f := range files {
-		out = append(out, int64(f.version))
+	return own, nil
+}
+
+// check refuses a turned-off half that the history already manages (design D4a).
+//
+// Turning a half off is a statement about what this directory generates from now
+// on, and letting it disagree with the history is unsafe in both directions:
+// suppressing the graph half would leave table DDL running against a live graph
+// that may depend on the columns it alters, and suppressing the tables half
+// would silently stop emitting table DDL the graph half will later name.
+func (o Ownership) check(h Halves) error {
+	switch {
+	case h.NoGraph && o.Graph:
+		return fmt.Errorf("--no-graph, but a migration in this directory creates a property graph: %w",
+			ErrHalfDisowned)
+	case h.NoTables && o.Tables:
+		return fmt.Errorf("--no-tables, but a migration in this directory creates tables: %w",
+			ErrHalfDisowned)
+	default:
+		return nil
 	}
-	return out, nil
 }
 
 // Fold reads the migrations in dir and folds their Up sections into the schema
 // model they collectively produce. An empty or missing directory yields a nil
 // schema and no error: there is no prior state.
-func Fold(dir string) (*schema.Schema, error) { return FoldUpTo(dir, math.MaxInt64) }
-
-// FoldUpTo folds only the migrations at or below version: the state a database
-// reaches once that generation of the half has been applied, and not a step
-// further.
 //
-// Generations are the unit because the two halves are applied in lockstep
-// (gopgql#38). The graph that has to come down before the tables half lands
-// version n is the one graph migrations 1…n-1 built — folding the whole
-// directory would name the graph the directory *ends* at, which does not exist
-// yet. A version below the first migration yields a nil schema: nothing has
-// been applied.
-func FoldUpTo(dir string, version int64) (*schema.Schema, error) {
+// The whole directory is folded, always. There is no bounded fold any more —
+// the history is one chronological sequence, so the graph the folded state holds
+// is the one created last, which is exactly the graph the next generation's
+// teardown migration has to render (design D6).
+func Fold(dir string) (*schema.Schema, error) {
 	files, err := migrationFiles(dir)
 	if err != nil {
 		return nil, err
 	}
-	var contents []string
-	for _, f := range files {
-		if int64(f.version) > version {
-			break
-		}
-		data, err := os.ReadFile(f.path)
-		if err != nil {
-			return nil, fmt.Errorf("migrate: read %s: %w", f.path, err)
-		}
-		contents = append(contents, string(data))
+	contents, err := readMigrations(files)
+	if err != nil {
+		return nil, err
 	}
 	if len(contents) == 0 {
 		return nil, nil

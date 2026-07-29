@@ -9,10 +9,14 @@ import (
 	"github.com/lega4e/gopgql/schema"
 )
 
-// Delta diffs the folded prior schema against the desired schema and renders
-// the -- +goose Up and -- +goose Down bodies of the next migration. changed is
-// false when the two schemas are already equivalent, in which case there is
-// nothing to migrate and up and down are empty.
+// Delta diffs the folded prior schema against the desired schema and renders one
+// *combined* migration: the graph dropped, the tables migrated, the graph
+// recreated. changed is false when the two schemas are already equivalent.
+//
+// Nothing emits migrations in this shape any more — a generation is a run of
+// single-purpose files (design D2). Like [Init], it is retained as the reference
+// the split is measured against: the integration suite applies it to a fresh
+// database and asserts the sequence reaches the same state.
 //
 // The Up body transforms prior → desired; the Down body is its exact inverse,
 // transforming desired → prior. Property graphs are metadata: every delta drops
@@ -46,13 +50,14 @@ func Delta(from, to *schema.Schema) (up, down string, changed bool) {
 	return joinStmts(upStmts), joinStmts(downStmts), true
 }
 
-// DeltaTables renders the next migration for a tables directory: the structural
-// difference between the two schemas, and nothing about the property graph.
+// DeltaTables renders the table half of a generation: the structural difference
+// between the two schemas, and nothing about the property graph.
 //
 // The graph comparison is skipped entirely rather than being found to be equal.
-// A tables directory's folded history contains no CREATE PROPERTY GRAPH, so its
-// prior state has no graph and a comparison would report a difference on every
-// single run — emitting a graph the directory does not own, forever.
+// A history generated with --no-graph contains no CREATE PROPERTY GRAPH, so its
+// folded prior state has no graph and a comparison would report a difference on
+// every single run — emitting a graph the directory does not manage, forever.
+// Which graph statement a generation needs is [Plan]'s decision, not this one's.
 //
 // Renames are resolved here exactly as [Delta] resolves them, and for the same
 // reason: an ALTER TABLE … RENAME is table work, so the tables half is the half
@@ -78,9 +83,9 @@ func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
 // classifyLike splits prior's tables into vertex and edge tables the way `like`
 // classifies them.
 //
-// A tables-only directory has no CREATE PROPERTY GRAPH, so folding it cannot
-// know which of its tables are vertices and which are edges — it returns them
-// all as vertices. The desired schema is the only place those roles are
+// A history generated with --no-graph has no CREATE PROPERTY GRAPH, so folding it
+// cannot know which of its tables are vertices and which are edges — it returns
+// them all as vertices. The desired schema is the only place those roles are
 // recorded, and using it keeps the diff's ordering guarantees intact: edges are
 // still dropped before the vertices they reference, and created after them. A
 // table whose role genuinely changed is absent from the matching list on one
@@ -102,31 +107,6 @@ func classifyLike(prior, like *schema.Schema) *schema.Schema {
 		out.VertexTables = append(out.VertexTables, vt)
 	}
 	return out
-}
-
-// DeltaGraph renders the next migration for a graph directory: drop the graph
-// the directory last created, create the one the schema now describes.
-//
-// It emits no table statement under any circumstance. The prior state folded
-// from a graph directory has no tables in it, and that absence says nothing
-// about the database — the SDL may describe only the slice surfaced as a graph,
-// with the rest owned by someone else (gopgql#38).
-func DeltaGraph(from, to *schema.Schema) (up, down string, changed bool) {
-	if generator.GraphDDL(from) == generator.GraphDDL(to) {
-		return "", "", false
-	}
-	var ups, downs []string
-	if from.GraphName != "" {
-		ups = append(ups, dropGraphStmt(from.GraphName))
-	}
-	if to.GraphName != "" {
-		ups = append(ups, generator.GraphDDL(to))
-		downs = append(downs, dropGraphStmt(to.GraphName))
-	}
-	if from.GraphName != "" {
-		downs = append(downs, generator.GraphDDL(from))
-	}
-	return joinStmts(ups), joinStmts(downs), true
 }
 
 // schemaDiff is the set of structural differences between two schemas.
