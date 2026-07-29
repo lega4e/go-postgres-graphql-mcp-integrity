@@ -34,7 +34,7 @@
 
     <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <script type="module" crossorigin src="./assets/index-BNrGB5G4.js"></script>
+    <script type="module" crossorigin src="./assets/index-C7ZROl2-.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
   </head>
   <body class="ga-theme">
@@ -63,7 +63,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -183,6 +183,92 @@
               <ga-code id="c-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
               <ga-code id="c-sql" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Constraints: the M7 constraint directives, then the rename hint. -->
+        <div slot="constraints">
+          <p class="panel-hint">
+            <code>@default(value:)</code> and <code>@check(expr:)</code> reach
+            the database <em>as written</em> — they are raw SQL, and the escape
+            hatch is deliberate: whoever writes the SDL already owns the schema.
+            So a check expression names <code>left_at</code>, the physical
+            column, not <code>leftAt</code>, the GraphQL field. Every check is
+            emitted under a name gopgql derives itself
+            (<code>employees_role_check</code>,
+            <code>employees_check_1</code>), because a later delta has to drop
+            it by name and an anonymous constraint would first have to be looked
+            up in a live database.
+          </p>
+          <p class="panel-hint">
+            <code>@key(fields:)</code> is a natural key <strong>alongside</strong>
+            the surrogate <code>id</code>, never in place of it: the table keeps
+            <code>id uuid PRIMARY KEY</code>, gains
+            <code>CONSTRAINT employees_key UNIQUE (tenant, email)</code>, and
+            the key's columns are listed in the property graph's
+            <code>KEY (...)</code> clause — which is what lets the query below
+            select an employee by <code>tenant</code> and <code>email</code>
+            while edges still reference the id.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="k-sdl">GraphQL SDL — schema</label>
+              <textarea id="k-sdl" class="code-input" data-lang="graphql" rows="13" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="k-query">GraphQL query — filtered by the natural key</label>
+              <textarea id="k-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="k-vars">Variables (JSON)</label>
+              <textarea id="k-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="constraints" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="k-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="k-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="k-sql" data-lang="sql"></ga-code>
+              <label>Ordered bind parameters</label>
+              <ga-code id="k-params"></ga-code>
+            </div>
+          </div>
+
+          <hr class="scenario-sep" />
+
+          <p class="panel-hint">
+            <code>@renamedFrom(name:)</code> is a hint, never an inference. A
+            differ sees one column disappear and another appear; it cannot tell
+            a rename from a genuine drop-and-add, and guessing wrong destroys
+            the rows one way or loses them the other. The hint carries the
+            previous <em>GraphQL</em> name, from which gopgql derives the
+            physical names to look for in the folded prior state — so the delta
+            below <em>moves</em> the column instead of dropping one and adding
+            another. Delete the <code>@renamedFrom</code> and watch it become
+            <code>DROP COLUMN</code> + <code>ADD COLUMN</code>. A hint matching
+            nothing in the prior state emits nothing at all, which is what lets
+            the same SDL keep generating cleanly once the rename has landed.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="k-sdl2">GraphQL SDL — revised schema</label>
+              <textarea id="k-sdl2" class="code-input" data-lang="graphql" rows="13" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="rename" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="k-status2" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Delta migration <code>0002</code> (goose)</label>
+              <ga-code id="k-delta" data-lang="sql"></ga-code>
             </div>
           </div>
         </div>
@@ -310,6 +396,60 @@
             <div class="results">
               <label>Delta migration <code>0002</code> (goose)</label>
               <ga-code id="m-delta" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+        <!-- Conformance: the graph mapping generated here, beside a recorded
+             report. The report is a fixture and the panel says so. -->
+        <div slot="conformance">
+          <p class="panel-hint">
+            Folding migrations back into a model is sound only while nobody
+            alters the database out of band. Nothing else in gopgql can notice
+            when someone has: the generator, the differ and the compiler all
+            reason from the SDL, so they would go on agreeing with each other
+            while the database quietly diverged.
+            <code>gopgql conform --sdl … --dsn …</code> is the check on that
+            assumption — it reads the property graph back out of a live database
+            and reports the differences as typed findings.
+          </p>
+          <p class="panel-hint">
+            It compares the <strong>property graph, and only that</strong>:
+            which elements exist, the labels they carry, and the properties they
+            expose — the whole of what <code>pg_propgraph_element</code>,
+            <code>pg_propgraph_label</code> and <code>pg_propgraph_property</code>
+            record. That is why the mapping is shown here on its own. The
+            <code>DEFAULT</code>, the two <code>CHECK</code> constraints and the
+            natural key's <code>UNIQUE</code> that the <em>Constraints</em> tab
+            generates from this very schema are nowhere in it, and are not
+            compared: an empty report means the graph mapping matches the SDL,
+            not that the tables underneath it do. The exit status carries the
+            verdict — <code>0</code> conforms, <code>2</code> drifted, and
+            <code>1</code> for a check that never ran (unparseable schema,
+            unreachable database, missing graph), because those call for
+            completely different next moves.
+          </p>
+          <ga-note>
+            There is no database in a browser, so the report below is a
+            <strong>fixture</strong> — a recorded run of
+            <code>gopgql conform</code>, kept to show the report's structure and
+            all five finding kinds at once. It is the one output on this page
+            that is not generated from your input. The graph mapping above it
+            <em>is</em> generated, here and now, by the same Go the check
+            compares against.
+          </ga-note>
+          <div class="scenario">
+            <div class="results">
+              <label>GraphQL SDL — the schema the check was run against</label>
+              <ga-code id="f-sdl" data-lang="graphql"></ga-code>
+              <label>
+                The graph mapping the SDL describes — generated, and the whole
+                of what <code>conform</code> compares
+              </label>
+              <ga-code id="f-graph" data-lang="sql"></ga-code>
+              <label>
+                An illustrative conformance report — a fixture, not a live check
+              </label>
+              <ga-code id="f-report"></ga-code>
             </div>
           </div>
         </div>
