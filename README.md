@@ -220,6 +220,60 @@ PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
 | *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|
 | *Conformance* | The graph mapping `conform` compares — generated here, and visibly *not* containing the defaults, checks and unique the same schema declares — beside a **fixture** report showing all five finding kinds. A browser has no database, so this is the one output on the page that is not generated, and the panel says so. |
 
+## Install
+
+Two binaries ship: **`gopgql`**, the schema CLI (`generate`, `migrate`,
+`conform`), and **`gopgql-mcp`**, the MCP server. `cmd/wasm` is not among them —
+it is a build target for the docs site, not something to install
+([`SPEC.md` §8.5](./SPEC.md)).
+
+A tagged release publishes both for **linux and macOS, on amd64 and arm64**, on
+the [Releases page](https://github.com/lega4e/gopgql/releases) — one
+`tar.gz` per platform carrying **both** binaries, since the pair is what every
+example uses together. Download the archive for your platform, unpack it, and
+put the binaries on your `PATH`; they are static (`CGO_ENABLED=0`), so there is
+nothing else to install. `gopgql_<version>_checksums.txt` sits beside them.
+
+From source, with a Go toolchain:
+
+```sh
+go install github.com/lega4e/gopgql/cmd/gopgql@latest
+go install github.com/lega4e/gopgql/cmd/gopgql-mcp@latest
+```
+
+`@latest` resolves to the newest release tag; pass `@v1.2.3` to pin one. A
+binary built this way reports `dev` rather than a version — the version, commit
+and build date are stamped by the release pipeline's `-ldflags`, not read from
+the module.
+
+Or as a container image, published to GHCR on every release:
+
+```sh
+docker pull ghcr.io/lega4e/gopgql:latest
+docker run --rm ghcr.io/lega4e/gopgql:latest gopgql version
+```
+
+The image is multi-arch (linux/amd64 and linux/arm64), carries **both** binaries
+in `/usr/local/bin/`, and has **no `ENTRYPOINT` and no `CMD`** — so the command
+is always given explicitly, as above, and a bare `docker run` of the image fails
+rather than quietly starting a shell. That is what keeps it a drop-in for the
+[`examples/`](./examples) compose files, each of which supplies its own command.
+
+Tags are the full version (`1.2.3`), the minor series (`1.2`), and `latest`. A
+prerelease publishes **only** its exact version (`1.2.0-rc.1`): `1.2` and
+`latest` never move to an rc, so following either is always a stable release.
+
+Either binary will tell you what it is:
+
+```sh
+gopgql version          # also: gopgql --version, gopgql -v
+gopgql-mcp --version
+```
+
+Both print one line — `gopgql 1.2.3 (commit abc1234, built 2026-07-30T00:00:00Z)`
+— and exit. `gopgql-mcp --version` answers **before** the schema is loaded and
+the database is pinged, so it works with no `--sdl` and no DSN.
+
 ## Connect an AI agent (MCP)
 
 `cmd/gopgql-mcp` serves one SDL schema and one database over the
@@ -230,6 +284,10 @@ discover what is queryable and query it:
 go build -o gopgql-mcp ./cmd/gopgql-mcp
 claude mcp add gopgql --env GOPGQL_DSN="$GOPGQL_DSN" -- ./gopgql-mcp --sdl schema.graphql
 ```
+
+Building from the checkout is the shortest path when you already have one; an
+installed or downloaded binary ([above](#install)) works the same — drop the
+`go build` line and name the binary instead of `./gopgql-mcp`.
 
 Pass the DSN through the environment, not `--dsn`: an MCP configuration file is
 stored on disk and command-line arguments are visible to every process on the

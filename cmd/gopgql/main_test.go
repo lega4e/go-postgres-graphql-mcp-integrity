@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -196,4 +197,66 @@ func TestUsageDocumentsConform(t *testing.T) {
 func TestHelpExitsZero(t *testing.T) {
 	assert.NoError(t, run([]string{"conform", "--help"}))
 	assert.NoError(t, run([]string{"help"}))
+}
+
+// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
+// wrote. The version line goes to stdout by design — it is the command's output
+// rather than a diagnostic — so checking it means reading the real stream.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	saved := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = saved }()
+
+	fn()
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
+}
+
+// TestVersionDefaults pins the values an unstamped `go build` leaves behind.
+// The release pipeline overrides exactly these three symbols, so a rename here
+// silently produces binaries that report "dev" for every release.
+func TestVersionDefaults(t *testing.T) {
+	assert.Equal(t, "dev", version)
+	assert.Equal(t, "none", commit)
+	assert.Equal(t, "unknown", date)
+}
+
+// TestVersionReportsBuildInfo covers every accepted form of the query. The
+// values are injected with -ldflags at release time, so the assertions are
+// about the shape of the line and about all three variables being read — never
+// about an exact release string.
+func TestVersionReportsBuildInfo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+	}{
+		{name: "subcommand", argv: []string{"version"}},
+		{name: "long flag", argv: []string{"--version"}},
+		{name: "short flag", argv: []string{"-v"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var err error
+			out := captureStdout(t, func() { err = run(tc.argv) })
+			require.NoError(t, err)
+
+			line := strings.TrimSpace(out)
+			assert.Contains(t, line, "gopgql", "the line has to say which binary it came from")
+			// A build that stamped only some of the three is a build nobody can
+			// trace, so each one is asserted where it appears.
+			assert.Contains(t, line, version)
+			assert.Contains(t, line, "commit "+commit)
+			assert.Contains(t, line, "built "+date)
+		})
+	}
+}
+
+// TestUsageDocumentsVersion: the subcommand is only useful if it is
+// discoverable without already knowing it exists.
+func TestUsageDocumentsVersion(t *testing.T) {
+	assert.Contains(t, usage, "version    Print the version, commit and build date")
 }

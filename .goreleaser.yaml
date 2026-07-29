@@ -1,0 +1,166 @@
+# GoReleaser configuration — see https://goreleaser.com
+#
+# Local validation:
+#   make release-check      # schema + template validation
+#   make release-snapshot   # full local build, no publishing, no docker
+#
+# Two binaries ship: `gopgql` (the CLI) and `gopgql-mcp` (the MCP server).
+# cmd/wasm is deliberately absent — its host build is a stub that just exits 1,
+# and the real gopgql.wasm is a docs-site artefact that is never released
+# (SPEC.md §8.3). Adding it here would ship a binary that cannot run.
+version: 2
+
+project_name: gopgql
+
+before:
+  hooks:
+    # `go mod download` rather than `go mod tidy`: tidy can *rewrite* go.mod /
+    # go.sum mid-release, which either fails on a read-only CI checkout or —
+    # worse — silently releases from a dependency set that was never tested.
+    # Download is idempotent and only warms the module cache.
+    - go mod download
+
+builds:
+  # One entry per shippable binary. Both are pure Go (no cgo anywhere in the
+  # module), so CGO_ENABLED=0 gives fully static binaries and lets us
+  # cross-compile every target from a single runner.
+  - id: gopgql
+    main: ./cmd/gopgql
+    binary: gopgql
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    # Injected into the package-level vars in cmd/gopgql/main.go. -s -w drops
+    # the symbol table and DWARF data; nothing here needs a debugger, and it
+    # roughly halves the binary.
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+    # Reproducible builds: stamp binaries with the commit time, not build time.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: gopgql-mcp
+    main: ./cmd/gopgql-mcp
+    binary: gopgql-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  # One archive per platform containing *both* binaries, rather than one archive
+  # per binary. They are not independently useful: `gopgql-mcp` exposes the same
+  # schema over MCP that `gopgql migrate` applies, and every example runs the
+  # pair together. Shipping them separately would just make users download twice.
+  - id: gopgql
+    ids:
+      - gopgql
+      - gopgql-mcp
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      # Glob, not a literal path: the repo has no LICENSE file yet, and a
+      # literal missing path is a hard error. This picks one up automatically
+      # once it lands.
+      - LICENSE*
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+
+snapshot:
+  # No tags exist yet, so `.Version` resolves to 0.0.0 and snapshots build as
+  # 0.0.1-snapshot-<sha>. Keeps `make release-snapshot` output distinguishable
+  # from a real release artefact.
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  # Let GitHub compare the tags; it handles merge commits and squashes better
+  # than parsing `git log` ourselves. Note: this repo has no prior tag, so the
+  # first release's changelog will be the entire history — expected, one-off.
+  use: github
+  sort: asc
+  filters:
+    # Housekeeping commits are noise in a user-facing changelog.
+    exclude:
+      - "^docs?:"
+      - "^chore:"
+      - "^test:"
+      - "^ci:"
+      - "^style:"
+      - "^refactor:"
+      - "^build:"
+      - "^Merge (branch|pull request)"
+
+dockers_v2:
+  # `dockers_v2` (goreleaser 2.12+) replaces the deprecated `dockers` +
+  # `docker_manifests` pair: instead of building one image per architecture,
+  # pushing each under an arch-suffixed tag, and then fusing them with a
+  # manifest, goreleaser runs a single `docker buildx build --platform=…` that
+  # builds and publishes the multi-arch manifest directly. Migration done — see
+  # https://goreleaser.com/deprecations#dockers
+  - id: gopgql
+    images:
+      - "ghcr.io/lega4e/gopgql"
+    # The resulting image list is every non-empty `images` × every non-empty
+    # `tags`, and an empty template result is dropped. That is how the
+    # prerelease guard works now that `dockers_v2` has no `skip_push`: the
+    # exact-version tag is unconditional, while the floating tags render to the
+    # empty string — and so vanish — whenever the tag has a prerelease part
+    # (v1.2.0-rc.1 → `.Prerelease` == "rc.1"). An rc therefore publishes
+    # `1.2.0-rc.1` but never moves `1.2` or `latest`.
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}{{ .Major }}.{{ .Minor }}{{ end }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    # One buildx invocation covers both architectures. Dockerfile.release has a
+    # `RUN apk add`, which executes on the *target* arch, so building the arm64
+    # layer on an amd64 runner needs QEMU registered
+    # (docker/setup-qemu-action in .github/workflows/release.yml).
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    # Both builds, so a single image carries the CLI and the MCP server — the
+    # examples' compose files depend on that (`gopgql migrate` in the init
+    # container, `gopgql-mcp` in the server container, `psql` in the seed step).
+    ids:
+      - gopgql
+      - gopgql-mcp
+    dockerfile: Dockerfile.release
+    # Always re-resolve the alpine base rather than trusting a stale local copy;
+    # a release must not be built on top of an image the runner happens to have.
+    flags:
+      - "--pull"
+    # OCI labels, so `docker inspect` / GHCR's UI can attribute the image.
+    # org.opencontainers.image.licenses is intentionally absent: the repo has no
+    # LICENSE file, and declaring one here would be a claim we can't back.
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "Go library with GraphQL and brand new SQL/PGQ"
+      org.opencontainers.image.url: "https://gopgql.garutyunov.com/"
+      org.opencontainers.image.source: "https://github.com/lega4e/gopgql"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+release:
+  github:
+    owner: lega4e
+    name: gopgql
+  # Mirrors the docker_manifests guard: a `-rc1` / `-beta` tag lands as a
+  # GitHub prerelease rather than the headline release.
+  prerelease: auto

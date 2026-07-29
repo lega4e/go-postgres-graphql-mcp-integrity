@@ -2,6 +2,9 @@
 /bin/
 *.wasm
 
+# GoReleaser output (`make release-snapshot` / `goreleaser release --clean`)
+/dist/
+
 # WASM playground build artefacts (never committed — SPEC.md §8.3)
 /docs/public/gopgql.wasm
 /docs/public/wasm_exec.js

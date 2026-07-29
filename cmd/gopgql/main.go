@@ -57,6 +57,7 @@ Commands:
   generate   Write the next migration for the schema into --dir.
   migrate    Generate (when --sdl is given) and apply --dir to --dsn.
   conform    Report how the database's property graph differs from the SDL.
+  version    Print the version, commit and build date (also --version, -v).
 
 Flags:
   --sdl    Path to the SDL schema.                     (env GOPGQL_SDL)
@@ -89,6 +90,22 @@ const (
 	exitFailure = 1
 	exitDrift   = 2
 )
+
+// Build information, stamped by the release pipeline. Overridden at build time
+// via -ldflags "-X main.version=… -X main.commit=… -X main.date=…"; the
+// defaults are what a plain `go build` leaves behind.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// versionLine renders the build information as the single line the version
+// query prints. gopgql-mcp prints the same shape, so a bug report naming either
+// binary identifies one build.
+func versionLine() string {
+	return fmt.Sprintf("gopgql %s (commit %s, built %s)", version, commit, date)
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -188,6 +205,13 @@ func run(argv []string) error {
 			return errors.New("conform needs a database: pass --dsn or set GOPGQL_DSN")
 		}
 		return conformCheck(context.Background(), *sdlPath, *dsn, *graph)
+	// --version and -v are accepted alongside the subcommand because that is
+	// what a reader reaches for first, and neither form collides with anything:
+	// the flag set defines no -v, and a flag in this position is the command.
+	// The line goes to stdout — it is the command's output, not a diagnostic.
+	case "version", "--version", "-v":
+		fmt.Println(versionLine())
+		return nil
 	case "help", "-h", "--help":
 		fmt.Fprint(os.Stderr, usage)
 		return nil

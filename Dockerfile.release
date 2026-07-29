@@ -1,0 +1,44 @@
+# Release image, built by GoReleaser — not by hand and not by docker compose.
+#
+# Why this is separate from the root Dockerfile: that one compiles inside the
+# image (`FROM golang … go build`) because all three
+# examples/*-graph/docker-compose.yml build it straight from the working tree.
+# GoReleaser has already cross-compiled the binaries by the time it gets here,
+# so recompiling would be slow, would not match the released artefacts, and
+# could not produce a foreign-arch binary without a full cross toolchain.
+# This file therefore just COPYs the binaries GoReleaser puts in the build
+# context. The root Dockerfile must keep working for local compose builds —
+# do not merge the two.
+#
+# The image contract below is what the examples depend on. Keep it exact.
+FROM alpine:3.21
+
+# Load-bearing, not convenience: each example's `seed` service runs
+# `sh -c "psql …"` in *this* image rather than pulling a second postgres image,
+# and the `mcp` healthcheck shells out to wget (BusyBox provides it).
+# A scratch/distroless base would break both.
+RUN apk add --no-cache postgresql17-client
+
+# One buildx run produces every platform, so the context cannot have a single
+# flat pair of binaries. GoReleaser (`dockers_v2`) lays the artefacts out under
+# $TARGETPLATFORM/ — buildx sets that built-in ARG per platform, e.g.
+# `linux/amd64/gopgql`. The `ARG` line is required: built-in args must be
+# redeclared in the stage that consumes them.
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/gopgql /usr/local/bin/gopgql
+COPY $TARGETPLATFORM/gopgql-mcp /usr/local/bin/gopgql-mcp
+
+# Deliberately no ENTRYPOINT and no CMD: the image ships two binaries and the
+# caller picks. Compose supplies `command: ["gopgql", "migrate", …]` for the
+# init container and `command: ["gopgql-mcp", …]` for the server. Adding an
+# entrypoint here would prepend it to those commands and break every example.
+#
+# `CMD []` is load-bearing, not decoration: alpine's own config sets
+# CMD ["/bin/sh"], which this image would otherwise inherit, so "no CMD" would
+# be a comment that the built image contradicts. Resetting it means a bare
+# `docker run <image>` fails loudly with "no command specified" instead of
+# silently starting a shell that exits 0 and looks like a successful run.
+#
+# No EXPOSE and no HEALTHCHECK either — those are per-example concerns and live
+# in the compose files.
+CMD []

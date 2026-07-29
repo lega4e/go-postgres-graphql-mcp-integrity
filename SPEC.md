@@ -492,6 +492,26 @@ jobs:
 
 Integration tests run on `ubuntu-latest` with Docker available; `postgres:19beta2` is pulled and cached. The godog suite is the merge gate. Beta image bumps are a deliberate, separate PR that re-baselines any affected scenarios.
 
+### 8.5 Binary and container distribution
+
+Pages (§8.1–§8.2) publishes the docs site. The binaries and the container image are published by **goreleaser** (v2 schema, `.goreleaser.yaml`), driven from a single tag push.
+
+**Two binaries ship, and only two.** `cmd/gopgql` is the schema CLI (`generate`, `migrate`, `conform`) and `cmd/gopgql-mcp` is the MCP server. `cmd/wasm` is deliberately **excluded**: it is a `GOOS=js GOARCH=wasm` build target for the docs playground, staged by `scripts/build-wasm.sh` and consumed by the site (§8.3), and a `gopgql.wasm` in a release archive would be an artifact nobody could execute.
+
+- **Platform matrix** — `linux` and `darwin` × `amd64` and `arm64`. `CGO_ENABLED=0` and `-trimpath`: the result is a static binary with no toolchain paths baked into it, which is what makes the same artifact usable in a scratch-adjacent container and on a developer's machine. Archives are **one `tar.gz` per platform carrying both binaries**, not one per binary: they are not independently useful, since `gopgql-mcp` serves the same schema `gopgql migrate` applies and the examples run the pair together.
+- **Version stamping** — `-ldflags "-s -w -X main.version=… -X main.commit=… -X main.date=…"`. The version is a release-time input, never derived at runtime from build metadata; a `go build` from a checkout reports `dev`/`none`/`unknown`, which is the honest answer for an untagged binary. `mod_timestamp` is the commit time rather than the build time, so re-releasing the same commit produces the same bytes.
+- **Images** — `ghcr.io/lega4e/gopgql`, multi-arch (`linux/amd64`, `linux/arm64`) via a single `dockers_v2` entry: one `docker buildx build --platform=…` builds both architectures and publishes the manifest directly, replacing the deprecated per-architecture `dockers` + `docker_manifests` pair. This is why `Dockerfile.release` copies from `$TARGETPLATFORM/` — with one build covering every platform, the context cannot hold a single flat pair of binaries. Tags are `{{.Version}}`, `{{.Major}}.{{.Minor}}` and `latest`, so a consumer can pin exactly, follow a minor series, or track the newest release. **The floating tags never move to a prerelease:** `dockers_v2` has no `skip_push`, so the guard is in the tag templates — `{{.Major}}.{{.Minor}}` and `latest` are wrapped in `{{ if not .Prerelease }}`, render empty for a `v1.2.0-rc.1` tag, and empty tags are dropped. An rc therefore publishes `1.2.0-rc.1` and nothing else.
+
+**The release image is a separate Dockerfile.** `Dockerfile.release` builds it; the root `Dockerfile` is left exactly as it is, because all three `examples/*/docker-compose.yml` build it with `context: ../..` and repointing it would break them. The release image's contract is:
+
+- `alpine:3.21` plus `postgresql17-client` — `psql` is present because the examples' seed steps use it.
+- Both binaries at `/usr/local/bin/`.
+- **No `ENTRYPOINT` and no `CMD`.** The command is always supplied by the caller. That is what keeps the image a drop-in for the examples' compose files, each of which runs a different one of the two binaries with its own arguments; an `ENTRYPOINT` would force every one of them to override it.
+
+**The trigger is a semver tag push** — `v[0-9]+.[0-9]+.[0-9]+*`, spelled out rather than `v*` so a non-release tag cannot publish. `permissions: contents: write` (the release and its archives) and `packages: write` (GHCR) are the whole grant, and the workflow's own `GITHUB_TOKEN` authenticates to `ghcr.io`: **no PAT and no repository secret** is required. Checkout is `fetch-depth: 0`, since goreleaser derives the version from the tag and the changelog from the commits since the previous one. `docker/setup-qemu-action` and `docker/setup-buildx-action` precede the release step because the arm64 image is built under emulation on an amd64 runner.
+
+**The test suite does not re-run at release time.** It requires Docker and a real `postgres:19beta2`, has no skip path (§10), and costs up to 20 minutes; running it again on a commit `ci.yml` already proved green on `main` would double the release's runtime to re-test the same tree. The gate is therefore ordering — green CI on `main`, then the tag. What *is* checked on every PR is the release configuration itself: a `release-config` job runs `goreleaser check` and a snapshot build with `--skip=publish,docker,announce`, so a broken `.goreleaser.yaml` fails on the PR rather than after a tag is already pushed and a retag is the only fix. The multi-arch image build is exercised only on a tag.
+
 -----
 
 ## 9. Open decisions

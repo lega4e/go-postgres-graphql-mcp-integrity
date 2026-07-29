@@ -42,9 +42,22 @@ import (
 	"github.com/lega4e/gopgql/sdl"
 )
 
-// version is the implementation version the server reports. It is overridable
-// at build time with -ldflags "-X main.version=…".
-var version = "dev"
+// Build information, stamped by the release pipeline. version is also the
+// implementation version the server reports over MCP. All three are overridable
+// at build time with -ldflags "-X main.version=… -X main.commit=… -X
+// main.date=…"; the defaults are what a plain `go build` leaves behind.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+// versionLine renders the build information as the single line --version
+// prints. gopgql prints the same shape, so a bug report naming either binary
+// identifies one build.
+func versionLine() string {
+	return fmt.Sprintf("gopgql-mcp %s (commit %s, built %s)", version, commit, date)
+}
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -60,8 +73,17 @@ func run(argv []string) error {
 	transport := fs.String("transport", "", `transport: "stdio" (default) or "http" (env GOPGQL_TRANSPORT)`)
 	addr := fs.String("addr", "", `listen address for the http transport, default ":8080" (env GOPGQL_ADDR)`)
 	path := fs.String("path", "", `URL path for the http transport, default "/mcp" (env GOPGQL_PATH)`)
+	showVersion := fs.Bool("version", false, "print the version, commit and build date, then exit")
 	if err := fs.Parse(argv); err != nil {
 		return err
+	}
+
+	// Answered before the environment is resolved and before anything is
+	// validated, so `gopgql-mcp --version` works with no schema, no DSN and no
+	// database — which is how a container image is smoke-tested.
+	if *showVersion {
+		fmt.Println(versionLine())
+		return nil
 	}
 
 	// A flag wins over the environment.
