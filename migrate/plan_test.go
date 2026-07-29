@@ -460,3 +460,33 @@ func baseNames(paths []string) []string {
 	}
 	return out
 }
+
+// TestAHalfCanBeTurnedOnLater is the asymmetry in design D4a that is easy to read
+// past: a flag may not take a half *away* from a directory that manages it, but a
+// directory that never managed one can start. That is the "gopgql manages the
+// tables and the graph comes later" case the proposal names.
+//
+// The generation it produces is a single graph-build file — there is no graph in
+// the history, so there is nothing to tear down first.
+func TestAHalfCanBeTurnedOnLater(t *testing.T) {
+	base := mustSchema(t, baseSDL)
+	dir := t.TempDir()
+
+	_, err := migrate.Generate(dir, base, "init", migrate.Halves{NoGraph: true})
+	require.NoError(t, err, "tables only, to begin with")
+
+	paths, err := migrate.Generate(dir, base, "add graph", migrate.Halves{})
+	require.NoError(t, err, "turning a half on is not a contradiction")
+	assert.Equal(t, []string{"0002_add_graph_graph.sql"}, baseNames(paths),
+		"nothing to tear down, so just the build")
+
+	// And the next generation behaves as any graph-bearing directory does.
+	widened := mustSchema(t, widenedSDL)
+	paths, err = migrate.Generate(dir, widened, "add age", migrate.Halves{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"0003_add_age_graph_down.sql",
+		"0004_add_age_tables.sql",
+		"0005_add_age_graph.sql",
+	}, baseNames(paths))
+}
