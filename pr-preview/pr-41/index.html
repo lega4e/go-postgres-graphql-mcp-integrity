@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <title>gopgql — GraphQL to PostgreSQL 19 SQL/PGQ</title>
+    <meta
+      name="description"
+      content="One annotated GraphQL SDL document is the source of truth for both halves of a PostgreSQL 19 SQL/PGQ application: gopgql generates the DDL and property graph, and compiles GraphQL queries to GRAPH_TABLE. Try it in the browser — it runs as compiled Go."
+    />
+
+    <!-- Open Graph / link-preview metadata. Crawled at build time by
+         garutyunov.com's pet-projects section, which discovers this repo by its
+         `pet-project` topic and reads the card from these tags. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://gopgql.garutyunov.com/" />
+    <meta property="og:title" content="gopgql" />
+    <meta
+      property="og:description"
+      content="One annotated GraphQL SDL document → PostgreSQL 19 SQL/PGQ: generated DDL, compiled GRAPH_TABLE queries, and a browser playground running the real compiled Go."
+    />
+    <meta property="og:image" content="https://gopgql.garutyunov.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="article:published_time" content="2026-07-01" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="gopgql" />
+    <meta
+      name="twitter:description"
+      content="One annotated GraphQL SDL document → PostgreSQL 19 SQL/PGQ, with a browser playground running the real compiled Go."
+    />
+    <meta name="twitter:image" content="https://gopgql.garutyunov.com/og-image.png" />
+
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <script type="module" crossorigin src="./assets/index-C7ZROl2-.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
+  </head>
+  <body class="ga-theme">
+    <main>
+      <header>
+        <h1>gopgql</h1>
+        <p class="tagline">
+          One annotated GraphQL SDL document &rarr; PostgreSQL 19 SQL/PGQ. Each
+          tab below is a complete, editable scenario: put a
+          <strong>schema</strong> and a <strong>query</strong> in on the left,
+          press <strong>Generate</strong>, and read the generated database
+          schema and the compiled query on the right. It runs entirely in your
+          browser as compiled Go (WebAssembly) — the real
+          <code>sdl</code>+<code>generator</code>+<code>migrate</code>+<code>compiler</code>
+          packages, no server and no JavaScript re-implementation. Nothing is
+          hardcoded: every output is generated from your input.
+        </p>
+        <ga-note>
+          There is no database here, so query <em>results</em> can't be shown —
+          only the generated SQL. Shaping rows into nested JSON (with parent
+          dedup) happens at execution time against PostgreSQL; it is covered by
+          the godog integration suite, not this browser demo.
+        </ga-note>
+        <p id="boot" class="status">loading WebAssembly…</p>
+      </header>
+
+      <ga-tabs
+        id="tabs"
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
+      >
+        <!-- Traversal: the multi-hop exit query. -->
+        <div slot="traversal">
+          <p class="panel-hint">
+            Nesting extends one <code>MATCH</code> chain rather than spawning a
+            second query, so a three-hop traversal is still a single
+            <code>GRAPH_TABLE</code>. Argument values travel as bind parameters
+            (<code>$1</code>, …) and are never interpolated, and every pair of
+            vertex positions that could bind the same row is guarded with
+            <code>&lt;&gt;</code> — PostgreSQL does not enforce edge isomorphism.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="t-sdl">GraphQL SDL — schema</label>
+              <textarea id="t-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="t-query">GraphQL query</label>
+              <textarea id="t-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="t-vars">Variables (JSON)</label>
+              <textarea id="t-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="traversal" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="t-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="t-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="t-sql" data-lang="sql"></ga-code>
+              <label>Ordered bind parameters</label>
+              <ga-code id="t-params"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Depth limit: one hop too many. -->
+        <div slot="depth">
+          <p class="panel-hint">
+            SQL/PGQ has no variable-length paths, so gopgql refuses a selection
+            nested past <code>MaxDepth</code> instead of silently truncating the
+            pattern. The rejection is a typed
+            <code>*compiler.DepthExceededError</code> raised at compile time, so
+            no SQL exists to send. The ceiling is per-<code>Compiler</code>
+            configuration (<code>compiler.WithMaxDepth</code>), not a constant —
+            it defaults to <span id="maxdepth">3</span>. Raise it below to
+            compile this four-hop query, or lower it until a shorter one is
+            refused.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="d-sdl">GraphQL SDL — schema</label>
+              <textarea id="d-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="d-query">GraphQL query — one hop too deep</label>
+              <textarea id="d-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="d-vars">Variables (JSON)</label>
+              <textarea id="d-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+
+              <label for="d-max">Max depth (hops from the root field)</label>
+              <input id="d-max" class="code-input num-input" type="number"
+                min="0" max="12" step="1" inputmode="numeric" />
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="depth" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="d-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="d-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="d-sql" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Directives: the M6 column overrides, uniqueness and indexes. -->
+        <div slot="directives">
+          <p class="panel-hint">
+            <code>@column(name:)</code> renames the physical column — and with it
+            the property the graph exposes, which is why the compiled query below
+            projects <code>name</code> while the GraphQL field is still
+            <code>title</code>. <code>@column(type:)</code> overrides the default
+            scalar mapping, <code>@unique</code> makes the database itself reject
+            a duplicate, and <code>@index</code> adds a secondary index with an
+            optional access method — bare, the name is derived from the table and
+            column.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="c-sdl">GraphQL SDL — schema</label>
+              <textarea id="c-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-query">GraphQL query</label>
+              <textarea id="c-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="c-vars">Variables (JSON)</label>
+              <textarea id="c-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="directives" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="c-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="c-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="c-sql" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Constraints: the M7 constraint directives, then the rename hint. -->
+        <div slot="constraints">
+          <p class="panel-hint">
+            <code>@default(value:)</code> and <code>@check(expr:)</code> reach
+            the database <em>as written</em> — they are raw SQL, and the escape
+            hatch is deliberate: whoever writes the SDL already owns the schema.
+            So a check expression names <code>left_at</code>, the physical
+            column, not <code>leftAt</code>, the GraphQL field. Every check is
+            emitted under a name gopgql derives itself
+            (<code>employees_role_check</code>,
+            <code>employees_check_1</code>), because a later delta has to drop
+            it by name and an anonymous constraint would first have to be looked
+            up in a live database.
+          </p>
+          <p class="panel-hint">
+            <code>@key(fields:)</code> is a natural key <strong>alongside</strong>
+            the surrogate <code>id</code>, never in place of it: the table keeps
+            <code>id uuid PRIMARY KEY</code>, gains
+            <code>CONSTRAINT employees_key UNIQUE (tenant, email)</code>, and
+            the key's columns are listed in the property graph's
+            <code>KEY (...)</code> clause — which is what lets the query below
+            select an employee by <code>tenant</code> and <code>email</code>
+            while edges still reference the id.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="k-sdl">GraphQL SDL — schema</label>
+              <textarea id="k-sdl" class="code-input" data-lang="graphql" rows="13" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="k-query">GraphQL query — filtered by the natural key</label>
+              <textarea id="k-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="k-vars">Variables (JSON)</label>
+              <textarea id="k-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="constraints" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="k-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="k-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="k-sql" data-lang="sql"></ga-code>
+              <label>Ordered bind parameters</label>
+              <ga-code id="k-params"></ga-code>
+            </div>
+          </div>
+
+          <hr class="scenario-sep" />
+
+          <p class="panel-hint">
+            <code>@renamedFrom(name:)</code> is a hint, never an inference. A
+            differ sees one column disappear and another appear; it cannot tell
+            a rename from a genuine drop-and-add, and guessing wrong destroys
+            the rows one way or loses them the other. The hint carries the
+            previous <em>GraphQL</em> name, from which gopgql derives the
+            physical names to look for in the folded prior state — so the delta
+            below <em>moves</em> the column instead of dropping one and adding
+            another. Delete the <code>@renamedFrom</code> and watch it become
+            <code>DROP COLUMN</code> + <code>ADD COLUMN</code>. A hint matching
+            nothing in the prior state emits nothing at all, which is what lets
+            the same SDL keep generating cleanly once the rename has landed.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="k-sdl2">GraphQL SDL — revised schema</label>
+              <textarea id="k-sdl2" class="code-input" data-lang="graphql" rows="13" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="rename" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="k-status2" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Delta migration <code>0002</code> (goose)</label>
+              <ga-code id="k-delta" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Multi-pattern: the M5 split into joined GRAPH_TABLE calls. -->
+        <div slot="multipattern">
+          <p class="panel-hint">
+            Selecting two relationships at one level would need comma-separated
+            path patterns in a single <code>MATCH</code> — PG19 parses those but
+            will not execute them. gopgql splits instead: the chain up to the
+            branching level stays one <code>GRAPH_TABLE</code>, each branch
+            becomes its own, and the outer query <code>LEFT JOIN</code>s them on
+            the projected ids. Guards that would have spanned the split move to
+            the <code>ON</code> clause, so a branch still cannot walk back to a
+            vertex an ancestor bound.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="p-sdl">GraphQL SDL — schema</label>
+              <textarea id="p-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="p-query">GraphQL query</label>
+              <textarea id="p-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="p-vars">Variables (JSON)</label>
+              <textarea id="p-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="multipattern" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="p-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="p-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="p-sql" data-lang="sql"></ga-code>
+              <label>Bind parameters</label>
+              <ga-code id="p-params"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Interfaces: shared label and label alternation. -->
+        <div slot="interfaces">
+          <p class="panel-hint">
+            A GraphQL interface makes several tables one queryable position. An
+            interface carrying <code>@node(label:)</code> becomes a label its
+            implementors' tables all expose — <code>(v0 IS actor)</code>; an
+            interface without it is matched by alternation over their own labels
+            — <code>(v0 IS bot|person)</code>. Edit the query to
+            <code>{ profiles { name } }</code> to see the second form.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="i-sdl">GraphQL SDL — schema</label>
+              <textarea id="i-sdl" class="code-input" data-lang="graphql" rows="14" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="i-query">GraphQL query</label>
+              <textarea id="i-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="interfaces" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="i-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="i-schema" data-lang="sql"></ga-code>
+              <label>Database query</label>
+              <ga-code id="i-sql" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Migration: two scenarios, initial then delta. -->
+        <div slot="migration">
+          <p class="panel-hint">
+            The initial <code>0001_init.sql</code> goose migration generated from
+            a schema: the full <code>CREATE</code> DDL, with a
+            <code>-- +goose Down</code> section that is its exact inverse.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="m-sdl">GraphQL SDL — schema</label>
+              <textarea id="m-sdl" class="code-input" data-lang="graphql" rows="10" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="migration" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="m-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Initial migration <code>0001_init.sql</code></label>
+              <ga-code id="m-init" data-lang="sql"></ga-code>
+            </div>
+          </div>
+
+          <hr class="scenario-sep" />
+
+          <p class="panel-hint">
+            Revise that schema and gopgql folds the initial migration back into a
+            model, diffs it, and emits the delta — <code>ALTER TABLE</code> plus a
+            recreated property graph. The revision below is diffed against the
+            schema in the scenario above, so editing either one regenerates it.
+          </p>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="m-sdl2">GraphQL SDL — revised schema</label>
+              <textarea id="m-sdl2" class="code-input" data-lang="graphql" rows="11" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <ga-button class="run" data-scenario="delta" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="m-status2" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Delta migration <code>0002</code> (goose)</label>
+              <ga-code id="m-delta" data-lang="sql"></ga-code>
+            </div>
+          </div>
+        </div>
+        <!-- Conformance: the graph mapping generated here, beside a recorded
+             report. The report is a fixture and the panel says so. -->
+        <div slot="conformance">
+          <p class="panel-hint">
+            Folding migrations back into a model is sound only while nobody
+            alters the database out of band. Nothing else in gopgql can notice
+            when someone has: the generator, the differ and the compiler all
+            reason from the SDL, so they would go on agreeing with each other
+            while the database quietly diverged.
+            <code>gopgql conform --sdl … --dsn …</code> is the check on that
+            assumption — it reads the property graph back out of a live database
+            and reports the differences as typed findings.
+          </p>
+          <p class="panel-hint">
+            It compares the <strong>property graph, and only that</strong>:
+            which elements exist, the labels they carry, and the properties they
+            expose — the whole of what <code>pg_propgraph_element</code>,
+            <code>pg_propgraph_label</code> and <code>pg_propgraph_property</code>
+            record. That is why the mapping is shown here on its own. The
+            <code>DEFAULT</code>, the two <code>CHECK</code> constraints and the
+            natural key's <code>UNIQUE</code> that the <em>Constraints</em> tab
+            generates from this very schema are nowhere in it, and are not
+            compared: an empty report means the graph mapping matches the SDL,
+            not that the tables underneath it do. The exit status carries the
+            verdict — <code>0</code> conforms, <code>2</code> drifted, and
+            <code>1</code> for a check that never ran (unparseable schema,
+            unreachable database, missing graph), because those call for
+            completely different next moves.
+          </p>
+          <ga-note>
+            There is no database in a browser, so the report below is a
+            <strong>fixture</strong> — a recorded run of
+            <code>gopgql conform</code>, kept to show the report's structure and
+            all five finding kinds at once. It is the one output on this page
+            that is not generated from your input. The graph mapping above it
+            <em>is</em> generated, here and now, by the same Go the check
+            compares against.
+          </ga-note>
+          <div class="scenario">
+            <div class="results">
+              <label>GraphQL SDL — the schema the check was run against</label>
+              <ga-code id="f-sdl" data-lang="graphql"></ga-code>
+              <label>
+                The graph mapping the SDL describes — generated, and the whole
+                of what <code>conform</code> compares
+              </label>
+              <ga-code id="f-graph" data-lang="sql"></ga-code>
+              <label>
+                An illustrative conformance report — a fixture, not a live check
+              </label>
+              <ga-code id="f-report"></ga-code>
+            </div>
+          </div>
+        </div>
+      </ga-tabs>
+
+      <footer>
+        <p>
+          gopgql compiles SDL to SQL/PGQ. See the
+          <a href="https://github.com/lega4e/gopgql">source</a> and the
+          project specification for the full milestone plan. Interface built
+          with
+          <a href="https://github.com/lega4e/ui-kit">lega4e/ui-kit</a>.
+        </p>
+      </footer>
+    </main>
+  </body>
+</html>
