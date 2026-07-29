@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // parseOne parses src, requiring exactly one statement, and returns it.
@@ -246,14 +249,18 @@ func TestParseEmpty(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	for _, src := range []string{
-		`SELECT 1`,                             // not a DDL statement gopgql emits
-		`CREATE VIEW v AS SELECT 1`,            // unrecognised CREATE target
-		`CREATE TABLE t ( id uuid`,             // missing ')'
-		`CREATE TABLE t id uuid )`,             // missing '('
-		`ALTER TABLE t RENAME TO u`,            // unsupported action
-		`CREATE INDEX i persons (id)`,          // missing ON
-		`CREATE TABLE t ( id uuid ) EXTRA`,     // trailing tokens
-		`CREATE PROPERTY GRAPH g VERTEX ( t )`, // VERTEX not followed by TABLES
+		`SELECT 1`,                                       // not a DDL statement gopgql emits
+		`CREATE VIEW v AS SELECT 1`,                      // unrecognised CREATE target
+		`CREATE TABLE t ( id uuid`,                       // missing ')'
+		`CREATE TABLE t id uuid )`,                       // missing '('
+		`ALTER TABLE t RENAME`,                           // RENAME with no target
+		`ALTER TABLE t ALTER COLUMN c SET NOT NULL`,      // only the default is alterable
+		`ALTER TABLE t ADD CONSTRAINT c FOREIGN KEY (a)`, // gopgql emits UNIQUE and CHECK only
+		`ALTER TABLE t ADD CONSTRAINT c CHECK ()`,        // an empty check body
+		`ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0`,    // unterminated check body
+		`CREATE INDEX i persons (id)`,                    // missing ON
+		`CREATE TABLE t ( id uuid ) EXTRA`,               // trailing tokens
+		`CREATE PROPERTY GRAPH g VERTEX ( t )`,           // VERTEX not followed by TABLES
 	} {
 		if _, err := Parse(src); err == nil {
 			t.Errorf("Parse(%q): expected error, got none", src)
@@ -294,4 +301,104 @@ func TestParsePropertyGraphMultipleLabels(t *testing.T) {
 	if !reflect.DeepEqual(g.Vertices, want) {
 		t.Errorf("vertices = %+v, want %+v", g.Vertices, want)
 	}
+}
+
+// alterAction parses src as a single ALTER TABLE on the named table and returns
+// its action.
+func alterAction(t *testing.T, src, table string) AlterAction {
+	t.Helper()
+	st, ok := parseOne(t, src).(*AlterTableStmt)
+	require.True(t, ok, "%s must parse as an ALTER TABLE", src)
+	require.Equal(t, table, st.Name)
+	return st.Action
+}
+
+// TestParseAlterTableRename covers the two rename forms. They are read before
+// anything emits one on purpose (design D3): a rename the fold cannot read
+// leaves the next delta computed against a state where the rename never
+// happened, so the differ emits a drop and the renamed data goes with it.
+func TestParseAlterTableRename(t *testing.T) {
+	assert.Equal(t, &RenameTable{NewName: "people"},
+		alterAction(t, `ALTER TABLE persons RENAME TO people`, "persons"))
+
+	assert.Equal(t, &RenameColumn{Name: "email", NewName: "contact"},
+		alterAction(t, `ALTER TABLE persons RENAME COLUMN email TO contact`, "persons"))
+
+	// A reserved word is double-quoted by the emitter on both sides of the
+	// rename and must come back as the bare identifier.
+	assert.Equal(t, &RenameTable{NewName: "order"},
+		alterAction(t, `ALTER TABLE "user" RENAME TO "order"`, "user"))
+}
+
+// TestParseAlterTableConstraints covers ADD/DROP CONSTRAINT for both bodies the
+// emitter produces: the UNIQUE of @unique and of a natural key, and a CHECK.
+func TestParseAlterTableConstraints(t *testing.T) {
+	assert.Equal(t, &AddConstraint{Name: "products_sku_key", Kind: "UNIQUE", Columns: []string{"sku"}},
+		alterAction(t, `ALTER TABLE products ADD CONSTRAINT products_sku_key UNIQUE (sku)`, "products"),
+		"a single-column UNIQUE is what @unique maps to")
+
+	assert.Equal(t, &AddConstraint{Name: "products_key", Kind: "UNIQUE", Columns: []string{"tenant", "sku"}},
+		alterAction(t, `ALTER TABLE products ADD CONSTRAINT products_key UNIQUE (tenant, sku)`, "products"),
+		"a natural key's columns keep their declared order")
+
+	assert.Equal(t, &AddConstraint{Name: "products_price_check", Kind: "CHECK", Expr: "price > 0"},
+		alterAction(t, `ALTER TABLE products ADD CONSTRAINT products_price_check CHECK (price > 0)`, "products"))
+
+	assert.Equal(t, &DropConstraint{Name: "products_price_check"},
+		alterAction(t, `ALTER TABLE products DROP CONSTRAINT products_price_check`, "products"))
+}
+
+// TestParseCheckExprVerbatim proves a check body survives parsing unchanged.
+// gopgql does not parse the expression — PostgreSQL is the authority on whether
+// it is valid (design, Non-Goals) — so the reader has to hand back exactly what
+// the writer wrote, nested parentheses, operators, literals and all.
+func TestParseCheckExprVerbatim(t *testing.T) {
+	for _, expr := range []string{
+		`price > 0`,
+		`(price > 0) AND (discount < price)`,
+		`status IN ('open', 'closed')`,
+		`char_length(sku) > 2`,
+	} {
+		got := alterAction(t, `ALTER TABLE products ADD CONSTRAINT c CHECK (`+expr+`)`, "products")
+		add, ok := got.(*AddConstraint)
+		require.True(t, ok)
+		assert.Equal(t, expr, add.Expr)
+	}
+}
+
+// TestParseAlterColumnDefault covers SET/DROP DEFAULT — the statements that let
+// a default change without the column being dropped and re-added under it.
+func TestParseAlterColumnDefault(t *testing.T) {
+	assert.Equal(t, &SetDefault{Column: "active", Default: "true"},
+		alterAction(t, `ALTER TABLE persons ALTER COLUMN active SET DEFAULT true`, "persons"))
+
+	assert.Equal(t, &SetDefault{Column: "created_at", Default: "now()"},
+		alterAction(t, `ALTER TABLE persons ALTER COLUMN created_at SET DEFAULT now()`, "persons"))
+
+	assert.Equal(t, &SetDefault{Column: "kind", Default: "'person'"},
+		alterAction(t, `ALTER TABLE persons ALTER COLUMN kind SET DEFAULT 'person'`, "persons"),
+		"a quoted default keeps its quotes; it is emitted into DDL verbatim")
+
+	assert.Equal(t, &DropDefault{Column: "active"},
+		alterAction(t, `ALTER TABLE persons ALTER COLUMN active DROP DEFAULT`, "persons"))
+}
+
+// TestParseNamedTableConstraints covers the named constraint forms inside a
+// CREATE TABLE. The name matters as much as the body: a later delta drops a
+// constraint by the name the emitter chose, so a reader that upper-cased or
+// discarded it would break the drop path rather than the create path — the
+// harder failure to see.
+func TestParseNamedTableConstraints(t *testing.T) {
+	st, ok := parseOne(t, `CREATE TABLE products (
+	    tenant text NOT NULL,
+	    sku text NOT NULL,
+	    price double precision,
+	    CONSTRAINT products_key UNIQUE (tenant, sku),
+	    CONSTRAINT products_check_1 CHECK (price > 0)
+	)`).(*CreateTableStmt)
+	require.True(t, ok)
+	assert.Equal(t, []TableConstraint{
+		{Name: "products_key", Kind: "UNIQUE", Columns: []string{"tenant", "sku"}},
+		{Name: "products_check_1", Kind: "CHECK", Expr: "price > 0"},
+	}, st.Constraints)
 }

@@ -65,6 +65,67 @@ const ExampleDirectivesQuery = `{ products(title: $t) { title price category } }
 // ExampleDirectivesVars binds ExampleDirectivesQuery's variable.
 const ExampleDirectivesVars = `{ "t": "Chain" }`
 
+// ExampleConstraintsSDL exercises the whole M7 constraint surface at once
+// (SPEC.md §5, §7 → M7): a column default, a column check, a table-level check
+// spanning two columns, and a two-column natural key.
+//
+// The natural key sits *alongside* the surrogate `id`, which stays the physical
+// identity edges reference (design D1) — the generated DDL keeps
+// `id uuid PRIMARY KEY` and adds `CONSTRAINT employees_key UNIQUE (tenant,
+// email)`, and the property graph lists the key's columns in a `KEY (...)`
+// clause so a MATCH can select a vertex by its data.
+//
+// The check expressions name `left_at` and `joined_at` — the *physical* columns
+// — rather than the GraphQL fields `leftAt` and `joinedAt`. They are raw SQL
+// emitted verbatim (design D6), so they live in the column namespace that
+// @column(name:) defines, not in the schema's.
+const ExampleConstraintsSDL = `type Employee @node(label: "employee")
+              @key(fields: ["tenant", "email"])
+              @check(expr: "left_at IS NULL OR left_at >= joined_at") {
+  id: ID!
+  tenant: String!
+  email: String!
+  role: String! @default(value: "'member'")
+                @check(expr: "role IN ('member', 'admin')")
+  joinedAt: DateTime! @column(name: "joined_at") @default(value: "now()")
+  leftAt: DateTime @column(name: "left_at")
+  reportsTo: [Employee!]! @relationship(type: "reports_to", direction: OUT)
+}`
+
+// ExampleConstraintsQuery selects an employee by the two columns of its natural
+// key. It is the milestone's exit criterion made visible: the key's columns are
+// graph properties, so filtering on them compiles to predicates inside the
+// MATCH rather than to anything the surrogate id has to mediate.
+const ExampleConstraintsQuery = `{ employees(tenant: $t, email: $e) { role joinedAt } }`
+
+// ExampleConstraintsVars binds ExampleConstraintsQuery's two variables.
+const ExampleConstraintsVars = `{ "t": "acme", "e": "ada@acme.example" }`
+
+// RevisedConstraintsSDL renames one field of ExampleConstraintsSDL — `email`
+// becomes `workEmail`, mapped to the column `work_email` — and declares the
+// rename with @renamedFrom. Diffing the two produces a migration that *moves*
+// the column instead of dropping one and adding another, so the rows in it
+// survive.
+//
+// The hint carries the previous **GraphQL** name, not the previous column name;
+// the differ derives the candidate physical names from it and accepts one only
+// when the folded prior state actually holds it (design D2). Nothing here is
+// inferred: without the hint, the same edit is a drop and an add, because a
+// differ cannot tell those apart from a rename and guessing wrong loses the
+// data either way.
+const RevisedConstraintsSDL = `type Employee @node(label: "employee")
+              @key(fields: ["tenant", "workEmail"])
+              @check(expr: "left_at IS NULL OR left_at >= joined_at") {
+  id: ID!
+  tenant: String!
+  workEmail: String! @column(name: "work_email") @renamedFrom(name: "email")
+  role: String! @default(value: "'member'")
+                @check(expr: "role IN ('member', 'admin')")
+  joinedAt: DateTime! @column(name: "joined_at") @default(value: "now()")
+  leftAt: DateTime @column(name: "left_at")
+  reportsTo: [Employee!]! @relationship(type: "reports_to", direction: OUT)
+}`
+
 // ExampleDeepQuery is one hop past the default MaxDepth. It compiles to a typed
 // *compiler.DepthExceededError rather than a truncated pattern: SQL/PGQ has no
 // variable-length paths, so gopgql rejects (SPEC.md §3, decision 3).
@@ -151,6 +212,72 @@ func Schema(sdlSrc string) (string, error) {
 	}
 	return generator.DDL(m), nil
 }
+
+// GraphMapping parses and validates the SDL and returns just the
+// CREATE PROPERTY GRAPH statement generated from it — the graph mapping,
+// without the tables it is drawn over.
+//
+// It exists because that statement is exactly the surface `gopgql conform`
+// compares: PostgreSQL records elements, labels and properties in
+// pg_propgraph_element, pg_propgraph_label and pg_propgraph_property, and
+// records nothing else about them. Showing the mapping on its own says what a
+// conformance report can and cannot be about far better than a paragraph does —
+// everything the surrounding DDL declares (defaults, CHECK and UNIQUE
+// constraints, indexes, column types) is absent from it, and is equally absent
+// from the check.
+//
+// The conform package itself needs a live connection and so sits on the pgx
+// side of the WASM boundary (SPEC.md §4.1, design D5). This package must never
+// import it; what the playground can honestly show is this half of the
+// comparison, generated here and now, next to a recorded report.
+func GraphMapping(sdlSrc string) (string, error) {
+	doc, err := sdl.Parse(sdlSrc)
+	if err != nil {
+		return "", err
+	}
+	m, err := generator.Build(doc, "")
+	if err != nil {
+		return "", err
+	}
+	return generator.GraphDDL(m), nil
+}
+
+// ExampleConformanceReport is a **fixture**: a recorded run of `gopgql conform`
+// against a database that had drifted from ExampleConstraintsSDL. It is not
+// generated, and the page says so — a browser has no database, so a live check
+// is not something this playground can do (design D5). Presenting a fabricated
+// report as a live one would be the one dishonest panel in a playground whose
+// whole claim is that nothing is hardcoded.
+//
+// What it is for is the report's *structure*, which is the part a reader has to
+// understand before they can use the check: five finding kinds, an element and
+// an optional property, and the two sides named SDL and DATABASE with `-` for
+// "nothing there". All five kinds appear once, which no single real drift is
+// likely to produce.
+//
+// It is kept honest in two ways. The drift it describes is drift in
+// ExampleConstraintsSDL's own graph — the same schema the Constraints tab
+// generates, so a reader can check every element and property name against the
+// mapping shown beside it, and TestConformanceReportMatchesTheSchema asserts
+// that correspondence on every build. And the layout is the real one: the
+// column order, the `-` convention and the closing coverage note are what
+// cmd/gopgql prints, so what a reader learns here is what they will see.
+//
+// The exit status is part of the report. `2` means the check ran and found
+// drift; `1` would mean it did not run at all — a schema that would not parse,
+// a database it could not reach, a graph it could not find. Those demand
+// different responses, which is why they are different numbers.
+const ExampleConformanceReport = `$ gopgql conform --sdl schema.graphql --dsn "$GOPGQL_DSN"; echo "exit $?"
+KIND                ELEMENT       PROPERTY      SDL         DATABASE
+UnexpectedElement   audit_events  -             -           audit_event
+LabelMismatch       employees     -             employee    staff
+MissingProperty     employees     left_at       left_at     -
+UnexpectedProperty  employees     legacy_email  -           legacy_email
+MissingElement      reports_to    -             reports_to  -
+
+gopgql: compared elements, labels and properties only; defaults, constraints and indexes are not covered.
+gopgql: property graph "app_graph" has drifted from schema.graphql: 5 findings
+exit 2`
 
 // Compiled is the output of Compile: the GRAPH_TABLE SQL and a human-readable
 // rendering of its ordered bind parameters. Both are pure functions of the

@@ -74,7 +74,10 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 }
 
 func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
-	vt := schema.VertexTable{Name: n.Table, Label: n.Label}
+	vt := schema.VertexTable{Name: n.Table, Label: n.Label, RenamedFrom: n.PriorTableNames()}
+	for _, expr := range n.Checks {
+		vt.Checks = append(vt.Checks, schema.NormalizeExpr(expr))
+	}
 	for _, f := range n.Fields {
 		if !f.IsScalarColumn() {
 			continue
@@ -94,6 +97,12 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 		col := schema.Column{
 			Name: f.ColumnName(), Type: base, Array: f.List,
 			NotNull: f.NonNull, Unique: f.Unique,
+			// @default and @check are raw SQL, emitted verbatim (design D6);
+			// only their whitespace is normalized, so the text survives the
+			// round trip through internal/ddl unchanged.
+			Default:     schema.NormalizeExpr(f.Default),
+			Check:       schema.NormalizeExpr(f.Check),
+			RenamedFrom: f.PriorColumnNames(),
 		}
 		if f.Name == "id" && f.TypeName == "ID" {
 			// Surrogate key (SPEC.md §7 → M1).
@@ -104,7 +113,41 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 		vt.Columns = append(vt.Columns, col)
 		vt.Properties = append(vt.Properties, col.Name)
 	}
+	if err := attachNaturalKey(&vt, n); err != nil {
+		return schema.VertexTable{}, err
+	}
 	return vt, nil
+}
+
+// attachNaturalKey maps a type's @key(fields:) — GraphQL field names — onto the
+// physical columns they produce, preserving the declared order (design D1).
+//
+// sdl.validateNaturalKey has already established that every named field exists
+// and maps to a column, so a miss here is a generator bug rather than an SDL
+// error; it is still reported rather than silently dropped, because a natural
+// key that quietly loses a column is a uniqueness constraint that quietly stops
+// constraining.
+func attachNaturalKey(vt *schema.VertexTable, n *sdl.Node) error {
+	if len(n.NaturalKey) == 0 {
+		return nil
+	}
+	cols := make([]string, 0, len(n.NaturalKey))
+	for _, name := range n.NaturalKey {
+		var f *sdl.Field
+		for _, cand := range n.Fields {
+			if cand.Name == name {
+				f = cand
+				break
+			}
+		}
+		if f == nil || !f.IsScalarColumn() {
+			return fmt.Errorf("generator: %s: @key names field %q, which maps to no column on %s",
+				n.TypeName, name, n.Table)
+		}
+		cols = append(cols, f.ColumnName())
+	}
+	vt.NaturalKey = &schema.NaturalKey{Name: schema.NaturalKeyConstraintName(vt.Name), Columns: cols}
+	return nil
 }
 
 // fieldIndexes collects the secondary indexes requested with @index on a node's
@@ -272,13 +315,80 @@ func withIndexes(m *schema.Schema, table, block string) string {
 func VertexTableDDL(vt *schema.VertexTable) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "CREATE TABLE %s (\n", pgident.Quote(vt.Name))
-	lines := make([]string, len(vt.Columns))
-	for i, c := range vt.Columns {
-		lines[i] = "    " + ColumnDDL(c)
+	lines := make([]string, 0, len(vt.Columns))
+	for _, c := range vt.Columns {
+		lines = append(lines, "    "+ColumnDDL(c))
+	}
+	for _, tc := range TableConstraints(vt) {
+		lines = append(lines, "    "+tc.Body())
 	}
 	b.WriteString(strings.Join(lines, ",\n"))
 	b.WriteString("\n);")
 	return b.String()
+}
+
+// TableConstraint is one named table-level constraint of a vertex table: the
+// natural key's UNIQUE, a column-level CHECK, or a table-level CHECK.
+//
+// It is exported, with TableConstraints, because the migrate package has to emit
+// exactly the same constraints in ALTER form when they appear on a table that
+// already exists — and has to drop them by exactly the same name. Two
+// independent renderings of one naming rule is how the ADD and the DROP end up
+// disagreeing (SPEC.md §7 → M7).
+type TableConstraint struct {
+	// Name is the deterministic constraint name (see the schema package's
+	// *ConstraintName functions).
+	Name string
+	// Kind is "UNIQUE" or "CHECK".
+	Kind string
+	// Columns is the constrained column list for a UNIQUE.
+	Columns []string
+	// Expr is the raw body of a CHECK, emitted verbatim (design D6).
+	Expr string
+}
+
+// Body renders the constraint as it appears inside CREATE TABLE, and after
+// ALTER TABLE … ADD.
+func (c TableConstraint) Body() string {
+	if c.Kind == "CHECK" {
+		return fmt.Sprintf("CONSTRAINT %s CHECK (%s)", pgident.Quote(c.Name), c.Expr)
+	}
+	return fmt.Sprintf("CONSTRAINT %s UNIQUE (%s)", pgident.Quote(c.Name), quoteList(c.Columns))
+}
+
+// TableConstraints lists a vertex table's named constraints in emission order:
+// the natural key first, then one check per column that declares one (in column
+// order), then the table-level checks (in declaration order).
+//
+// A column-level check is emitted as a *named table-level* constraint rather
+// than inline after the column, for two reasons: an anonymous inline check
+// cannot be dropped by a later delta without asking the database what name it
+// invented (design D6), and a named one keeps ColumnDDL — which ADD COLUMN also
+// uses — free of anything the check has to be paired with.
+//
+// It returns nil for a table that declares none, which is what keeps the DDL for
+// a pre-M7 schema byte-identical (task 3.6).
+func TableConstraints(vt *schema.VertexTable) []TableConstraint {
+	var out []TableConstraint
+	if vt.NaturalKey != nil {
+		out = append(out, TableConstraint{
+			Name: vt.NaturalKey.Name, Kind: "UNIQUE", Columns: vt.NaturalKey.Columns,
+		})
+	}
+	for _, c := range vt.Columns {
+		if c.Check == "" {
+			continue
+		}
+		out = append(out, TableConstraint{
+			Name: schema.ColumnCheckConstraintName(vt.Name, c.Name), Kind: "CHECK", Expr: c.Check,
+		})
+	}
+	for i, expr := range vt.Checks {
+		out = append(out, TableConstraint{
+			Name: schema.TableCheckConstraintName(vt.Name, i+1), Kind: "CHECK", Expr: expr,
+		})
+	}
+	return out
 }
 
 // ColumnDDL renders a single column definition (name, type, constraints), as it
@@ -349,8 +459,16 @@ func GraphDDL(m *schema.Schema) string {
 	vlines := make([]string, len(m.VertexTables))
 	for i, vt := range m.VertexTables {
 		var vb strings.Builder
-		fmt.Fprintf(&vb, "    %s LABEL %s PROPERTIES (%s)",
-			pgident.Quote(vt.Name), pgident.Quote(vt.Label), quoteList(vt.Properties))
+		// A natural key names the element's key columns, so a MATCH can select
+		// a vertex by its data (design D1). Without one the clause is omitted
+		// and PostgreSQL falls back to the table's primary key — the surrogate
+		// id — exactly as it did before M7.
+		key := ""
+		if vt.NaturalKey != nil {
+			key = fmt.Sprintf(" KEY (%s)", quoteList(vt.NaturalKey.Columns))
+		}
+		fmt.Fprintf(&vb, "    %s%s LABEL %s PROPERTIES (%s)",
+			pgident.Quote(vt.Name), key, pgident.Quote(vt.Label), quoteList(vt.Properties))
 		// A shared label — one interface, several tables — is a further LABEL
 		// clause on the same table (SPEC.md §7 → M4).
 		for _, extra := range vt.ExtraLabels {
@@ -400,6 +518,16 @@ func validateInvariants(m *schema.Schema) error {
 		for _, c := range vt.Columns {
 			if c.PrimaryKey && !contains(vt.Properties, c.Name) {
 				return fmt.Errorf("generator: vertex %q key %q missing from PROPERTIES (invariant 1)", vt.Name, c.Name)
+			}
+		}
+		// A natural key emits a KEY (...) clause, so its columns are KEY columns
+		// and invariant 1 binds them too — which is also what makes the key
+		// filterable from a MATCH (design D1).
+		if vt.NaturalKey != nil {
+			for _, col := range vt.NaturalKey.Columns {
+				if !contains(vt.Properties, col) {
+					return fmt.Errorf("generator: vertex %q natural key column %q missing from PROPERTIES (invariant 1)", vt.Name, col)
+				}
 			}
 		}
 	}

@@ -9,9 +9,10 @@
 // never fabricates query results, which would require rows from PostgreSQL
 // (SPEC.md §4).
 //
-// Four functions are exported:
+// Five functions are exported:
 //
 //   - gopgqlSchema(sdl) -> {schema, error}
+//   - gopgqlGraph(sdl) -> {graph, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
 //   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, error, depthExceeded, maxDepth}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
@@ -20,6 +21,13 @@
 // page can show it as the designed outcome it is: SQL/PGQ has no
 // variable-length paths, so a selection past MaxDepth is refused at compile
 // time rather than silently truncated (SPEC.md §3, decision 3).
+//
+// There is deliberately no gopgqlConform. The conformance check reads a live
+// database, so the conform package sits on the pgx side of the WASM boundary
+// and nothing here may import it (SPEC.md §4.1, design D5). The page shows the
+// half of the comparison that is computable in a browser — the graph mapping
+// the SDL describes, via gopgqlGraph — beside a recorded report, and says which
+// is which.
 package main
 
 import (
@@ -40,11 +48,12 @@ import (
 // nothing happens. Bump this whenever an exported function's arguments or
 // result shape change — and whenever the page starts depending on a new export,
 // so a panel cannot come up blank against a module that lacks it.
-const apiVersion = 4
+const apiVersion = 5
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
 	js.Global().Set("gopgqlSchema", js.FuncOf(schemaDDL))
+	js.Global().Set("gopgqlGraph", js.FuncOf(graphDDL))
 	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
 	js.Global().Set("gopgqlCompile", js.FuncOf(compile))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
@@ -59,6 +68,14 @@ func main() {
 	js.Global().Set("gopgqlExampleDirectivesVars", js.ValueOf(playground.ExampleDirectivesVars))
 	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
 	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
+	js.Global().Set("gopgqlExampleConstraintsSDL", js.ValueOf(playground.ExampleConstraintsSDL))
+	js.Global().Set("gopgqlExampleConstraintsQuery", js.ValueOf(playground.ExampleConstraintsQuery))
+	js.Global().Set("gopgqlExampleConstraintsVars", js.ValueOf(playground.ExampleConstraintsVars))
+	js.Global().Set("gopgqlRevisedConstraintsSDL", js.ValueOf(playground.RevisedConstraintsSDL))
+	// A fixture, not a result: see playground.ExampleConformanceReport and the
+	// note on the page. It is exported alongside the generated values so the
+	// page has one source for its content, not so it can pass as one of them.
+	js.Global().Set("gopgqlConformanceReport", js.ValueOf(playground.ExampleConformanceReport))
 	js.Global().Set("gopgqlMaxDepth", js.ValueOf(playground.MaxDepth()))
 	// Signal to the page that the WASM module is ready.
 	if cb := js.Global().Get("onGopgqlReady"); cb.Type() == js.TypeFunction {
@@ -83,6 +100,26 @@ func schemaDDL(_ js.Value, args []js.Value) any {
 		return js.ValueOf(result)
 	}
 	result["schema"] = out
+	return js.ValueOf(result)
+}
+
+// graphDDL is bound to window.gopgqlGraph. It expects one string argument: the
+// SDL document. It returns only the CREATE PROPERTY GRAPH statement — the
+// elements, labels and properties, which is the entire surface a conformance
+// check compares, and therefore the honest way to show what that check is
+// about.
+func graphDDL(_ js.Value, args []js.Value) any {
+	result := map[string]any{"graph": "", "error": ""}
+	if len(args) < 1 || args[0].Type() != js.TypeString {
+		result["error"] = "gopgqlGraph expects (sdl) a string argument"
+		return js.ValueOf(result)
+	}
+	out, err := playground.GraphMapping(args[0].String())
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["graph"] = out
 	return js.ValueOf(result)
 }
 
