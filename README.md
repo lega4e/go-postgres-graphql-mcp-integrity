@@ -180,22 +180,30 @@ state file ([`SPEC.md` §3](./SPEC.md) decision 6):
   `CREATE/DROP TABLE`, and a `DROP` + `CREATE PROPERTY GRAPH` (graphs are
   metadata, always recreated), with a `-- +goose Down` section that is the exact
   inverse.
-- **`migrate.GenerateTables` / `migrate.GenerateGraph`** tie them together over a
-  migration directory: fold what is there, diff, and write `NNNN_<name>.sql`.
+- **`migrate.Plan` / `migrate.Generate`** tie them together over a migration
+  directory: fold what is there, work out which single-purpose migrations the
+  change calls for, and write them numbered consecutively.
 
-### Migrations are split in two
+### No migration mixes tables with the graph
 
-`gopgql generate --dir migrations` writes **two** directories:
+`gopgql generate --dir migrations` writes into `migrations/` itself. One edit of
+the SDL emits a run of consecutive migrations, each doing exactly one thing:
 
 ```
-migrations/tables/0001_init.sql   CREATE TABLE, CREATE INDEX
-migrations/graph/0001_init.sql    CREATE PROPERTY GRAPH
+migrations/0001_init_tables.sql             CREATE TABLE, CREATE INDEX
+migrations/0002_init_graph.sql              CREATE PROPERTY GRAPH
+migrations/0003_add_email_graph_down.sql    DROP PROPERTY GRAPH IF EXISTS
+migrations/0004_add_email_tables.sql        ALTER TABLE
+migrations/0005_add_email_graph.sql         CREATE PROPERTY GRAPH
 ```
 
-They are generated, versioned and applied independently, and either can be
-turned off with `--no-tables` or `--no-graph`. Which half a directory owns is
-decided by its path — nothing is recorded inside the files, so a directory
-cannot disagree with itself about what it manages.
+One slug per generation, shared by all of its files, and a suffix saying what each
+file does. The suffix is for humans — nothing is recorded inside a migration and
+nothing is read back out of one. Each file's `Down` is the plain inverse of its own
+`Up`, so `goose down` three times walks that generation back out in exactly
+reverse order: new graph dropped, tables reverted, previous graph restored.
+
+Either half can be turned off with `--no-tables` or `--no-graph`.
 
 Two reasons this matters more than tidiness:
 
@@ -213,40 +221,50 @@ The asymmetry is worth stating plainly, because it is the one way to get this
 wrong: with the tables half **on**, gopgql *is* managing those tables, and a
 column absent from the SDL is a column it will remove.
 
-#### Order matters, generation by generation
+#### `gopgql migrate` is a plain forward apply
 
-`gopgql migrate` sequences both halves for you, and the sequence is **pairwise**:
+Two ordering constraints come from PostgreSQL, not from gopgql:
 
-```
-tables/0001 → graph/0001 → tables/0002 → graph/0002 → …
-```
+1. **Tables before the graph that references them.** Creating a property graph
+   over tables that do not exist is refused.
+2. **The graph down before the columns it exposes change.** PostgreSQL will not
+   drop or retype a column a live property graph exposes.
 
-Applying every table migration and then every graph migration looks equivalent
-and is not. A graph migration names the columns of *its own* generation, so
-replaying `graph/0001` once the tables have already reached `0002` runs a
-historical graph definition against a current schema — it exposes a column
-`0002` dropped or renamed, and PostgreSQL refuses it.
+Both are satisfied by *where the files are and what they are numbered*. A
+generation is emitted teardown → tables → build, so a `CREATE PROPERTY GRAPH` is
+always immediately preceded by the table DDL of its own generation, and always
+preceded by the drop of the graph the generation before it built.
 
-Applying the halves yourself, the two rules are:
+So `gopgql migrate` is `goose up` over the one directory against the one
+`goose_db_version` table. It does not interleave anything, does not walk versions,
+and does not decide that any migration should be skipped — and `goose up` from an
+empty database is correct by construction, because there is no other order in which
+the files could be applied. Applying them with goose directly, or with any tool that
+reads a goose directory, works exactly the same.
 
-1. **Tables before the graph, within a generation.** The graph references the
-   tables; applying it first is refused by the database.
-2. **Take the graph down before changing tables it exposes.** PostgreSQL will
-   not drop or retype a column a live property graph exposes. So a generation
-   with table work reads *graph/<n-1> down → tables/<n> up → graph/<n> up*, and
-   a generation with no table work leaves the graph alone — which is what keeps
-   re-running `gopgql migrate` a genuine no-op.
+One caveat, documented rather than solved: **a generation is not atomic.** goose
+runs each file in its own transaction, so an interrupted apply can stop between the
+teardown and the rebuild, leaving a database whose tables have moved and which has
+no property graph. Re-running `gopgql migrate` continues from where it stopped, and
+queries against the graph fail loudly until then rather than returning wrong rows.
 
-The halves need not be the same length: a change no `CREATE PROPERTY GRAPH`
-statement mentions — a new index, say — gives the tables half a generation the
-graph half skips. The graph still has to come down for those tables to move, so
-`gopgql migrate` rebuilds the graph the graph half still describes once they
-have landed.
+#### The flags scope generation, and only the first one
 
-Which is why the two halves share a version counter rather than each numbering
-its own files: `tables/0002` and `graph/0002` are the same edit of the SDL, and
-a half with nothing to say about a generation leaves a gap instead of
-renumbering the next one down into somebody else's generation.
+`--no-tables` / `--no-graph` change what is **generated**; what is **applied** is
+always the whole directory in version order. Both together is an error — it asks
+for nothing.
+
+They also scope a directory's **first** generation. After that the directory's own
+history decides which halves it manages, and a flag that contradicts it is an
+error: `--no-graph` against a history containing a `CREATE PROPERTY GRAPH`, or
+`--no-tables` against a history that created tables, is refused at generate time
+with nothing written. There is nothing recorded that could drift — the evidence is
+the SQL in the directory, folded the way generation folds it anyway.
+
+Turning a half off is not a way to delete anything. **To drop the property graph,
+generate from a desired schema that declares no graph**: that generation emits the
+`_graph_down` teardown and no rebuild, so the drop is recorded in the history and
+reviewable in the diff.
 
 This builds on **M1** (from `@node`, `@relationship`, `@hasInverse`, `@ignore`;
 surrogate `uuid` keys; the default scalar mapping): **`sdl`** parses/validates

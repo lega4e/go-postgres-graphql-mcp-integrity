@@ -15,7 +15,7 @@ you have read all three:
 ```text
 schema.graphql      the SDL — the whole mapping
 seed.sql            the corpus
-docker-compose.yml  postgres + generate + migrate + seed + mcp
+docker-compose.yml  postgres + init (gopgql migrate) + seed + mcp
 .mcp.json           the URL an agent connects to
 ```
 
@@ -23,41 +23,34 @@ docker-compose.yml  postgres + generate + migrate + seed + mcp
 
 ```sh
 cd examples/docs-graph
-docker compose up -d --build      # postgres, generate, migrate, seed, the server
+docker compose up -d --build      # postgres, migrate, seed, and the server
 ```
 
-Generating and applying are **two** services, because they are two jobs — and
-because what generation produces is **two** migration histories, not one:
+`init` runs `gopgql migrate --sdl schema.graphql`, which generates the migrations
+the SDL calls for and applies them with goose. **One** step, because that is all
+it takes — even though a generation is several files:
 
-```sh
-docker compose logs generate
-# two migration histories, in the order they are applied:
-# /migrations/tables:     ← CREATE TABLE, CREATE INDEX
-# 0001_init.sql
-# /migrations/graph:      ← CREATE PROPERTY GRAPH
-# 0001_init.sql
-
-docker compose logs migrate
-# gopgql: applied /migrations/tables up to 0001
-# gopgql: applied /migrations/graph up to 0001
+```text
+/tmp/migrations/0001_schema_tables.sql   CREATE TABLE, CREATE INDEX
+/tmp/migrations/0002_schema_graph.sql    CREATE PROPERTY GRAPH
 ```
 
-`generate` waits for nothing: the next migration is derived from the SDL and the
-migrations already on disk, so it needs no database at all. `migrate` needs one,
-and applies the two halves **in lockstep, one generation at a time** —
-`tables/0001`, `graph/0001`, `tables/0002`, `graph/0002`, … Each
-`CREATE PROPERTY GRAPH` therefore lands on the tables of its own generation,
-rather than a historical graph definition being replayed against a schema that
-has since moved on. `seed` waits for `migrate` to finish, so it never runs
-against a half-applied schema.
+No migration mixes table DDL with property-graph DDL, and the files are numbered
+in the order they have to run in. A later edit of the SDL that changes a table
+emits three — the graph taken down, the tables migrated, the graph rebuilt over
+them — again numbered consecutively, because PostgreSQL will not alter a column a
+live property graph exposes. So `gopgql migrate` is a plain forward apply in
+version order: it does not interleave anything and does not skip anything, and
+`goose up` over the directory does exactly the same thing.
 
-The migrations live on a named volume, so the history accumulates. Edit
-`schema.graphql`, `docker compose up -d` again, and whichever half actually
-changed gains a `0002` delta. The other simply has no file at `0002` — the two
-share one version counter, so a number is a generation of the SDL rather than a
-count of that half's own files. Re-running with nothing to do applies nothing
-and leaves the property graph up. `docker compose down -v` discards the
-migrations along with the database.
+It is idempotent: goose skips versions it has already applied, so re-running the
+stack is a no-op and the property graph stays up. The `--dir` is ephemeral, so the
+whole history is regenerated from the SDL each run and re-applied from zero — which
+works only because the history is in one directory in chronological order.
+
+One caveat: goose runs each file in its own transaction, so a generation is not
+atomic. An interrupted apply can stop between the graph teardown and the rebuild;
+re-running `gopgql migrate` continues from where it stopped.
 
 Then point an agent at it. Each example ships a `.mcp.json`, so from inside the
 example directory:

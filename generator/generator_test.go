@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/schema"
 	"github.com/lega4e/gopgql/sdl"
@@ -354,4 +356,20 @@ func hasString(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestTheTwoHalvesComposeIntoDDL is the invariant the split rests on: the table
+// blocks and the property-graph block, concatenated, are exactly the whole schema.
+//
+// Nothing ships DDL in the combined shape any more — a generation is a run of
+// single-purpose migrations (gopgql#38, design D2) — so this is the assertion that
+// the split provably loses nothing. Without it, TablesDDL could quietly stop
+// emitting something DDL emits and only an integration suite would notice.
+func TestTheTwoHalvesComposeIntoDDL(t *testing.T) {
+	for _, src := range []string{exampleSDL, interfaceSDL, m6SDL, constraintSDL} {
+		m := buildModel(t, src)
+		assert.Equal(t, generator.DDL(m),
+			generator.TablesDDL(m)+"\n\n"+generator.GraphDDL(m)+"\n",
+			"the two halves must compose into the whole schema")
+	}
 }

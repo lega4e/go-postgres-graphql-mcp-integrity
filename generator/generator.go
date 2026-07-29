@@ -285,10 +285,9 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 // edge tables, each followed by its indexes. It emits nothing about the
 // property graph.
 //
-// This is the half a `tables/` migration directory owns. It is separate from
-// GraphDDL because the two are generated, applied and released independently —
-// a project whose tables are managed elsewhere takes only the graph half
-// (gopgql#38).
+// This is what the `_tables` migration of a generation carries. It is separate
+// from GraphDDL because no migration mixes the two, and because a project whose
+// tables are managed elsewhere generates only the graph half (gopgql#38).
 func TablesDDL(m *schema.Schema) string {
 	var blocks []string
 	for i := range m.VertexTables {
@@ -304,10 +303,11 @@ func TablesDDL(m *schema.Schema) string {
 
 // DDL renders both halves as one block: the tables, then the property graph.
 //
-// Nothing generates migrations in this shape any more — migrations are split
-// into a tables half and a graph half. It is retained because it states the
-// invariant the split rests on: the two halves concatenated are exactly the
-// whole schema, which generator_test asserts.
+// Nothing generates migrations in this shape any more — a generation is a run of
+// single-purpose files (design D2). It is retained because it states the invariant
+// the split rests on: the two halves concatenated are exactly the whole schema,
+// which generator_test asserts, and because the integration suite applies it to a
+// fresh database to prove the sequence reaches the same place.
 func DDL(m *schema.Schema) string {
 	return TablesDDL(m) + "\n\n" + GraphDDL(m) + "\n"
 }

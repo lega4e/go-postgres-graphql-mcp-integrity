@@ -1,17 +1,11 @@
-# One database, three one-shot steps, and the server:
+# Three containers and one on-demand one:
 #
 #   postgres  PostgreSQL 19 (SQL/PGQ), the only stateful piece.
-#   generate  runs `gopgql generate` — one SDL in, TWO migration directories
-#             out. It needs no database, which is why it does not wait for one.
-#   migrate   applies those two directories, in lockstep by generation.
-#   seed      loads the example corpus once the schema is fully applied.
+#   init      runs `gopgql migrate` — SDL in, schema and property graph out.
+#   seed      loads the example corpus once the schema exists.
 #   mcp       the MCP server, over the streamable HTTP transport. It is a
 #             long-running container like any other service, so several agents
 #             can connect to one process — .mcp.json just points at the URL.
-#
-# generate and migrate are separate services on purpose: writing migrations and
-# applying them are different jobs, and the schema and the property graph are
-# different migrations. Running them as one step is what hides both facts.
 name: gopgql-docs-graph
 
 x-dsn: &dsn postgres://gopgql:gopgql@postgres:5432/gopgql?sslmode=disable
@@ -28,65 +22,32 @@ services:
     # example database with example credentials to the network.
     ports:
       - "127.0.0.1:55432:5432"
-    # -h 127.0.0.1 rather than the default unix socket: the postgres image runs
-    # a temporary server on the socket alone while it initialises the data
-    # directory, so a socket check goes green before anything is listening on
-    # TCP — and the very next service then fails to connect.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gopgql -d gopgql -h 127.0.0.1"]
+      test: ["CMD-SHELL", "pg_isready -U gopgql -d gopgql"]
       interval: 2s
       timeout: 3s
       retries: 30
 
-  generate:
-    build:
-      context: ../..
-    volumes:
-      - ./schema.graphql:/example/schema.graphql:ro
-      - migrations:/migrations
-    # One SDL, two migration histories:
-    #
-    #   /migrations/tables/  CREATE TABLE, CREATE INDEX
-    #   /migrations/graph/   CREATE PROPERTY GRAPH
-    #
-    # The `ls` is the point of running this as its own service — the split is
-    # something you can see in `docker compose logs generate`, not something a
-    # comment claims.
-    #
-    # They land on a named volume rather than /tmp, so the history survives the
-    # run: edit schema.graphql, bring the stack up again, and whichever half
-    # actually changed gains a 0002 delta. `docker compose down -v` throws the
-    # migrations away along with the database, which is how you start over.
-    command: ["sh", "-c", "gopgql generate --sdl /example/schema.graphql --dir /migrations && echo && echo 'two migration histories, in the order they are applied:' && echo '/migrations/tables:' && ls -1 /migrations/tables && echo '/migrations/graph:' && ls -1 /migrations/graph"]
-
-  migrate:
+  init:
     build:
       context: ../..
     depends_on:
       postgres:
         condition: service_healthy
-      generate:
-        condition: service_completed_successfully
     environment:
       GOPGQL_DSN: *dsn
-    # Read-only: applying migrations never writes them.
     volumes:
-      - migrations:/migrations:ro
-    # No --sdl. The migrations already exist; this step only applies them.
-    #
-    # The two halves go in in lockstep, one generation at a time —
-    # tables/0001, graph/0001, tables/0002, graph/0002 — so every
-    # CREATE PROPERTY GRAPH lands on the tables of its own generation, and a
-    # live graph is taken down only when there is table work pending behind it.
-    # `docker compose logs migrate` prints one line per half per version, so
-    # the interleaving is visible rather than asserted.
-    command: ["gopgql", "migrate", "--dir", "/migrations"]
+      - ./schema.graphql:/example/schema.graphql:ro
+    # An ephemeral --dir means the initial migration is regenerated every run;
+    # goose skips the versions it has already applied, so this is a no-op on a
+    # database that is already migrated.
+    command: ["gopgql", "migrate", "--sdl", "/example/schema.graphql", "--dir", "/tmp/migrations"]
 
   seed:
     build:
       context: ../..
     depends_on:
-      migrate:
+      init:
         condition: service_completed_successfully
     environment:
       GOPGQL_DSN: *dsn
@@ -115,7 +76,3 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
-
-# The generated migrations, so the two histories outlive a single run.
-volumes:
-  migrations:
