@@ -267,6 +267,24 @@ func TestNoHalfEnvVarsRejectAValueTheyCannotRead(t *testing.T) {
 	}
 }
 
+// TestUsageSeparatesAnInterruptedApplyFromAFailedOne pins the correction to the
+// advice that mattered. "Re-run it and it continues from where it stopped" is
+// true for a crash or a ^C and false for the case an operator is far more likely
+// to hit: a _tables migration that PostgreSQL itself refused. Re-running fails
+// identically, the graph teardown in front of it has already committed, and the
+// only way out is a step back. The usage text has to distinguish the two and
+// name gopgql conform, which is what detects the state.
+func TestUsageSeparatesAnInterruptedApplyFromAFailedOne(t *testing.T) {
+	assert.Contains(t, usage, "gopgql conform reports as \"property\n           graph not found\"",
+		"the state has a detector, and the help is where it gets named")
+	assert.Contains(t, usage, "continues from where it\n                                        stopped",
+		"still the right advice for an interrupted run")
+	assert.Contains(t, usage, "re-running fails identically",
+		"and explicitly not the right advice for a failed _tables migration")
+	assert.Contains(t, usage, "goose down one step",
+		"the only way out, so it must be in the text")
+}
+
 // TestUsageDocumentsTheBooleanEnvVars keeps the accepted values discoverable
 // from the usage text, which is where the variables are announced at all.
 func TestUsageDocumentsTheBooleanEnvVars(t *testing.T) {

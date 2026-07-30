@@ -243,10 +243,22 @@ the files could be applied. Applying them with goose directly, or with any tool 
 reads a goose directory, works exactly the same.
 
 One caveat, documented rather than solved: **a generation is not atomic.** goose
-runs each file in its own transaction, so an interrupted apply can stop between the
-teardown and the rebuild, leaving a database whose tables have moved and which has
-no property graph. Re-running `gopgql migrate` continues from where it stopped, and
-queries against the graph fail loudly until then rather than returning wrong rows.
+runs each file in its own transaction, so an apply that stops between the teardown
+and the rebuild leaves a database whose tables have moved and which has no property
+graph. Queries against the graph fail loudly until it is back rather than returning
+wrong rows, and `gopgql conform` reports the state directly — it exits 1 with
+`property graph not found`.
+
+Getting out of it depends on why the apply stopped:
+
+- **Interrupted** — a crash, a `^C`, a killed pod. Re-running `gopgql migrate`
+  continues from where it stopped.
+- **The `_tables` migration failed** — a `NOT NULL` added over existing rows, a
+  type change PostgreSQL refuses. Re-running fails the same way, because the DDL
+  is the problem; and the graph teardown in front of it has already committed, so
+  replaying from zero is no better. Take the step back with `goose down`, which
+  restores the graph from the teardown's own `Down`, then fix the SDL and
+  generate again.
 
 #### The flags scope generation, and only the first one
 

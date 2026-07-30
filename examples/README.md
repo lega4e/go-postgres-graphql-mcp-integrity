@@ -49,8 +49,11 @@ whole history is regenerated from the SDL each run and re-applied from zero — 
 works only because the history is in one directory in chronological order.
 
 One caveat: goose runs each file in its own transaction, so a generation is not
-atomic. An interrupted apply can stop between the graph teardown and the rebuild;
-re-running `gopgql migrate` continues from where it stopped.
+atomic. An apply that stops between the graph teardown and the rebuild leaves the
+database with no property graph, which `gopgql conform` reports as `property graph
+not found`. If it was interrupted, re-running `gopgql migrate` continues from where
+it stopped. If the `_tables` migration itself failed, re-running fails the same way
+— take the step back with `goose down` to restore the graph, then fix the SDL.
 
 Then point an agent at it. Each example ships a `.mcp.json`, so from inside the
 example directory:
