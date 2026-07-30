@@ -452,6 +452,35 @@ func TestErrHalfDisownedIsASentinel(t *testing.T) {
 	require.True(t, errors.Is(err, migrate.ErrHalfDisowned))
 }
 
+// TestTheRefusalCarriesItsHalf is what lets the CLI pick its guidance from the
+// error instead of re-reading the flags: the half is on the error, and the
+// umbrella sentinel still matches so no existing caller has to change.
+func TestTheRefusalCarriesItsHalf(t *testing.T) {
+	base := mustSchema(t, baseSDL)
+
+	for _, tc := range []struct {
+		name string
+		then migrate.Halves
+		want migrate.Half
+	}{
+		{name: "--no-graph", then: migrate.Halves{NoGraph: true}, want: migrate.GraphHalf},
+		{name: "--no-tables", then: migrate.Halves{NoTables: true}, want: migrate.TablesHalf},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, err := migrate.Generate(dir, base, "init", migrate.Halves{})
+			require.NoError(t, err)
+
+			_, err = migrate.Generate(dir, base, "again", tc.then)
+			var conflict *migrate.HalfConflictError
+			require.ErrorAs(t, err, &conflict)
+			assert.Equal(t, tc.want, conflict.Half)
+			assert.ErrorIs(t, err, migrate.ErrHalfDisowned,
+				"the umbrella sentinel still matches")
+		})
+	}
+}
+
 // baseNames reduces written paths to their filenames.
 func baseNames(paths []string) []string {
 	out := make([]string, len(paths))
