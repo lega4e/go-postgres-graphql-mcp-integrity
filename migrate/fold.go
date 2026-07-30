@@ -121,19 +121,33 @@ func OwnershipOf(contents []string) (Ownership, error) {
 	return own, nil
 }
 
-// check refuses a turned-off half that the history already manages (design D4a).
+// check refuses halves that contradict the history (design D4a). hasHistory says
+// whether the directory has any migrations at all, which is what makes the flags
+// scope a *first* generation and nothing after it.
 //
 // Turning a half off is a statement about what this directory generates from now
 // on, and letting it disagree with the history is unsafe in both directions:
 // suppressing the graph half would leave table DDL running against a live graph
 // that may depend on the columns it alters, and suppressing the tables half
 // would silently stop emitting table DDL the graph half will later name.
-func (o Ownership) check(h Halves) error {
+//
+// Turning a half *on* is refused for the tables half only, and the asymmetry is
+// the point. A directory that never owned a graph may start owning one: a graph
+// is derivable from the SDL alone, so the generation is a lone graph build with
+// nothing to tear down. A directory that never owned tables may not, because it
+// has no prior columns to diff against — a graph-only history folds its vertex
+// tables with nil columns (that partial fold is design D6, working as intended),
+// so every desired column reads as new and the emitted ALTER TABLE re-adds
+// columns that already exist. It fails *after* the graph teardown has committed,
+// which leaves the directory unapplyable forwards and unreplayable from zero.
+func (o Ownership) check(h Halves, hasHistory bool) error {
 	switch {
 	case h.NoGraph && o.Graph:
 		return &HalfConflictError{Half: GraphHalf}
 	case h.NoTables && o.Tables:
 		return &HalfConflictError{Half: TablesHalf}
+	case hasHistory && !h.NoTables && !o.Tables:
+		return &HalfConflictError{Half: TablesHalf, Adopting: true}
 	default:
 		return nil
 	}

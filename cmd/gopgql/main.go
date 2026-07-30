@@ -252,38 +252,51 @@ func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
 	return nil
 }
 
-// The guidance printed when a turned-off half contradicts the directory's own
+// The guidance printed when the requested halves contradict the directory's own
 // history (design D4a). The refusal itself says what the contradiction is; this
-// says what to do instead, which differs per half — and for --no-graph the
+// says what to do instead, which differs per case — and for --no-graph the
 // legitimate reason to want it is to get rid of the graph, so the message names
 // the deliberate way to do that.
 const (
-	graphDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
-		"To drop the property graph, generate from a desired schema that declares no\n" +
+	graphDisownGuidance = "To drop the property graph, generate from a desired schema that declares no\n" +
 		"graph: that emits the graph-teardown migration and no rebuild, so the drop is\n" +
 		"recorded in the history and reviewable in the diff."
 
-	tablesDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
-		"To hand the tables to another tool from now on, generate the graph half into a\n" +
+	tablesDisownGuidance = "To hand the tables to another tool from now on, generate the graph half into a\n" +
 		"fresh --dir: suppressing table DDL in a directory that creates tables would\n" +
 		"leave the graph half naming columns nothing creates."
+
+	tablesAdoptGuidance = "To start managing the tables here too, generate both halves into a fresh\n" +
+		"--dir. This history creates no tables, so there is no prior column to diff\n" +
+		"against: every column would be emitted as a fresh ADD COLUMN against tables\n" +
+		"that already have them, and it would fail only after the graph teardown had\n" +
+		"committed — leaving the database with no property graph and this directory\n" +
+		"unapplyable. Pass --no-tables to keep generating the graph half alone."
 )
 
-// disownGuidance appends the per-half guidance to the refusal.
+// disownGuidance appends the guidance for this refusal to it.
 //
 // The refusal is migrate's, because that is where the history is read; the
-// guidance is the CLI's, because it is about flags. The branch reads the half
+// guidance is the CLI's, because it is about flags. The branch reads the case
 // off the error rather than off the flags, so it stays correct however the
-// flags are combined.
+// flags are combined — and the adopt case has no flag to read at all.
 func disownGuidance(err error) error {
 	var conflict *migrate.HalfConflictError
 	if !errors.As(err, &conflict) {
 		return err
 	}
-	if conflict.Half == migrate.GraphHalf {
-		return fmt.Errorf("%w\n\n%s", err, graphDisownGuidance)
+	var guidance string
+	switch {
+	case conflict.Adopting:
+		// Only the tables half is ever refused in this direction: a graph is
+		// derivable from the SDL alone, so adopting one is legitimate.
+		guidance = tablesAdoptGuidance
+	case conflict.Half == migrate.GraphHalf:
+		guidance = graphDisownGuidance
+	default:
+		guidance = tablesDisownGuidance
 	}
-	return fmt.Errorf("%w\n\n%s", err, tablesDisownGuidance)
+	return fmt.Errorf("%w\n\n%s", err, guidance)
 }
 
 // build parses and validates the SDL and returns the physical schema model.
