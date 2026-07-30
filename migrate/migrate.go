@@ -102,14 +102,63 @@ func (m Migration) Filename() string {
 // goose's markers.
 func (m Migration) Content() string { return section(m.Up, m.Down) }
 
+// Half names one of the two halves of a schema a migration directory manages.
+// It spells itself the way the flag that turns it off does.
+type Half int
+
+const (
+	TablesHalf Half = iota
+	GraphHalf
+)
+
+// String is the half's name, as `--no-<name>` spells it.
+func (h Half) String() string {
+	if h == GraphHalf {
+		return "graph"
+	}
+	return "tables"
+}
+
+// creates is the statement whose presence in a history is the evidence that a
+// directory owns the half (design D1). It is what a refusal names as the thing
+// it saw, so the message points at the SQL the operator can go and read.
+func (h Half) creates() string {
+	if h == GraphHalf {
+		return "creates a property graph"
+	}
+	return "creates tables"
+}
+
 // ErrHalfDisowned reports that a turned-off half contradicts the halves the
 // migration directory's own history already manages (design D4a).
 //
-// It is a sentinel because a caller has to branch on it: the operator's next
-// move depends on which half they tried to disown, and the CLI adds that
-// guidance to the message.
+// Every such refusal is a [HalfConflictError] and matches this sentinel, which
+// remains the umbrella for a caller that only wants to know that the halves and
+// the history disagree, not which half did.
 var ErrHalfDisowned = errors.New(
 	"a half cannot be turned off for a directory whose history already manages it")
+
+// HalfConflictError is the refusal itself, carrying the half it is about.
+//
+// The half is a field rather than prose because the CLI has to branch on it:
+// the operator's next move differs per half. Recovering the half from the
+// *flags* instead — which is what the CLI used to do — works only while
+// --no-tables and --no-graph can never both be set, an invariant held in
+// another package with nothing asserting the link. Carrying the half on the
+// error lets the branch answer the error it was actually given.
+type HalfConflictError struct {
+	// Half is the half the requested halves and the history disagree about.
+	Half Half
+}
+
+func (e *HalfConflictError) Error() string {
+	return fmt.Sprintf("--no-%s, but a migration in this directory %s: %s",
+		e.Half, e.Half.creates(), ErrHalfDisowned)
+}
+
+// Is matches the umbrella sentinel, so errors.Is(err, ErrHalfDisowned) keeps
+// recognising every one of these refusals.
+func (e *HalfConflictError) Is(target error) bool { return target == ErrHalfDisowned }
 
 // Plan renders the migrations one edit of the schema emits, in the order they
 // must be applied. An unchanged schema plans nothing.

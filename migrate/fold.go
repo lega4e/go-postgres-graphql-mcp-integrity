@@ -131,11 +131,9 @@ func OwnershipOf(contents []string) (Ownership, error) {
 func (o Ownership) check(h Halves) error {
 	switch {
 	case h.NoGraph && o.Graph:
-		return fmt.Errorf("--no-graph, but a migration in this directory creates a property graph: %w",
-			ErrHalfDisowned)
+		return &HalfConflictError{Half: GraphHalf}
 	case h.NoTables && o.Tables:
-		return fmt.Errorf("--no-tables, but a migration in this directory creates tables: %w",
-			ErrHalfDisowned)
+		return &HalfConflictError{Half: TablesHalf}
 	default:
 		return nil
 	}

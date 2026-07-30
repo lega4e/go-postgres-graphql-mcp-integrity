@@ -240,7 +240,7 @@ func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
 	}
 	paths, err := migrate.Generate(dir, model, name, halves)
 	if err != nil {
-		return disownGuidance(err, halves)
+		return disownGuidance(err)
 	}
 	if len(paths) == 0 {
 		fmt.Printf("gopgql: %s is already up to date with %s\n", dir, sdlPath)
@@ -269,23 +269,21 @@ const (
 		"leave the graph half naming columns nothing creates."
 )
 
-// disownGuidance appends the per-half guidance to the sentinel refusal.
+// disownGuidance appends the per-half guidance to the refusal.
 //
 // The refusal is migrate's, because that is where the history is read; the
-// guidance is the CLI's, because it is about flags. Which half was turned off is
-// known here and nowhere else, so the branch belongs here too.
-func disownGuidance(err error, halves migrate.Halves) error {
-	if !errors.Is(err, migrate.ErrHalfDisowned) {
+// guidance is the CLI's, because it is about flags. The branch reads the half
+// off the error rather than off the flags, so it stays correct however the
+// flags are combined.
+func disownGuidance(err error) error {
+	var conflict *migrate.HalfConflictError
+	if !errors.As(err, &conflict) {
 		return err
 	}
-	switch {
-	case halves.NoGraph:
+	if conflict.Half == migrate.GraphHalf {
 		return fmt.Errorf("%w\n\n%s", err, graphDisownGuidance)
-	case halves.NoTables:
-		return fmt.Errorf("%w\n\n%s", err, tablesDisownGuidance)
-	default:
-		return err
 	}
+	return fmt.Errorf("%w\n\n%s", err, tablesDisownGuidance)
 }
 
 // build parses and validates the SDL and returns the physical schema model.
