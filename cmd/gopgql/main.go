@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"text/tabwriter"
 
 	// Registers the "pgx" database/sql driver goose runs through.
@@ -87,7 +88,9 @@ Flags:
            applying is always the whole directory.
   --name   Descriptive suffix for a generated delta. Default "schema".
   --graph  Property-graph name. Default is the generator's.
-A flag wins over its environment variable.
+A flag wins over its environment variable. GOPGQL_NO_TABLES and GOPGQL_NO_GRAPH
+take a boolean — true/false, 1/0, t/f — and an unset or empty one is false;
+anything else is an error rather than a guessed default.
 
 Exit status:
   0  Success — for conform, the database matches the SDL.
@@ -185,12 +188,18 @@ func run(argv []string) error {
 	if *dir == "" {
 		*dir = "migrations"
 	}
-	if !*noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
-		*noTables = true
+	// The boolean pair is read the same way, except that their values have to be
+	// parsed rather than merely tested for emptiness — see [envBool].
+	noTablesEnv, err := envBool("GOPGQL_NO_TABLES")
+	if err != nil {
+		return err
 	}
-	if !*noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
-		*noGraph = true
+	noGraphEnv, err := envBool("GOPGQL_NO_GRAPH")
+	if err != nil {
+		return err
 	}
+	*noTables = *noTables || noTablesEnv
+	*noGraph = *noGraph || noGraphEnv
 	if *noTables && *noGraph {
 		return errors.New("--no-tables and --no-graph together leave nothing to do")
 	}
@@ -230,6 +239,30 @@ func run(argv []string) error {
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+// envBool reads a boolean environment variable. Unset or empty is false.
+//
+// It parses the value rather than testing it for emptiness, because these two
+// variables are documented surface and `false` is exactly what a compose file or
+// a Helm values block writes for "off". Treating any non-empty string as true
+// made GOPGQL_NO_TABLES=false turn the tables half *off* — the opposite of what
+// it says.
+//
+// Anything strconv.ParseBool does not recognise is an error rather than a silent
+// default, because both defaults are wrong to guess at: choosing false ignores
+// an operator who meant to disable a half, and choosing true disables one they
+// never asked to.
+func envBool(name string) (bool, error) {
+	raw, ok := os.LookupEnv(name)
+	if !ok || raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a boolean: use true/false, 1/0, t/f, TRUE/FALSE", name, raw)
+	}
+	return v, nil
 }
 
 // generate writes the generation the SDL calls for into dir.
