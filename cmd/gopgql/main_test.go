@@ -30,11 +30,16 @@ type Person @node(label: "person") {
 // test must not depend on the network resolving or timing out.
 const unreachableDSN = "postgres://gopgql@127.0.0.1:1/gopgql?sslmode=disable&connect_timeout=1"
 
-// writeSDL puts a schema in a temp file and returns its path.
-func writeSDL(t *testing.T, source string) string {
+// writeSDL puts [minimalSDL] in a temp file and returns its path.
+//
+// It takes no schema because every test here wants the same one: what is under
+// test in this package is the CLI's flag, environment and exit-status handling,
+// and the SDL is only the input those need in order to have something to run
+// against. Schema-dependent behaviour is tested where the schema is read.
+func writeSDL(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "schema.graphql")
-	require.NoError(t, os.WriteFile(path, []byte(source), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(minimalSDL), 0o600))
 	return path
 }
 
@@ -132,7 +137,7 @@ func TestConformRequiresBothSides(t *testing.T) {
 	assert.Contains(t, err.Error(), "--sdl")
 	assert.Equal(t, exitFailure, exitCode(err))
 
-	err = run([]string{"conform", "--sdl", writeSDL(t, minimalSDL)})
+	err = run([]string{"conform", "--sdl", writeSDL(t)})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--dsn")
 	assert.Equal(t, exitFailure, exitCode(err))
@@ -142,7 +147,7 @@ func TestConformRequiresBothSides(t *testing.T) {
 // conform resolves --sdl and --dsn exactly as generate and migrate do, so an
 // init container that already exports them needs no extra flags.
 func TestConformReadsSDLFromTheEnvironment(t *testing.T) {
-	t.Setenv("GOPGQL_SDL", writeSDL(t, minimalSDL))
+	t.Setenv("GOPGQL_SDL", writeSDL(t))
 	t.Setenv("GOPGQL_DSN", "")
 
 	err := run([]string{"conform"})
@@ -159,7 +164,7 @@ func TestConformUnreachableDatabaseIsNotDrift(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	err := conformCheck(ctx, writeSDL(t, minimalSDL), unreachableDSN, "")
+	err := conformCheck(ctx, writeSDL(t), unreachableDSN, "")
 	require.Error(t, err)
 
 	var drift *driftError
@@ -233,7 +238,7 @@ func TestNoHalfEnvVarsParseTheirValue(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "migrations")
 
 			require.NoError(t, run([]string{"generate",
-				"--sdl", writeSDL(t, minimalSDL), "--dir", dir, "--name", "env"}))
+				"--sdl", writeSDL(t), "--dir", dir, "--name", "env"}))
 
 			assert.Equal(t, tc.want, strings.Join(written(t, dir), ","))
 		})
@@ -252,7 +257,7 @@ func TestNoHalfEnvVarsRejectAValueTheyCannotRead(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "migrations")
 
 			err := run([]string{"generate",
-				"--sdl", writeSDL(t, minimalSDL), "--dir", dir, "--name", "env"})
+				"--sdl", writeSDL(t), "--dir", dir, "--name", "env"})
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), name)
