@@ -281,9 +281,14 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 	return edges
 }
 
-// DDL renders the physical schema to a single DDL block: vertex tables, edge
-// tables with their destination-key indexes, then the property graph.
-func DDL(m *schema.Schema) string {
+// TablesDDL renders the table half of the physical schema: vertex tables, then
+// edge tables, each followed by its indexes. It emits nothing about the
+// property graph.
+//
+// This is what the `_tables` migration of a generation carries. It is separate
+// from GraphDDL because no migration mixes the two, and because a project whose
+// tables are managed elsewhere generates only the graph half (gopgql#38).
+func TablesDDL(m *schema.Schema) string {
 	var blocks []string
 	for i := range m.VertexTables {
 		vt := &m.VertexTables[i]
@@ -293,8 +298,18 @@ func DDL(m *schema.Schema) string {
 		e := &m.EdgeTables[i]
 		blocks = append(blocks, withIndexes(m, e.Name, EdgeTableDDL(e)))
 	}
-	blocks = append(blocks, GraphDDL(m))
-	return strings.Join(blocks, "\n\n") + "\n"
+	return strings.Join(blocks, "\n\n")
+}
+
+// DDL renders both halves as one block: the tables, then the property graph.
+//
+// Nothing generates migrations in this shape any more — a generation is a run of
+// single-purpose files (design D2). It is retained because it states the invariant
+// the split rests on: the two halves concatenated are exactly the whole schema,
+// which generator_test asserts, and because the integration suite applies it to a
+// fresh database to prove the sequence reaches the same place.
+func DDL(m *schema.Schema) string {
+	return TablesDDL(m) + "\n\n" + GraphDDL(m) + "\n"
 }
 
 // withIndexes appends a table's CREATE INDEX statements to its CREATE TABLE

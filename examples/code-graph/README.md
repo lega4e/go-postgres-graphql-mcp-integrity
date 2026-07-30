@@ -21,6 +21,12 @@ docker compose up -d --build          # postgres, migrate, seed, and the server
 claude --mcp-config .mcp.json         # the server is at http://localhost:8766/mcp
 ```
 
+The `migrate` step generates the migrations from `schema.graphql` and applies
+them in one go: a tables migration and, numbered after it, the
+`CREATE PROPERTY GRAPH` over them — no file mixes the two. Editing the SDL adds
+consecutive migrations (graph down, tables, graph up) and one `gopgql migrate`
+applies them in that order. See [../README.md](../README.md).
+
 ## Questions worth asking it
 
 - *"What does `Server.Query` call?"* — the hub both tools go through.

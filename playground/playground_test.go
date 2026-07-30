@@ -4,20 +4,35 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lega4e/gopgql/playground"
 )
 
 func TestMigration(t *testing.T) {
 	mig, err := playground.Migration(playground.ExampleSDL)
-	if err != nil {
-		t.Fatalf("Migration: %v", err)
+	require.NoError(t, err, "Migration")
+
+	// One directory, consecutive single-purpose files, each labelled with the
+	// name gopgql writes it under (gopgql#38).
+	for _, want := range []string{
+		"-- migrations/0001_init_tables.sql",
+		"-- migrations/0002_init_graph.sql",
+		"CREATE PROPERTY GRAPH app_graph",
+	} {
+		assert.Contains(t, mig, want)
 	}
-	if !strings.HasPrefix(mig, "-- +goose Up\n") {
-		t.Error("migration must be goose-formatted")
-	}
-	if !strings.Contains(mig, "CREATE PROPERTY GRAPH app_graph") {
-		t.Error("migration must create the property graph")
-	}
+	assert.Equal(t, 2, strings.Count(mig, "-- +goose Up\n"), "expected two goose files:\n%s", mig)
+	assert.NotContains(t, mig, "migrations/tables/", "there are no per-half subdirectories any more")
+
+	// Neither file carries the other's statements.
+	tables, graph, ok := strings.Cut(mig, "-- migrations/0002_init_graph.sql")
+	require.True(t, ok, "could not split the sequence:\n%s", mig)
+	assert.NotContains(t, tables, "CREATE PROPERTY GRAPH",
+		"the tables migration must not create the property graph")
+	assert.NotContains(t, graph, "CREATE TABLE",
+		"the graph migration must not create tables")
 }
 
 // TestSchema covers the DDL each scenario shows beside its compiled query: the

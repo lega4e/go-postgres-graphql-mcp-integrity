@@ -185,10 +185,14 @@ func runSuite(m *testing.M) int {
 // env is one test's private database plus the migration directory and the SDL
 // document that were used to build it.
 type env struct {
-	t     *testing.T
-	ctx   context.Context
-	dsn   string
-	pool  *pgxpool.Pool
+	t   *testing.T
+	ctx context.Context
+	dsn string
+	// pool is the handle every assertion reads through.
+	pool *pgxpool.Pool
+	// dir is the migration directory — one directory, one goose history, with
+	// the graph teardown and rebuild numbered around the table DDL of their own
+	// generation (gopgql#38).
 	dir   string
 	doc   *sdl.Document
 	model *schema.Schema
@@ -247,29 +251,41 @@ func newEnv(t *testing.T) *env {
 // parameter. Only ever applied to names this file constructs.
 func pgQuote(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
-// applyInit parses src, writes 0001_init.sql and applies it. It is the whole
-// gopgql pipeline — SDL, model, DDL, goose — so a schema that PostgreSQL
+// applyInit parses src, writes the first generation and applies it. It is the
+// whole gopgql pipeline — SDL, model, DDL, goose — so a schema that PostgreSQL
 // refuses fails here rather than in an assertion further down.
 func (e *env) applyInit(src string) {
 	e.t.Helper()
 	e.build(src)
-	path, err := migrate.WriteInit(e.dir, e.model)
+	paths, err := migrate.Generate(e.dir, e.model, "init", migrate.Halves{})
 	require.NoError(e.t, err)
-	require.Equal(e.t, migrate.InitFilename, fileName(path))
+	require.Len(e.t, paths, 2, "a first generation is the tables, then the graph")
 	e.gooseUp()
 }
 
 // applyDelta folds the migrations written so far, diffs them against src,
-// applies the delta and returns the migration file's contents so a caller can
+// applies the generation and returns the *tables* migration of it so a caller can
 // assert on what it says (7.4).
+//
+// The tables migration is the one under test throughout this suite: every
+// statement M7 is about — a rename, a constraint, a default — is table work, and
+// the two graph migrations around it only take the property graph down and put it
+// back (gopgql#38).
 func (e *env) applyDelta(src string) string {
 	e.t.Helper()
 	e.build(src)
-	path, err := migrate.Generate(e.dir, e.model, "delta")
+	paths, err := migrate.Generate(e.dir, e.model, "delta", migrate.Halves{})
 	require.NoError(e.t, err, "generate delta")
-	require.NotEmpty(e.t, path, "expected a delta migration, but the schemas were identical")
+	require.NotEmpty(e.t, paths, "expected a delta, but the schemas were identical")
 
-	content, err := os.ReadFile(path) //nolint:gosec // path is one this test just wrote
+	tables := ""
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_"+migrate.SuffixTables+".sql") {
+			tables = p
+		}
+	}
+	require.NotEmpty(e.t, tables, "expected table work in %v", paths)
+	content, err := os.ReadFile(tables) //nolint:gosec // path is one this test just wrote
 	require.NoError(e.t, err)
 	e.gooseUp()
 	return string(content)
@@ -287,12 +303,16 @@ func (e *env) build(src string) {
 
 // gooseUp applies every unapplied migration in this env's directory, through a
 // database handle of its own.
+//
+// A plain forward apply in version order, against goose's own default version
+// table. That is enough because a generation's files are numbered in the order
+// they have to run in (gopgql#38, design D3).
 func (e *env) gooseUp() {
 	e.t.Helper()
 	db, err := sql.Open("pgx", e.dsn)
 	require.NoError(e.t, err)
 	defer db.Close()
-	require.NoError(e.t, goose.UpContext(e.ctx, db, e.dir), "apply migrations")
+	require.NoError(e.t, goose.UpContext(e.ctx, db, e.dir), "apply %s", e.dir)
 }
 
 // mustExec runs a statement that is expected to succeed.
@@ -344,13 +364,6 @@ func (e *env) reflectGraph() *schema.Schema {
 	actual, err := conform.Reflect(e.ctx, e.pool, "")
 	require.NoError(e.t, err, "reflect the property graph")
 	return actual
-}
-
-func fileName(path string) string {
-	if i := strings.LastIndexByte(path, '/'); i >= 0 {
-		return path[i+1:]
-	}
-	return path
 }
 
 // requirePgError insists a statement was refused by PostgreSQL with a specific
@@ -600,9 +613,9 @@ func TestRenameMovesDataInsteadOfDroppingIt(t *testing.T) {
 		e.applyDelta(renameColumnSDL)
 
 		e.build(renameColumnSDL)
-		path, err := migrate.Generate(e.dir, e.model, "delta")
+		paths, err := migrate.Generate(e.dir, e.model, "delta", migrate.Halves{})
 		require.NoError(t, err)
-		assert.Empty(t, path, "the same SDL, hint and all, still generates cleanly")
+		assert.Empty(t, paths, "the same SDL, hint and all, still generates cleanly")
 	})
 }
 
@@ -686,20 +699,21 @@ func physicalFingerprint(e *env) string {
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
 		  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
 		  LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
-		 WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname <> 'goose_db_version'`)...)
+		 WHERE n.nspname = 'public' AND c.relkind = 'r'
+		   AND NOT starts_with(c.relname, 'goose_db_version')`)...)
 
 	lines = append(lines, fingerprintRows(e, `
 		SELECT format('con %s.%s %s', c.relname, con.conname, pg_get_constraintdef(con.oid))
 		  FROM pg_constraint con
 		  JOIN pg_class c ON c.oid = con.conrelid
 		  JOIN pg_namespace n ON n.oid = c.relnamespace
-		 WHERE n.nspname = 'public' AND c.relname <> 'goose_db_version'
+		 WHERE n.nspname = 'public' AND NOT starts_with(c.relname, 'goose_db_version')
 		   AND con.contype <> 'n'`)...)
 
 	lines = append(lines, fingerprintRows(e, `
 		SELECT format('idx %s.%s %s', tablename, indexname, indexdef)
 		  FROM pg_indexes
-		 WHERE schemaname = 'public' AND tablename <> 'goose_db_version'`)...)
+		 WHERE schemaname = 'public' AND NOT starts_with(tablename, 'goose_db_version')`)...)
 
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")

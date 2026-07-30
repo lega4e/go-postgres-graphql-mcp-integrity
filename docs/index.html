@@ -265,7 +265,7 @@
               <span id="k-status2" class="status"></span>
             </div>
             <div class="results">
-              <label>Delta migration <code>0002</code> (goose)</label>
+              <label>The next generation (goose)</label>
               <ga-code id="k-delta" data-lang="sql"></ga-code>
             </div>
           </div>
@@ -349,8 +349,9 @@
         <!-- Migration: two scenarios, initial then delta. -->
         <div slot="migration">
           <p class="panel-hint">
-            The initial <code>0001_init.sql</code> goose migration generated from
-            a schema: the full <code>CREATE</code> DDL, with a
+            The goose migrations a first generation emits from a schema. No
+            migration mixes table DDL with property-graph DDL, so there are two,
+            numbered in the order they are applied — and each carries a
             <code>-- +goose Down</code> section that is its exact inverse.
           </p>
           <div class="scenario">
@@ -366,7 +367,7 @@
               <span id="m-status" class="status"></span>
             </div>
             <div class="results">
-              <label>Initial migration <code>0001_init.sql</code></label>
+              <label>First generation — <code>0001_…_tables.sql</code>, <code>0002_…_graph.sql</code></label>
               <ga-code id="m-init" data-lang="sql"></ga-code>
             </div>
           </div>
@@ -374,10 +375,14 @@
           <hr class="scenario-sep" />
 
           <p class="panel-hint">
-            Revise that schema and gopgql folds the initial migration back into a
-            model, diffs it, and emits the delta — <code>ALTER TABLE</code> plus a
-            recreated property graph. The revision below is diffed against the
-            schema in the scenario above, so editing either one regenerates it.
+            Revise that schema and gopgql folds those migrations back into a
+            model, diffs it, and emits the next generation: the property graph
+            taken down, then <code>ALTER TABLE</code>, then the graph rebuilt over
+            the tables of its own generation — PostgreSQL will not alter a column a
+            live graph exposes. Consecutively numbered, so one
+            <code>goose up</code> applies them in that order. The revision below is
+            diffed against the schema in the scenario above, so editing either one
+            regenerates it.
           </p>
           <div class="scenario">
             <div class="inputs">
@@ -392,7 +397,7 @@
               <span id="m-status2" class="status"></span>
             </div>
             <div class="results">
-              <label>Delta migration <code>0002</code> (goose)</label>
+              <label>The next generation (goose)</label>
               <ga-code id="m-delta" data-lang="sql"></ga-code>
             </div>
           </div>

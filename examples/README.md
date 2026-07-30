@@ -26,10 +26,31 @@ cd examples/docs-graph
 docker compose up -d --build      # postgres, migrate, seed, and the server
 ```
 
-`init` runs `gopgql migrate --sdl schema.graphql`, which generates the initial
-migration from the SDL and applies it with goose — tables, indexes and the
-`CREATE PROPERTY GRAPH`. It is idempotent: goose skips versions it has already
-applied, so re-running the stack is a no-op.
+`init` runs `gopgql migrate --sdl schema.graphql`, which generates the migrations
+the SDL calls for and applies them with goose. **One** step, because that is all
+it takes — even though a generation is several files:
+
+```text
+/tmp/migrations/0001_schema_tables.sql   CREATE TABLE, CREATE INDEX
+/tmp/migrations/0002_schema_graph.sql    CREATE PROPERTY GRAPH
+```
+
+No migration mixes table DDL with property-graph DDL, and the files are numbered
+in the order they have to run in. A later edit of the SDL that changes a table
+emits three — the graph taken down, the tables migrated, the graph rebuilt over
+them — again numbered consecutively, because PostgreSQL will not alter a column a
+live property graph exposes. So `gopgql migrate` is a plain forward apply in
+version order: it does not interleave anything and does not skip anything, and
+`goose up` over the directory does exactly the same thing.
+
+It is idempotent: goose skips versions it has already applied, so re-running the
+stack is a no-op and the property graph stays up. The `--dir` is ephemeral, so the
+whole history is regenerated from the SDL each run and re-applied from zero — which
+works only because the history is in one directory in chronological order.
+
+One caveat: goose runs each file in its own transaction, so a generation is not
+atomic. An interrupted apply can stop between the graph teardown and the rebuild;
+re-running `gopgql migrate` continues from where it stopped.
 
 Then point an agent at it. Each example ships a `.mcp.json`, so from inside the
 example directory:

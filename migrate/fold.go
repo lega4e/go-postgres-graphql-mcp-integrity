@@ -69,14 +69,9 @@ func migrationFiles(dir string) ([]migFile, error) {
 	return files, nil
 }
 
-// Fold reads the migrations in dir and folds their Up sections into the schema
-// model they collectively produce. An empty or missing directory yields a nil
-// schema and no error: there is no prior state.
-func Fold(dir string) (*schema.Schema, error) {
-	files, err := migrationFiles(dir)
-	if err != nil {
-		return nil, err
-	}
+// readMigrations reads the Up/Down text of every migration file, in ascending
+// version order — the order folding and ownership both have to read them in.
+func readMigrations(files []migFile) ([]string, error) {
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -87,6 +82,84 @@ func Fold(dir string) (*schema.Schema, error) {
 			return nil, fmt.Errorf("migrate: read %s: %w", f.path, err)
 		}
 		contents[i] = string(data)
+	}
+	return contents, nil
+}
+
+// Ownership is the set of halves a migration history manages.
+//
+// It is read out of the statements the migrations hold, because nothing is
+// recorded: no mode marker, no half marker, no sidecar state (design D1). The
+// evidence that a directory owns the graph half is a CREATE PROPERTY GRAPH in
+// it; the evidence that it owns the tables half is a CREATE TABLE. Neither can
+// drift out of agreement with the SQL beside it, because it *is* the SQL.
+type Ownership struct {
+	Tables bool
+	Graph  bool
+}
+
+// OwnershipOf reads which halves an ordered list of migration contents manages.
+//
+// A directory with no history owns neither, which is what makes the flags scope
+// a directory's *first* generation and nothing after it (design D4a).
+func OwnershipOf(contents []string) (Ownership, error) {
+	var own Ownership
+	for i, content := range contents {
+		stmts, err := ddl.Parse(upSection(content))
+		if err != nil {
+			return own, fmt.Errorf("migrate: read migration %d: %w", i+1, err)
+		}
+		for _, stmt := range stmts {
+			switch stmt.(type) {
+			case *ddl.CreateTableStmt:
+				own.Tables = true
+			case *ddl.CreatePropertyGraphStmt:
+				own.Graph = true
+			}
+		}
+	}
+	return own, nil
+}
+
+// check refuses a turned-off half that the history already manages (design D4a).
+//
+// Turning a half off is a statement about what this directory generates from now
+// on, and letting it disagree with the history is unsafe in both directions:
+// suppressing the graph half would leave table DDL running against a live graph
+// that may depend on the columns it alters, and suppressing the tables half
+// would silently stop emitting table DDL the graph half will later name.
+func (o Ownership) check(h Halves) error {
+	switch {
+	case h.NoGraph && o.Graph:
+		return fmt.Errorf("--no-graph, but a migration in this directory creates a property graph: %w",
+			ErrHalfDisowned)
+	case h.NoTables && o.Tables:
+		return fmt.Errorf("--no-tables, but a migration in this directory creates tables: %w",
+			ErrHalfDisowned)
+	default:
+		return nil
+	}
+}
+
+// Fold reads the migrations in dir and folds their Up sections into the schema
+// model they collectively produce. An empty or missing directory yields a nil
+// schema and no error: there is no prior state.
+//
+// The whole directory is folded, always. There is no bounded fold any more —
+// the history is one chronological sequence, so the graph the folded state holds
+// is the one created last, which is exactly the graph the next generation's
+// teardown migration has to render (design D6).
+func Fold(dir string) (*schema.Schema, error) {
+	files, err := migrationFiles(dir)
+	if err != nil {
+		return nil, err
+	}
+	contents, err := readMigrations(files)
+	if err != nil {
+		return nil, err
+	}
+	if len(contents) == 0 {
+		return nil, nil
 	}
 	return FoldContent(contents)
 }
@@ -458,20 +531,59 @@ func (f *folder) indexList() []schema.Index {
 	return out
 }
 
+// buildTablesOnly assembles a schema from the CREATE TABLE statements alone,
+// for a directory that never declared a property graph. It carries no labels,
+// no properties and no edge metadata, because nothing in such a directory says
+// what they would be.
+//
+// It does carry the named constraints, though. Those live in the CREATE TABLE
+// and ALTER TABLE statements the directory does hold, and attachConstraints
+// recovers them from their names alone (schema.ClassifyConstraint) — no graph is
+// involved. Skipping them would break the round trip design D6 rests on in
+// exactly the tables half: the natural key and every check would fold back out
+// of a tables-only history missing, so DeltaTables would propose them again on
+// every single run and PostgreSQL would refuse the duplicate constraint name.
+func (f *folder) buildTablesOnly() (*schema.Schema, error) {
+	m := &schema.Schema{}
+	names := make([]string, 0, len(f.cols))
+	for name := range f.cols {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		vt := schema.VertexTable{Name: name, Columns: f.cols[name]}
+		if err := f.attachConstraints(&vt); err != nil {
+			return nil, err
+		}
+		m.VertexTables = append(m.VertexTables, vt)
+	}
+	m.Indexes = f.indexList()
+	return m, nil
+}
+
 // build assembles the folded schema from the accumulated tables, indexes and
 // graph. The graph classifies every table as a vertex or an edge and supplies
 // labels, property lists and edge key metadata; the CREATE TABLE statements
 // supply the columns.
 func (f *folder) build() (*schema.Schema, error) {
 	if f.graph == nil {
-		return nil, fmt.Errorf("migrate: folded migrations declare no property graph")
+		// A tables-only migration directory (gopgql#38) has no CREATE PROPERTY
+		// GRAPH to classify its tables with, and that is not an error — the
+		// graph half is generated and applied somewhere else, or by nobody.
+		// Return the tables as they were created; DeltaTables classifies them
+		// against the desired schema, which is the only place the roles are
+		// known. Vertex is the neutral bucket here, not a claim.
+		return f.buildTablesOnly()
 	}
 	m := &schema.Schema{GraphName: f.graph.Name}
 	for _, v := range f.graph.Vertices {
-		cols, ok := f.cols[v.Table]
-		if !ok {
-			return nil, fmt.Errorf("migrate: graph vertex table %q was never created", v.Table)
-		}
+		// A missing CREATE TABLE is not an error: a graph-only directory
+		// (gopgql#38) declares a property graph over tables owned elsewhere and
+		// never creates them. The columns stay nil — the graph half's diff
+		// compares the graph statement, which is self-describing, and the SDL
+		// is a description of the slice being surfaced, not an inventory of the
+		// database.
+		cols := f.cols[v.Table]
 		var extra []schema.LabelProperties
 		for _, l := range v.ExtraLabels {
 			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
@@ -489,10 +601,7 @@ func (f *folder) build() (*schema.Schema, error) {
 		m.VertexTables = append(m.VertexTables, vt)
 	}
 	for _, e := range f.graph.Edges {
-		cols, ok := f.cols[e.Table]
-		if !ok {
-			return nil, fmt.Errorf("migrate: graph edge table %q was never created", e.Table)
-		}
+		cols := f.cols[e.Table]
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
 			Name:        e.Table,
 			Label:       e.Label,
@@ -511,9 +620,13 @@ func (f *folder) build() (*schema.Schema, error) {
 }
 
 // attachConstraints moves the named constraints accumulated for a table onto the
-// vertex table the graph classified: a column check onto its column, a
-// table-level check into Checks (ordered by the ordinal in its name), and the
-// natural key into NaturalKey.
+// vertex table being assembled: a column check onto its column, a table-level
+// check into Checks (ordered by the ordinal in its name), and the natural key
+// into NaturalKey.
+//
+// Which constraint is which is decided by its name, so this needs no property
+// graph and both builders use it — the graph-classified one and the tables-only
+// one (gopgql#38).
 //
 // This is the reconstruction half of design D6, and it is what makes the round
 // trip close: a schema that declares a check or a natural key generates DDL,

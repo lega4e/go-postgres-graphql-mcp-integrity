@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -183,12 +182,14 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	path, err := migrate.WriteInit(dir, st.model)
+	// One directory, one history: the tables, then the property graph over
+	// them. Nothing here decides an order — the file numbering is the order.
+	paths, err := migrate.Generate(dir, st.model, "init", migrate.Halves{})
 	if err != nil {
 		return err
 	}
-	if got := filepath.Base(path); got != migrate.InitFilename {
-		return fmt.Errorf("migration filename = %s, want %s", got, migrate.InitFilename)
+	if len(paths) != 2 {
+		return fmt.Errorf("a first generation is two migrations, got %v", paths)
 	}
 
 	db, err := sql.Open("pgx", connString)
@@ -196,7 +197,7 @@ func (st *scenarioState) generateAndApply(ctx context.Context) error {
 		return fmt.Errorf("open sql.DB for goose: %w", err)
 	}
 	defer db.Close()
-	if err := goose.UpContext(ctx, db, dir); err != nil {
+	if err := upAll(ctx, db, dir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	return nil
@@ -353,4 +354,14 @@ func header(table *godog.Table) map[string]int {
 		cols[cell.Value] = i
 	}
 	return cols
+}
+
+// upAll applies every pending migration in dir, in ascending version order.
+//
+// A plain forward apply against goose's own default version table is all it
+// takes. The migrations are one chronological history, so the order they need
+// is the order goose already applies them in — no half to interleave, no
+// version table to select (gopgql#38, design D3).
+func upAll(ctx context.Context, db *sql.DB, dir string) error {
+	return goose.UpContext(ctx, db, dir)
 }

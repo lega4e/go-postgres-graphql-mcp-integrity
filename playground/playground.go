@@ -16,6 +16,7 @@ package playground
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/generator"
@@ -180,8 +181,12 @@ const RevisedExampleSDL = `type Person @node(label: "person") {
                          @hasInverse(field: "follows")
 }`
 
-// Migration parses and validates the SDL and returns the initial goose
-// migration (0001_init.sql) generated from it.
+// Migration parses and validates the SDL and returns the goose migrations a
+// first generation emits from it: the tables, then the property graph over them.
+//
+// They are returned as one annotated document because the playground has one
+// output pane, but they are separate files, applied in the order shown — no
+// migration mixes table DDL with property-graph DDL (gopgql#38, design D2).
 func Migration(sdlSrc string) (string, error) {
 	doc, err := sdl.Parse(sdlSrc)
 	if err != nil {
@@ -191,7 +196,21 @@ func Migration(sdlSrc string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return migrate.Init(m), nil
+	return renderSequence(migrate.Plan(nil, m, "init", 1, migrate.Halves{})), nil
+}
+
+// renderSequence annotates a planned generation as one document: each file under
+// the name gopgql would write it as, in the order goose applies them.
+func renderSequence(planned []migrate.Migration) string {
+	var b strings.Builder
+	for i, m := range planned {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "-- migrations/%s\n", m.Filename())
+		b.WriteString(m.Content())
+	}
+	return b.String()
 }
 
 // Schema parses and validates the SDL and returns the PostgreSQL DDL generated
@@ -334,11 +353,14 @@ func DepthExceeded(err error) (limit int, ok bool) {
 	return 0, false
 }
 
-// Delta generates the delta migration between two SDL revisions. It builds the
-// initial migration for oldSDL, folds it back into a schema — running the real
-// fold interpreter, exactly as `migrate diff` does — and diffs it against the
-// schema built from newSDL (SPEC.md §7 → M2). changed reports whether the
-// revision produced any schema change.
+// Delta generates the migrations a revision of the SDL emits. It plans the first
+// generation for oldSDL, folds those migrations back into a schema — running the
+// real fold interpreter, exactly as `gopgql generate` does — and plans the next
+// generation against the schema built from newSDL (SPEC.md §7 → M2). changed
+// reports whether the revision produced any schema change.
+//
+// The result is a run of consecutive files, numbered on from the history: the
+// graph comes down, the tables move, the graph goes back up.
 func Delta(oldSDL, newSDL string) (delta string, changed bool, err error) {
 	oldDoc, err := sdl.Parse(oldSDL)
 	if err != nil {
@@ -349,7 +371,12 @@ func Delta(oldSDL, newSDL string) (delta string, changed bool, err error) {
 		return "", false, err
 	}
 
-	prior, err := migrate.FoldContent([]string{migrate.Init(oldModel)})
+	history := migrate.Plan(nil, oldModel, "init", 1, migrate.Halves{})
+	contents := make([]string, len(history))
+	for i, m := range history {
+		contents[i] = m.Content()
+	}
+	prior, err := migrate.FoldContent(contents)
 	if err != nil {
 		return "", false, err
 	}
@@ -363,11 +390,11 @@ func Delta(oldSDL, newSDL string) (delta string, changed bool, err error) {
 		return "", false, err
 	}
 
-	up, down, changed := migrate.Delta(prior, newModel)
-	if !changed {
+	planned := migrate.Plan(prior, newModel, "delta", len(history)+1, migrate.Halves{})
+	if len(planned) == 0 {
 		return "-- no schema change between the two SDL revisions", false, nil
 	}
-	return "-- +goose Up\n" + up + "\n-- +goose Down\n" + down, true, nil
+	return renderSequence(planned), true, nil
 }
 
 // renderParams formats ordered bind parameters as "$1 = v1, $2 = v2".

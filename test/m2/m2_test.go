@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,10 +189,10 @@ func (st *scenarioState) applyInitial(ctx context.Context, src *godog.DocString)
 	st.dir = dir
 	st.doc = doc
 
-	if _, err := migrate.WriteInit(dir, m); err != nil {
+	if _, err := migrate.Generate(dir, m, "init", migrate.Halves{}); err != nil {
 		return err
 	}
-	return applyMigrations(ctx, dir)
+	return applyAll(ctx, dir)
 }
 
 // generateAndApplyDelta folds the migrations in the active directory, diffs
@@ -208,18 +209,23 @@ func (st *scenarioState) generateAndApplyDelta(ctx context.Context, src *godog.D
 	if err != nil {
 		return err
 	}
-	path, err := migrate.Generate(st.dir, desired, "delta")
+	wrote, err := migrate.Generate(st.dir, desired, "delta", migrate.Halves{})
 	if err != nil {
 		return fmt.Errorf("generate delta: %w", err)
 	}
-	if path == "" {
+	if len(wrote) == 0 {
 		return fmt.Errorf("expected a delta migration, but the schemas were identical")
 	}
-	if base := filepath.Base(path); base[:4] != "0002" {
-		return fmt.Errorf("delta filename = %s, want a 0002_* file", base)
+	// The first generation was 0001 and 0002; this one numbers on from there,
+	// consecutively, in emission order.
+	for i, p := range wrote {
+		want := fmt.Sprintf("%04d_", i+3)
+		if base := filepath.Base(p); !strings.HasPrefix(base, want) {
+			return fmt.Errorf("delta filename = %s, want %s*", base, want)
+		}
 	}
 	st.doc = doc
-	return applyMigrations(ctx, st.dir)
+	return applyAll(ctx, st.dir)
 }
 
 func (st *scenarioState) personsExist(ctx context.Context, table *godog.Table) error {
@@ -362,20 +368,20 @@ func (st *scenarioState) applyFoldedPath(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	if _, err := migrate.WriteInit(dir, st.baseModel); err != nil {
+	if _, err := migrate.Generate(dir, st.baseModel, "init", migrate.Halves{}); err != nil {
 		return err
 	}
-	if err := applyMigrations(ctx, dir); err != nil {
+	if err := applyAll(ctx, dir); err != nil {
 		return fmt.Errorf("apply base: %w", err)
 	}
-	path, err := migrate.Generate(dir, st.widenedModel, "delta")
+	paths, err := migrate.Generate(dir, st.widenedModel, "delta", migrate.Halves{})
 	if err != nil {
 		return err
 	}
-	if path == "" {
+	if len(paths) == 0 {
 		return fmt.Errorf("expected a delta between base and widened schemas")
 	}
-	if err := applyMigrations(ctx, dir); err != nil {
+	if err := applyAll(ctx, dir); err != nil {
 		return fmt.Errorf("apply delta: %w", err)
 	}
 	fp, err := schemaFingerprint(ctx, st.pool)
@@ -397,10 +403,10 @@ func (st *scenarioState) applyDirectPath(ctx context.Context) error {
 		return err
 	}
 	st.dirs = append(st.dirs, dir)
-	if _, err := migrate.WriteInit(dir, st.widenedModel); err != nil {
+	if _, err := migrate.Generate(dir, st.widenedModel, "init", migrate.Halves{}); err != nil {
 		return err
 	}
-	if err := applyMigrations(ctx, dir); err != nil {
+	if err := applyAll(ctx, dir); err != nil {
 		return fmt.Errorf("apply direct: %w", err)
 	}
 	fp, err := schemaFingerprint(ctx, st.pool)
@@ -438,6 +444,18 @@ func (st *scenarioState) resetDB(ctx context.Context) error {
 	}
 	st.pool = pool
 	return nil
+}
+
+// applyAll runs goose up over each directory in order — tables before the graph
+// that references them.
+// applyAll applies every pending migration in dir, in ascending version order.
+//
+// There is nothing to orchestrate. The generation that changes a table emits the
+// graph teardown immediately before it and the rebuild immediately after, so the
+// order PostgreSQL requires is already the order the versions are in
+// (gopgql#38, design D3).
+func applyAll(ctx context.Context, dir string) error {
+	return applyMigrations(ctx, dir)
 }
 
 // applyMigrations runs goose up over dir with its own database handle.

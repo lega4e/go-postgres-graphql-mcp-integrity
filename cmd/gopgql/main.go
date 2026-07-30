@@ -7,14 +7,15 @@
 //	gopgql conform  --sdl schema.graphql --dsn postgres://…
 //
 // `generate` folds whatever migrations already exist in --dir, diffs them
-// against the schema the SDL describes, and writes the next migration —
-// 0001_init.sql on an empty directory, NNNN_<name>.sql thereafter, nothing at
-// all when the two already agree.
+// against the schema the SDL describes, and writes the generation that closes
+// the gap: consecutive single-purpose migrations, each doing exactly one thing,
+// into --dir itself. Nothing at all when the two already agree.
 //
-// `migrate` does that and then applies the directory with goose. It is what an
-// init container runs: with an ephemeral --dir it regenerates 0001_init.sql
-// every time, and goose skips the versions it has already applied, so running
-// it repeatedly against the same database is a no-op.
+// `migrate` does that and then applies the directory with goose — a plain
+// forward apply in version order, with no ordering of gopgql's own. It is what
+// an init container runs: with an ephemeral --dir it regenerates the whole
+// history every time, and goose skips the versions it has already applied, so
+// running it repeatedly against the same database is a no-op.
 //
 // `conform` reads the property graph back out of the database and reports how
 // it differs from the SDL. Everything else here reasons from the SDL alone and
@@ -50,7 +51,9 @@ const usage = `gopgql — generate and apply migrations from a GraphQL SDL schem
 
 Usage:
   gopgql generate --sdl <file> --dir <dir> [--name <suffix>] [--graph <name>]
+                  [--no-tables] [--no-graph]
   gopgql migrate  --dsn <url> [--sdl <file>] [--dir <dir>] [--name <suffix>] [--graph <name>]
+                  [--no-tables] [--no-graph]
   gopgql conform  --sdl <file> --dsn <url> [--graph <name>]
 
 Commands:
@@ -63,6 +66,26 @@ Flags:
   --sdl    Path to the SDL schema.                     (env GOPGQL_SDL)
   --dsn    PostgreSQL connection string.               (env GOPGQL_DSN)
   --dir    Migration directory. Default "migrations".  (env GOPGQL_MIGRATIONS)
+           One directory, one goose history, one goose_db_version table. No
+           migration ever mixes table DDL with property-graph DDL: one edit of
+           the SDL emits consecutive single-purpose migrations, applied in that
+           order —
+             0003_add_email_graph_down.sql  DROP PROPERTY GRAPH IF EXISTS …
+             0004_add_email_tables.sql      ALTER TABLE …
+             0005_add_email_graph.sql       CREATE PROPERTY GRAPH …
+           The graph comes down first because PostgreSQL refuses to alter a
+           column a live property graph exposes, and goes back up last over the
+           tables of its own generation. gopgql migrate is that plain forward
+           apply; a generation is not atomic, so an interrupted run may leave
+           the graph down — re-run it and it continues from where it stopped.
+  --no-tables  Skip the tables half — someone else owns the tables, and the
+               SDL describes only the slice surfaced as a graph. Nothing about
+               a table is read, diffed or emitted. (env GOPGQL_NO_TABLES)
+  --no-graph   Skip the property-graph half. (env GOPGQL_NO_GRAPH)
+           The flags scope a directory's first generation; after that the
+           directory's own history decides which halves it manages, and a flag
+           that contradicts it is an error. They scope what is *generated* —
+           applying is always the whole directory.
   --name   Descriptive suffix for a generated delta. Default "schema".
   --graph  Property-graph name. Default is the generator's.
 A flag wins over its environment variable.
@@ -152,6 +175,8 @@ func run(argv []string) error {
 	dir := fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`)
 	name := fs.String("name", "schema", "descriptive suffix for a generated delta")
 	graph := fs.String("graph", "", "property-graph name (default: the generator's)")
+	noTables := fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)")
+	noGraph := fs.Bool("no-graph", false, "skip the property-graph half")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(rest); err != nil {
 		// -h/--help has already printed the usage text through fs.Usage.
@@ -177,19 +202,29 @@ func run(argv []string) error {
 	if *dir == "" {
 		*dir = "migrations"
 	}
+	if !*noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
+		*noTables = true
+	}
+	if !*noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
+		*noGraph = true
+	}
+	if *noTables && *noGraph {
+		return errors.New("--no-tables and --no-graph together leave nothing to do")
+	}
+	halves := migrate.Halves{NoTables: *noTables, NoGraph: *noGraph}
 
 	switch command {
 	case "generate":
 		if *sdlPath == "" {
 			return errors.New("generate needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		return generate(*sdlPath, *dir, *name, *graph)
+		return generate(*sdlPath, *dir, *name, *graph, halves)
 	case "migrate":
 		if *dsn == "" {
 			return errors.New("migrate needs a database: pass --dsn or set GOPGQL_DSN")
 		}
 		if *sdlPath != "" {
-			if err := generate(*sdlPath, *dir, *name, *graph); err != nil {
+			if err := generate(*sdlPath, *dir, *name, *graph, halves); err != nil {
 				return err
 			}
 		}
@@ -221,22 +256,60 @@ func run(argv []string) error {
 	}
 }
 
-// generate writes the next migration for the SDL's schema into dir.
-func generate(sdlPath, dir, name, graph string) error {
+// generate writes the generation the SDL calls for into dir.
+func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
 	model, err := build(sdlPath, graph)
 	if err != nil {
 		return err
 	}
-	path, err := migrate.Generate(dir, model, name)
+	paths, err := migrate.Generate(dir, model, name, halves)
 	if err != nil {
-		return err
+		return disownGuidance(err, halves)
 	}
-	if path == "" {
+	if len(paths) == 0 {
 		fmt.Printf("gopgql: %s is already up to date with %s\n", dir, sdlPath)
 		return nil
 	}
-	fmt.Printf("gopgql: wrote %s\n", path)
+	for _, p := range paths {
+		fmt.Printf("gopgql: wrote %s\n", p)
+	}
 	return nil
+}
+
+// The guidance printed when a turned-off half contradicts the directory's own
+// history (design D4a). The refusal itself says what the contradiction is; this
+// says what to do instead, which differs per half — and for --no-graph the
+// legitimate reason to want it is to get rid of the graph, so the message names
+// the deliberate way to do that.
+const (
+	graphDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
+		"To drop the property graph, generate from a desired schema that declares no\n" +
+		"graph: that emits the graph-teardown migration and no rebuild, so the drop is\n" +
+		"recorded in the history and reviewable in the diff."
+
+	tablesDisownGuidance = "Which halves a directory manages is fixed by its first generation.\n" +
+		"To hand the tables to another tool from now on, generate the graph half into a\n" +
+		"fresh --dir: suppressing table DDL in a directory that creates tables would\n" +
+		"leave the graph half naming columns nothing creates."
+)
+
+// disownGuidance appends the per-half guidance to the sentinel refusal.
+//
+// The refusal is migrate's, because that is where the history is read; the
+// guidance is the CLI's, because it is about flags. Which half was turned off is
+// known here and nowhere else, so the branch belongs here too.
+func disownGuidance(err error, halves migrate.Halves) error {
+	if !errors.Is(err, migrate.ErrHalfDisowned) {
+		return err
+	}
+	switch {
+	case halves.NoGraph:
+		return fmt.Errorf("%w\n\n%s", err, graphDisownGuidance)
+	case halves.NoTables:
+		return fmt.Errorf("%w\n\n%s", err, tablesDisownGuidance)
+	default:
+		return err
+	}
 }
 
 // build parses and validates the SDL and returns the physical schema model.
@@ -252,29 +325,59 @@ func build(sdlPath, graph string) (*schema.Schema, error) {
 	return generator.Build(doc, graph)
 }
 
-// apply runs the migrations in dir against the database.
+// apply applies every pending migration in dir, in ascending version order.
+//
+// That is the whole of it: goose's ordinary forward apply against goose's own
+// default version table. gopgql neither reorders the migrations nor decides that
+// any of them is to be skipped, because the order is the file numbering and the
+// numbering is chronological by construction (design D3). A turned-off half
+// changes what `generate` writes and never what this applies — a flag that could
+// skip part of an applied history is precisely the class of bug the per-half
+// version tables created.
+//
+// A generation is several files and goose runs each in its own transaction, so an
+// interrupted run can stop between the graph teardown and the rebuild, leaving a
+// database whose tables have moved and which has no property graph. Re-running
+// closes the window; queries against the graph fail loudly until then rather than
+// returning wrong rows.
 func apply(dir, dsn string) error {
-	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("migration directory %s: %w", dir, err)
+	if err := checkDir(dir); err != nil {
+		return err
 	}
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("goose dialect: %w", err)
-	}
-
-	db, err := sql.Open("pgx", dsn)
+	db, err := connect(dsn)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
 	defer db.Close()
-	if err := db.Ping(); err != nil {
-		return fmt.Errorf("connect to the database: %w", err)
-	}
-
 	if err := goose.UpContext(context.Background(), db, dir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	fmt.Printf("gopgql: applied %s\n", dir)
 	return nil
+}
+
+// checkDir reports a missing migration directory as the actionable error it is.
+func checkDir(dir string) error {
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("migration directory %s: %w", dir, err)
+	}
+	return nil
+}
+
+// connect opens the database goose will run through and proves it answers.
+func connect(dsn string) (*sql.DB, error) {
+	if err := goose.SetDialect("postgres"); err != nil {
+		return nil, fmt.Errorf("goose dialect: %w", err)
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("connect to the database: %w", err)
+	}
+	return db, nil
 }
 
 // conformCheck compares the property graph the database holds against the one

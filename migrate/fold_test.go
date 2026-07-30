@@ -120,10 +120,38 @@ func TestFoldRebuildsIdenticalDDL(t *testing.T) {
 	}
 }
 
-func TestFoldEmptyIsNil(t *testing.T) {
+// TestFoldEmptyIsEmptySchema covers the consequence of splitting migrations
+// (gopgql#38): a directory with no CREATE PROPERTY GRAPH is now legitimate — a
+// tables-only directory is exactly that — so the absence of a graph can no
+// longer be an error. Folding nothing yields an empty schema, which is what a
+// first run against an empty directory needs.
+func TestFoldEmptyIsEmptySchema(t *testing.T) {
 	folded, err := migrate.FoldContent(nil)
-	if err == nil {
-		t.Fatalf("folding no migrations should error (no graph), got %+v", folded)
+	if err != nil {
+		t.Fatalf("FoldContent(nil): %v", err)
+	}
+	if folded == nil {
+		t.Fatal("FoldContent(nil) returned a nil schema")
+	}
+	if folded.GraphName != "" || len(folded.VertexTables) != 0 || len(folded.EdgeTables) != 0 {
+		t.Errorf("folding nothing should yield an empty schema, got %+v", folded)
+	}
+}
+
+// TestFoldTablesOnlyDirectory covers a history generated with --no-graph: it
+// folds to its tables, with no graph, and does not error.
+func TestFoldTablesOnlyDirectory(t *testing.T) {
+	m := mustSchema(t, baseSDL)
+	folded, err := migrate.FoldContent(planContents(migrate.Plan(
+		nil, m, "init", 1, migrate.Halves{NoGraph: true})))
+	if err != nil {
+		t.Fatalf("FoldContent(tables half): %v", err)
+	}
+	if folded.GraphName != "" {
+		t.Errorf("a tables-only fold must declare no graph, got %q", folded.GraphName)
+	}
+	if !hasPersonColumn(folded, "name") {
+		t.Errorf("tables-only fold lost its columns: %+v", folded)
 	}
 }
 

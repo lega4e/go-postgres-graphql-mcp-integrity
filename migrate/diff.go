@@ -9,10 +9,14 @@ import (
 	"github.com/lega4e/gopgql/schema"
 )
 
-// Delta diffs the folded prior schema against the desired schema and renders
-// the -- +goose Up and -- +goose Down bodies of the next migration. changed is
-// false when the two schemas are already equivalent, in which case there is
-// nothing to migrate and up and down are empty.
+// Delta diffs the folded prior schema against the desired schema and renders one
+// *combined* migration: the graph dropped, the tables migrated, the graph
+// recreated. changed is false when the two schemas are already equivalent.
+//
+// Nothing emits migrations in this shape any more — a generation is a run of
+// single-purpose files (design D2). Like [Init], it is retained as the reference
+// the split is measured against: the integration suite applies it to a fresh
+// database and asserts the sequence reaches the same state.
 //
 // The Up body transforms prior → desired; the Down body is its exact inverse,
 // transforming desired → prior. Property graphs are metadata: every delta drops
@@ -44,6 +48,65 @@ func Delta(from, to *schema.Schema) (up, down string, changed bool) {
 	}
 
 	return joinStmts(upStmts), joinStmts(downStmts), true
+}
+
+// DeltaTables renders the table half of a generation: the structural difference
+// between the two schemas, and nothing about the property graph.
+//
+// The graph comparison is skipped entirely rather than being found to be equal.
+// A history generated with --no-graph contains no CREATE PROPERTY GRAPH, so its
+// folded prior state has no graph and a comparison would report a difference on
+// every single run — emitting a graph the directory does not manage, forever.
+// Which graph statement a generation needs is [Plan]'s decision, not this one's.
+//
+// Renames are resolved here exactly as [Delta] resolves them, and for the same
+// reason: an ALTER TABLE … RENAME is table work, so the tables half is the half
+// that has to emit it. Skipping the plan would leave the split path dropping and
+// re-adding what Delta renames, which is the data loss design D2 exists to
+// prevent. The Down section is rendered against the *renamed* prior state,
+// because every statement in it runs before the renames are undone.
+func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
+	classified := classifyLike(from, to)
+	plan := planRenames(classified, to)
+	prior, stale := applyRenames(classified, plan)
+
+	d := diffSchemas(prior, to)
+	d.renames = plan
+	d.droppedConstraints = append(staleAsConstraints(stale), d.droppedConstraints...)
+
+	if !d.structural() {
+		return "", "", false
+	}
+	return joinStmts(d.upStructural(to)), joinStmts(d.downStructural(prior)), true
+}
+
+// classifyLike splits prior's tables into vertex and edge tables the way `like`
+// classifies them.
+//
+// A history generated with --no-graph has no CREATE PROPERTY GRAPH, so folding it
+// cannot know which of its tables are vertices and which are edges — it returns
+// them all as vertices. The desired schema is the only place those roles are
+// recorded, and using it keeps the diff's ordering guarantees intact: edges are
+// still dropped before the vertices they reference, and created after them. A
+// table whose role genuinely changed is absent from the matching list on one
+// side, so it is dropped and recreated, which is correct.
+func classifyLike(prior, like *schema.Schema) *schema.Schema {
+	if prior == nil || len(prior.EdgeTables) > 0 {
+		return prior // already classified (folded from a directory with a graph)
+	}
+	edges := map[string]bool{}
+	for _, e := range like.EdgeTables {
+		edges[e.Name] = true
+	}
+	out := &schema.Schema{GraphName: prior.GraphName, Indexes: prior.Indexes}
+	for _, vt := range prior.VertexTables {
+		if edges[vt.Name] {
+			out.EdgeTables = append(out.EdgeTables, schema.EdgeTable{Name: vt.Name, Columns: vt.Columns})
+			continue
+		}
+		out.VertexTables = append(out.VertexTables, vt)
+	}
+	return out
 }
 
 // schemaDiff is the set of structural differences between two schemas.
@@ -348,12 +411,25 @@ func staleAsConstraints(stale []staleConstraint) []constraintChange {
 	return out
 }
 
-// upStatements renders the forward migration: prior → desired.
+// upStatements renders the forward migration: prior → desired, with the
+// property graph dropped first and recreated last so table changes are never
+// blocked by a graph depending on them.
 func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	var s []string
 	if from.GraphName != "" {
 		s = append(s, dropGraphStmt(from.GraphName))
 	}
+	s = append(s, d.upStructural(to)...)
+	s = append(s, generator.GraphDDL(to))
+	return s
+}
+
+// upStructural renders the table half of the forward migration: everything
+// except the property graph. The renames and the named-constraint drops belong
+// here rather than in [upStatements] — they are ALTER TABLE work, so the tables
+// half has to emit them when the two halves are generated separately.
+func (d *schemaDiff) upStructural(to *schema.Schema) []string {
+	var s []string
 	// Renames run first, on the objects as the database still knows them, and
 	// everything after this point speaks in the new names — including the drops
 	// of constraints the rename left holding a stale name.
@@ -401,7 +477,6 @@ func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
 	for _, idx := range d.addedIndexes {
 		s = append(s, generator.IndexDDL(idx))
 	}
-	s = append(s, generator.GraphDDL(to))
 	return s
 }
 
@@ -413,6 +488,17 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 	if to.GraphName != "" {
 		s = append(s, dropGraphStmt(to.GraphName))
 	}
+	s = append(s, d.downStructural(from)...)
+	// The prior schema under its *original* names: the Down section has just
+	// reversed the renames, so the graph it recreates is the one those names
+	// describe.
+	s = append(s, generator.GraphDDL(d.graphOf(from)))
+	return s
+}
+
+// downStructural renders the table half of the reverse migration.
+func (d *schemaDiff) downStructural(from *schema.Schema) []string {
+	var s []string
 	for _, c := range d.addedConstraints {
 		s = append(s, dropNamedConstraintStmt(c))
 	}
@@ -460,7 +546,6 @@ func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
 	// statement above still speaks the new names, and only once they are all
 	// reversed does the schema go back to the names its property graph names.
 	s = append(s, d.renames.downStmts()...)
-	s = append(s, generator.GraphDDL(d.graphOf(from)))
 	return s
 }
 

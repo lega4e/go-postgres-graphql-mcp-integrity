@@ -68,6 +68,80 @@ No tool exists that generates SQL/PGQ property-graph DDL from GraphQL SDL, and n
 |9 |Test harness         |**godog** BDD over `testcontainers-go`, against real `postgres:19beta2`.                                                                          |
 |10|GitHub Pages         |Docs site with embedded WASM playground. Branch mode + PR previews.                                                                               |
 
+### 3.0 Split migrations
+
+No migration ever contains both table DDL and property-graph DDL. One edit of the
+SDL emits a **run of consecutive single-purpose migrations** into one directory,
+recorded in the one `goose_db_version` table:
+
+```
+0001_init_tables.sql             CREATE TABLE …
+0002_init_graph.sql              CREATE PROPERTY GRAPH …
+0003_add_email_graph_down.sql    DROP PROPERTY GRAPH IF EXISTS …
+0004_add_email_tables.sql        ALTER TABLE …
+0005_add_email_graph.sql         CREATE PROPERTY GRAPH …
+```
+
+One slug per generation, shared by every file in it, plus a suffix saying what
+each file does. The suffix is for humans: nothing is recorded inside a migration
+and nothing is read back out of one — what a migration does is what its SQL does.
+Each file's `Down` is the plain inverse of its own `Up`, so rolling a generation
+back means undoing its migrations newest first.
+
+This makes two things representable that were not:
+
+- a property graph over tables gopgql does not manage;
+- an SDL that describes **part** of a database — the slice surfaced as a graph.
+  With the tables half off, absence from the SDL says nothing about the database,
+  and nothing it does not mention is ever dropped or altered. With the tables
+  half on, gopgql manages those tables and a column absent from the SDL is
+  removed.
+
+#### The order is the numbering
+
+Two ordering constraints come from PostgreSQL, not from gopgql: tables must exist
+before the graph that references them, and a live property graph must come down
+before the columns it exposes can change. Both are satisfied **structurally**. A
+generation is emitted graph-teardown → tables → graph-build, numbered
+consecutively, so a `CREATE PROPERTY GRAPH` is always immediately preceded by the
+table DDL of its *own* generation and always preceded by the drop of the graph the
+generation before it built.
+
+`gopgql migrate` is therefore goose's ordinary forward apply over the directory —
+no interleaving, no version walk, no ordering logic in gopgql at all. `goose up`
+against an empty database replays the whole history correctly because there is no
+other order in which it could apply the files. Nothing has to remember the
+constraint, and there is no code that could forget it.
+
+**A generation is not atomic.** goose runs each file in its own transaction, so an
+interrupted `goose up` can stop between the teardown and the rebuild, leaving a
+database whose tables have moved and which has no property graph. Re-running
+`gopgql migrate` (or `goose up`) continues from where it stopped; queries against
+the graph fail loudly in the meantime rather than returning wrong rows.
+Deployments that read the graph should finish migrating before serving.
+
+#### Turning a half off
+
+`--no-tables` and `--no-graph` scope **generation**, never application: applying
+is always the whole directory in version order, so no flag can cause part of an
+applied history to be skipped. Both together is an error — it asks for nothing.
+
+**The flags scope a directory's first generation; after that the directory's own
+history decides, and a flag that contradicts it is an error.** `--no-graph`
+against a history that contains a `CREATE PROPERTY GRAPH`, or `--no-tables`
+against a history that created tables, is refused at generate time with nothing
+written. The evidence is the SQL in the directory, folded the way generation folds
+it anyway, so there is nothing recorded that could drift out of agreement with it.
+
+Turning a half off is not a way to delete anything. To drop the property graph,
+generate from a desired schema that declares no graph: that generation emits the
+`_graph_down` teardown and no rebuild, so the drop is recorded in the history and
+reviewable in the diff.
+
+There is **no other layout**: no detection of, and no fallback to, the original
+single combined migration or the per-half subdirectories an earlier version of
+this design used.
+
 ### 3.1 Rationale notes
 
 **On rejecting deep traversal (3).** PG19 cannot express variable-length paths. The alternatives were a `WITH RECURSIVE` emitter (a second, structurally different code path over raw edge tables) or silent truncation. Rejecting keeps every emitted query a pure `GRAPH_TABLE`, keeps the library honest about PostgreSQL’s actual ceiling, and leaves a clean upgrade path when native quantified paths land.
