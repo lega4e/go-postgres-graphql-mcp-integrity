@@ -77,8 +77,16 @@ Flags:
            The graph comes down first because PostgreSQL refuses to alter a
            column a live property graph exposes, and goes back up last over the
            tables of its own generation. gopgql migrate is that plain forward
-           apply; a generation is not atomic, so an interrupted run may leave
-           the graph down — re-run it and it continues from where it stopped.
+           apply; a generation is not atomic, so an apply that stops partway
+           leaves the graph down, which gopgql conform reports as "property
+           graph not found". How to recover depends on why it stopped:
+             interrupted (a crash, ^C)  re-run it; it continues from where it
+                                        stopped and the graph comes back up.
+             the _tables migration      re-running fails identically — the DDL
+             failed (NOT NULL over      is the problem. The teardown in front
+             existing rows, a type      of it has committed, so replaying from
+             change PG refuses)         zero is no better. goose down one step
+                                        restores the graph; then fix the SDL.
   --no-tables  Skip the tables half — someone else owns the tables, and the
                SDL describes only the slice surfaced as a graph. Nothing about
                a table is read, diffed or emitted. (env GOPGQL_NO_TABLES)

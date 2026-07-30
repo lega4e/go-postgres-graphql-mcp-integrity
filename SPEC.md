@@ -113,11 +113,29 @@ against an empty database replays the whole history correctly because there is n
 other order in which it could apply the files. Nothing has to remember the
 constraint, and there is no code that could forget it.
 
-**A generation is not atomic.** goose runs each file in its own transaction, so an
-interrupted `goose up` can stop between the teardown and the rebuild, leaving a
-database whose tables have moved and which has no property graph. Re-running
-`gopgql migrate` (or `goose up`) continues from where it stopped; queries against
-the graph fail loudly in the meantime rather than returning wrong rows.
+**A generation is not atomic.** goose runs each file in its own transaction, so a
+`goose up` that stops between the teardown and the rebuild leaves a database whose
+tables have moved and which has no property graph. Queries against the graph fail
+loudly in the meantime rather than returning wrong rows, and `gopgql conform`
+names the state directly: it exits 1 with `conform: property graph not found`
+(`conform.ErrGraphNotFound`), which is the difference between "the graph is down"
+and "the graph has drifted", reported as exit 2.
+
+Recovering from it depends on *why* the apply stopped, and the two cases are not
+the same:
+
+- **The run was interrupted** — a crash, a `^C`, a killed pod. Whatever committed
+  stays committed and nothing is wrong with the SQL, so re-running `gopgql
+  migrate` (or `goose up`) continues from where it stopped and the graph comes
+  back up.
+- **The `_tables` migration itself failed** — a `NOT NULL` added over existing
+  rows, a type change PostgreSQL refuses. Re-running fails identically, because
+  the DDL is the problem and not the interruption. The `_graph_down` migration in
+  front of it has already committed, so going forwards is blocked and replaying
+  from zero hits the same statement. The way out is `goose down` one step, which
+  runs the teardown's own `Down` and puts the graph back; then fix the SDL (or
+  the data) and generate again.
+
 Deployments that read the graph should finish migrating before serving.
 
 #### Turning a half off
