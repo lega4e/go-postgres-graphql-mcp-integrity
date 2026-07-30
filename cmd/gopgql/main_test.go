@@ -255,8 +255,91 @@ func TestVersionReportsBuildInfo(t *testing.T) {
 	}
 }
 
+// TestNoHalfEnvVarsParseTheirValue asserts the two GOPGQL_NO_* variables mean
+// what they say. They are documented in the usage text, so they are public
+// surface, and `false` is exactly what a compose file or a Helm values block
+// writes for "off" — testing them for emptiness made GOPGQL_NO_TABLES=false turn
+// the tables half off, silently and in the direction that loses table DDL.
+//
+// The assertion is on the files a generation writes rather than on a parsed
+// flag, because that is the behaviour the variable is being set to control.
+func TestNoHalfEnvVarsParseTheirValue(t *testing.T) {
+	const bothHalves = "0001_env_tables.sql,0002_env_graph.sql"
+
+	for _, tc := range []struct {
+		name     string
+		noTables string
+		noGraph  string
+		want     string
+	}{
+		{name: "unset", want: bothHalves},
+		{name: "empty", noTables: "", noGraph: "", want: bothHalves},
+		{name: "GOPGQL_NO_TABLES=false", noTables: "false", want: bothHalves},
+		{name: "GOPGQL_NO_TABLES=0", noTables: "0", want: bothHalves},
+		{name: "GOPGQL_NO_TABLES=true", noTables: "true", want: "0001_env_graph.sql"},
+		{name: "GOPGQL_NO_TABLES=1", noTables: "1", want: "0001_env_graph.sql"},
+		{name: "GOPGQL_NO_GRAPH=false", noGraph: "false", want: bothHalves},
+		{name: "GOPGQL_NO_GRAPH=0", noGraph: "0", want: bothHalves},
+		{name: "GOPGQL_NO_GRAPH=true", noGraph: "true", want: "0001_env_tables.sql"},
+		{name: "GOPGQL_NO_GRAPH=1", noGraph: "1", want: "0001_env_tables.sql"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both are set every time, so an ambient value cannot decide a case.
+			t.Setenv("GOPGQL_NO_TABLES", tc.noTables)
+			t.Setenv("GOPGQL_NO_GRAPH", tc.noGraph)
+			dir := filepath.Join(t.TempDir(), "migrations")
+
+			require.NoError(t, run([]string{"generate",
+				"--sdl", writeSDL(t, minimalSDL), "--dir", dir, "--name", "env"}))
+
+			assert.Equal(t, tc.want, strings.Join(written(t, dir), ","))
+		})
+	}
+}
+
 // TestUsageDocumentsVersion: the subcommand is only useful if it is
 // discoverable without already knowing it exists.
 func TestUsageDocumentsVersion(t *testing.T) {
 	assert.Contains(t, usage, "version    Print the version, commit and build date")
+}
+
+// TestNoHalfEnvVarsRejectAValueTheyCannotRead: neither default is safe to guess
+// at — false ignores an operator who meant to disable a half, true disables one
+// they never asked to — so an unparseable value stops the run and names itself.
+func TestNoHalfEnvVarsRejectAValueTheyCannotRead(t *testing.T) {
+	for _, name := range []string{"GOPGQL_NO_TABLES", "GOPGQL_NO_GRAPH"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GOPGQL_NO_TABLES", "")
+			t.Setenv("GOPGQL_NO_GRAPH", "")
+			t.Setenv(name, "yes")
+			dir := filepath.Join(t.TempDir(), "migrations")
+
+			err := run([]string{"generate",
+				"--sdl", writeSDL(t, minimalSDL), "--dir", dir, "--name", "env"})
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), name)
+			assert.Contains(t, err.Error(), "is not a boolean")
+			assert.NoDirExists(t, dir, "nothing is generated on a value that could not be read")
+		})
+	}
+}
+
+// TestUsageDocumentsTheBooleanEnvVars keeps the accepted values discoverable
+// from the usage text, which is where the variables are announced at all.
+func TestUsageDocumentsTheBooleanEnvVars(t *testing.T) {
+	assert.Contains(t, usage, "GOPGQL_NO_TABLES and GOPGQL_NO_GRAPH")
+	assert.Contains(t, usage, "take a boolean")
+}
+
+// written lists the filenames in dir, in the order goose applies them.
+func written(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
