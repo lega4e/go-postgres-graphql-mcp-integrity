@@ -40,11 +40,18 @@ const ExampleSDL = `type Person @node(label: "person") {
 // database returns zero rows, which demonstrates nothing; these rows are what
 // make the Traversal and Multi-pattern results readable.
 //
-// It is chosen for the two default queries at once. The chain Alice → Bob →
-// Carol → Dave is exactly three hops from Alice with four distinct vertices, so
-// ExampleQuery's isomorphism guards are all satisfied; the closing edge Dave →
-// Alice gives Alice an incoming follow, which is what
-// ExampleMultiPatternQuery's `followedBy` branch reads.
+// It is chosen for three default queries at once, all of which read this one
+// schema:
+//
+//   - the chain Alice → Bob → Carol → Dave → Erin is five distinct people, so
+//     ExampleQuery's three hops and ExampleDeepQuery's four both find a path
+//     whose vertices are all different — which is what the compiler's
+//     isomorphism guards require. A shorter chain would satisfy the first and
+//     silently return nothing for the second;
+//   - the closing edge Dave → Alice gives Alice an incoming follow, which is
+//     what ExampleMultiPatternQuery's `followedBy` branch reads. It closes a
+//     cycle without shortening the chain: Alice still has exactly one outgoing
+//     edge, so the traversal queries still match exactly one path.
 //
 // The ids are literal so the fixture is deterministic: the generated table
 // defaults `id` to gen_random_uuid(), and edges have to name the vertices they
@@ -53,12 +60,14 @@ const ExampleSeed = `INSERT INTO persons (id, name, email) VALUES
   ('a0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
   ('a0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com'),
   ('a0000000-0000-4000-8000-000000000003', 'Carol', 'carol@example.com'),
-  ('a0000000-0000-4000-8000-000000000004', 'Dave',  NULL);
+  ('a0000000-0000-4000-8000-000000000004', 'Dave',  NULL),
+  ('a0000000-0000-4000-8000-000000000005', 'Erin',  'erin@example.com');
 
 INSERT INTO follows (source_id, target_id) VALUES
   ('a0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002'),
   ('a0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000003'),
   ('a0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000004'),
+  ('a0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000005'),
   ('a0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000001');`
 
 // ExampleQuery is the M4 exit query (SPEC.md §7 → M4): a three-hop traversal

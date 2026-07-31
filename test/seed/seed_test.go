@@ -134,6 +134,9 @@ type scenario struct {
 	seed  string
 	query string
 	vars  map[string]any
+	// maxDepth overrides the compiler's default ceiling, for the one tab whose
+	// point is that the ceiling is movable. Zero means "use the default".
+	maxDepth int
 }
 
 // scenarios mirrors the runnable tabs on the page. Traversal and Multi-pattern
@@ -176,6 +179,20 @@ var scenarios = []scenario{
 		query: playground.ExampleInterfaceQuery,
 		vars:  nil,
 	},
+	{
+		// The Depth tab refuses its query at the default ceiling, which is the
+		// point of the tab — but a reader who raises the ceiling gets a query,
+		// and it has to find something. Four hops from Alice with five distinct
+		// vertices is what ExampleSeed's chain is long enough for; a shorter
+		// chain would return nothing here and nowhere else, which is exactly
+		// the kind of gap that only shows up in a browser.
+		name:     "depth, ceiling raised",
+		sdl:      playground.ExampleSDL,
+		seed:     playground.ExampleSeed,
+		query:    playground.ExampleDeepQuery,
+		vars:     map[string]any{"n": "Alice"},
+		maxDepth: 4,
+	},
 }
 
 // TestSeededScenarioReturnsRows runs the page's own sequence — schema, seed,
@@ -198,7 +215,11 @@ func TestSeededScenarioReturnsRows(t *testing.T) {
 			_, err = conn.Exec(ctx, s.seed)
 			require.NoError(t, err, "apply the seed:\n%s", s.seed)
 
-			compiled, err := playground.Compile(s.sdl, s.query, s.vars)
+			depth := s.maxDepth
+			if depth == 0 {
+				depth = playground.MaxDepth()
+			}
+			compiled, err := playground.CompileWithMaxDepth(s.sdl, s.query, s.vars, depth)
 			require.NoError(t, err, "Compile")
 
 			rows, err := conn.Query(ctx, compiled.SQL, compiled.Args...)
