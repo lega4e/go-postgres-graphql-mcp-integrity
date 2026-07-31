@@ -490,7 +490,12 @@ function renderRun(spec, outcome) {
   } else {
     appendTable(panel, columns, rows)
   }
+  // Provenance: what PostgreSQL says about itself, and which pinned build of
+  // the fork that PostgreSQL came from. __PGLITE_BUILD__ is derived at build
+  // time from the pin in package.json, so it cannot drift from what was
+  // actually loaded.
   if (version) appendNote(panel, version, 'provenance')
+  appendNote(panel, __PGLITE_BUILD__, 'provenance')
 
   setStatus(spec.status, true,
     rows.length === 1 ? '1 row' : `${rows.length} rows`)

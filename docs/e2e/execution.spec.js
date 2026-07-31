@@ -141,13 +141,16 @@ test('a GRAPH_TABLE query executes in the browser and renders rows', async ({ pa
   expect(runtimeRequests.length,
     'pressing Run is what downloads the runtime').toBeGreaterThan(0)
 
-  // The panel names what produced the rows. The fork emits no `PGlite x.y.z`
-  // suffix, so nothing may require one — this asserts the PostgreSQL version
-  // and prints the whole string for the record.
-  const version = await page.locator('#t-result .result-note.provenance').textContent()
-  console.log(`SELECT version() -> ${version}`)
-  expect(version).toContain('PostgreSQL 19')
-  expect(version).toContain('wasm32')
+  // The panel names what produced the rows: PostgreSQL's own version string,
+  // and the pinned fork build it came from. The fork emits no `PGlite x.y.z`
+  // suffix, so nothing may require one — the whole string is printed for the
+  // record and only the PostgreSQL version is asserted.
+  const provenance = await page.locator('#t-result .result-note.provenance').allTextContents()
+  console.log(`provenance -> ${provenance.join(' | ')}`)
+  expect(provenance[0]).toContain('PostgreSQL 19')
+  expect(provenance[0]).toContain('wasm32')
+  expect(provenance[1]).toContain('postgres-pglite pglite-wasm-19beta2.1')
+  expect(provenance[1]).toContain('@electric-sql/pglite@0.5.4-pg19beta2')
 })
 
 test('the SQL that ran is the SQL on the page, with values bound not interpolated', async ({ page }) => {
