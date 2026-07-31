@@ -9,10 +9,13 @@
     "dev": "vite",
     "prebuild": "npm run wasm",
     "build": "vite build",
-    "preview": "vite preview"
+    "postbuild": "node scripts/check-lazy-runtime.mjs",
+    "preview": "vite preview",
+    "serve:dist": "node scripts/static-server.mjs"
   },
   "devDependencies": {
     "@codemirror/lang-json": "^6.0.2",
+    "@electric-sql/pglite": "https://github.com/lega4e/postgres-pglite/releases/download/pglite-wasm-19beta2.1/electric-sql-pglite-0.5.4-pg19beta2.tgz",
     "@codemirror/lang-sql": "^6.10.0",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",

@@ -561,6 +561,7 @@ jobs:
 - **Vite `base` must be `'./'`** — relative paths, required for PR preview subpath compatibility.
 - **No Git LFS** for any asset served by Pages; LFS objects are not served.
 - The WASM binary is a build artifact, never committed.
+- **No COOP/COEP headers, and none are needed** (§8.6). GitHub Pages cannot set response headers anyway, which is why the PostgreSQL runtime the playground executes against has to be a single-threaded build.
 
 ### 8.4 CI
 
@@ -585,6 +586,38 @@ Pages (§8.1–§8.2) publishes the docs site. The binaries and the container im
 **The trigger is a semver tag push** — `v[0-9]+.[0-9]+.[0-9]+*`, spelled out rather than `v*` so a non-release tag cannot publish. `permissions: contents: write` (the release and its archives) and `packages: write` (GHCR) are the whole grant, and the workflow's own `GITHUB_TOKEN` authenticates to `ghcr.io`: **no PAT and no repository secret** is required. Checkout is `fetch-depth: 0`, since goreleaser derives the version from the tag and the changelog from the commits since the previous one. `docker/setup-qemu-action` and `docker/setup-buildx-action` precede the release step because the arm64 image is built under emulation on an amd64 runner.
 
 **The test suite does not re-run at release time.** It requires Docker and a real `postgres:19beta2`, has no skip path (§10), and costs up to 20 minutes; running it again on a commit `ci.yml` already proved green on `main` would double the release's runtime to re-test the same tree. The gate is therefore ordering — green CI on `main`, then the tag. What *is* checked on every PR is the release configuration itself: a `release-config` job runs `goreleaser check` and a snapshot build with `--skip=publish,docker,announce`, so a broken `.goreleaser.yaml` fails on the PR rather than after a tag is already pushed and a retag is the only fix. The multi-arch image build is exercised only on a tag.
+
+### 8.6 In-browser execution — the pinned PostgreSQL runtime
+
+The playground does not only generate. Each tab that compiles a query — Traversal, Multi-pattern, Directives, Constraints, Depth limit, Interfaces — carries a **Run** control that executes what it generated against a real PostgreSQL 19 with SQL/PGQ, compiled to WebAssembly and running in the reader's own tab. Generate is unchanged: still pure, instant and offline.
+
+**Where the runtime comes from.** `docs/package.json` depends on an npm package tarball published as a **release asset of `lega4e/postgres-pglite`**, by URL:
+
+| | |
+| --- | --- |
+| Release tag | `pglite-wasm-19beta2.1` |
+| Package | `@electric-sql/pglite@0.5.4-pg19beta2` |
+| PostgreSQL | 19beta2 |
+| Fork ref built from | `REL_19_BETA2-pglite` @ `edf1a2c0d7477ef0a458861bf3e55a31ff5dc917` |
+| Toolchain | emscripten 3.1.74, linked `-sUSE_PTHREADS=0` |
+| `pglite.wasm` | 9,379,167 B (3,126,403 B gzipped), sha256 `37f1ffbe…` |
+| `pglite.data` | 5,434,026 B (~1.5 MB gzipped), sha256 `03aad8eb…` |
+
+The package name is unchanged from upstream, so `import { PGlite } from '@electric-sql/pglite'` is a drop-in. The raw `pglite.wasm` and `pglite.data` published beside it are **not loadable on their own** — PGlite's emscripten glue size-checks the filesystem bundle against a value fixed at link time — which is why the tarball, carrying the matching JS runtime and `initdb` module, is what gets pinned.
+
+Pinning is by URL plus `package-lock.json`'s integrity hash: `npm ci` reproduces exactly those bytes on every machine and every CI run, or fails. No registry credential, no vendored binary in git, no build step to reproduce. Moving to a newer build is a pin bump plus `npm install` in one reviewable commit — which is what `postgres-pglite#10`'s re-pin to `REL_19_0` at GA will be.
+
+**The build is beta.** PostgreSQL 19beta2 is a beta and this pin will be replaced at GA. What this build has been exercised for is property-graph DDL, `GRAPH_TABLE` evaluation with bind parameters, and ordinary DDL/DML. What it has **not** been exercised for, and nothing should be built on: extension loading, `pg_dump`, the socket server, and any form of persistence.
+
+**Lazy, and enforced.** The module specifier appears in exactly one place — a dynamic `import()` inside `docs/src/pglite-worker.js` — and the worker itself is not constructed until the first Run. A reader who never presses Run downloads exactly what the site cost before execution existed. `docs/scripts/check-lazy-runtime.mjs` runs as npm's `postbuild` hook, walks Vite's static import graph from every entry, and **fails the build** if anything reachable that way references `pglite.wasm` or `pglite.data`. Laziness that regresses silently on a bundler upgrade is worth nothing.
+
+**In memory only.** `new PGlite()` with no `dataDir`. No IndexedDB, no OPFS, no persistence of any kind, and no cross-tab sharing — `@electric-sql/pglite/worker` is deliberately *not* used, because its leader election exists to share a *persisted* database between tabs, which is the opposite of what this is. Each Run builds a fresh database, applies the generated DDL, applies the scenario's seed, executes the compiled query with its bind values, and discards the database.
+
+**The two WebAssembly modules never meet.** `gopgql.wasm` stays on the main thread; PGlite runs in a dedicated Web Worker. They have separate linear memories and nothing is shared between them: what crosses is text, plain arrays and plain values, structured-cloned by `postMessage`.
+
+**Previews keep parity with production.** No asset is withheld from a preview, because the runtime's bytes come from an immutable pinned tarball and are byte-identical on every build — so `gh-pages` stores one git blob for them however many previews reference it. Contrast `gopgql.wasm`, rebuilt from Go source on every commit, which adds a fresh blob per deploy. The cost that actually matters is the reader's download, and the lazy-load contract already bounds that to people who asked for it.
+
+**How it is proven.** `test/seed` runs the schema → seed → query sequence for every runnable tab against a real `postgres:19beta2` container, so a fixture cannot drift from the SDL beside it. `docs/e2e` then runs the same sequence in a real Chromium, in a Web Worker, on the pinned wasm build, served from a preview-shaped subpath by a server that sets no isolation headers — and asserts rows come back. Both are merge gates. Nothing here is inferred from the fork branch a build came from or from symbols in the binary.
 
 -----
 

@@ -223,3 +223,105 @@ a {
 .code-copy:hover {
   color: var(--ga-fg, #ededed);
 }
+
+/* ---- Execution ------------------------------------------------------------
+   The Run control and the result of running. This half of a scenario is
+   separated from the generated panes by a rule, because everything above it is
+   computed from the inputs and everything below it is what PostgreSQL did. */
+
+.execution {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ga-space-3, 12px);
+  padding-top: var(--ga-space-5, 20px);
+  border-top: 1px solid var(--ga-border, #1a1a1a);
+}
+
+/* The cost of pressing Run, stated before it is pressed. */
+.exec-cost {
+  margin: 0;
+  max-width: 90ch;
+  font-size: var(--ga-fs-xs, 12px);
+  color: var(--ga-muted, #878787);
+}
+
+.result-panel:empty {
+  display: none;
+}
+
+.result-note {
+  margin: 0;
+  font-size: var(--ga-fs-sm, 14px);
+  color: var(--ga-muted, #878787);
+}
+
+.result-note.error {
+  color: var(--ga-red, #ff6568);
+}
+
+.result-note.warn {
+  color: var(--ga-yellow, #f5a623);
+}
+
+/* The server version line under a result: provenance, not commentary. */
+.result-note.provenance {
+  margin-top: var(--ga-space-2, 8px);
+  font-family: var(--ga-font-mono, ui-monospace, monospace);
+  font-size: var(--ga-fs-xs, 12px);
+  color: var(--ga-dim, #454545);
+}
+
+/* PostgreSQL's own message, verbatim and unwrapped. */
+.result-error {
+  margin: var(--ga-space-2, 8px) 0 0;
+  padding: var(--ga-space-3, 12px);
+  overflow-x: auto;
+  font-family: var(--ga-font-mono, ui-monospace, monospace);
+  font-size: var(--ga-fs-sm, 14px);
+  color: var(--ga-fg, #ededed);
+  background: var(--ga-bg-elev, #1a1a1a);
+  border: 1px solid var(--ga-border-strong, #2a2a2a);
+  border-radius: var(--ga-radius, 6px);
+  white-space: pre-wrap;
+}
+
+/* A wide result scrolls inside its own box rather than widening the page. */
+.result-scroll {
+  overflow-x: auto;
+  max-height: 26em;
+  overflow-y: auto;
+  border: 1px solid var(--ga-border-strong, #2a2a2a);
+  border-radius: var(--ga-radius, 6px);
+}
+
+.result-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--ga-font-mono, ui-monospace, monospace);
+  font-size: var(--ga-fs-sm, 14px);
+}
+
+.result-table th,
+.result-table td {
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--ga-border, #1a1a1a);
+}
+
+.result-table th {
+  position: sticky;
+  top: 0;
+  color: var(--ga-fg, #ededed);
+  background: var(--ga-bg-elev, #1a1a1a);
+}
+
+.result-table td {
+  color: var(--ga-muted, #878787);
+}
+
+/* A SQL NULL is not an empty string and must not read as one. */
+.result-table td.null {
+  color: var(--ga-dim, #454545);
+  font-style: italic;
+}

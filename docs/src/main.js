@@ -10,7 +10,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 5
+const REQUIRED_API_VERSION = 6
 
 const el = (id) => document.getElementById(id)
 
@@ -82,6 +82,7 @@ function renderTraversal() {
   if (cmp.error) ok = false
 
   setStatus('t-status', ok, ok ? 'generated' : 'see errors')
+  setRunnable('traversal', ok, cmp)
 }
 
 // renderMultiPattern shows the M5 workaround: the same call as Traversal, but on
@@ -100,6 +101,7 @@ function renderMultiPattern() {
   const calls = cmp.error ? 0 : (cmp.sql.match(/GRAPH_TABLE/g) ?? []).length
   setStatus('p-status', ok,
     ok ? `${calls} GRAPH_TABLE call${calls === 1 ? '' : 's'}` : 'see errors')
+  setRunnable('multipattern', ok, cmp)
 }
 
 // renderDirectives shows what the M6 mapping directives do to the generated
@@ -115,6 +117,7 @@ function renderDirectives() {
   if (cmp.error) ok = false
 
   setStatus('c-status', ok, ok ? 'generated' : 'see errors')
+  setRunnable('directives', ok, cmp)
 }
 
 // renderConstraints shows the M7 constraint directives in the generated DDL —
@@ -131,6 +134,7 @@ function renderConstraints() {
   if (cmp.error) ok = false
 
   setStatus('k-status', ok, ok ? 'generated' : 'see errors')
+  setRunnable('constraints', ok, cmp)
 }
 
 // renderRename diffs the revised schema against the one in the scenario above
@@ -188,11 +192,16 @@ function renderDepth() {
       `${cmp.error}\n\n` +
       `MaxDepth = ${cmp.maxDepth}. No SQL was emitted, so nothing reached a database.`)
     setStatus('d-status', schemaOk, schemaOk ? 'rejected, as designed' : 'see errors')
+    // There is no SQL to run, which is the point of the tab: nothing reached a
+    // database because nothing was emitted. Offering Run here would suggest
+    // there was something to send.
+    setRunnable('depth', false, cmp)
     return
   }
   setCode('d-sql', cmp.error || cmp.sql)
   const ok = schemaOk && !cmp.error
   setStatus('d-status', ok, ok ? `compiled within MaxDepth ${cmp.maxDepth}` : 'see errors')
+  setRunnable('depth', ok, cmp)
 }
 
 function renderInterfaces() {
@@ -204,6 +213,7 @@ function renderInterfaces() {
   if (cmp.error) ok = false
 
   setStatus('i-status', ok, ok ? 'generated' : 'see errors')
+  setRunnable('interfaces', ok, cmp)
 }
 
 function renderMigration() {
@@ -222,6 +232,313 @@ function renderDelta() {
     return
   }
   setStatus('m-status2', true, dl.changed ? 'generated' : 'no schema change')
+}
+
+// --- execution ------------------------------------------------------------
+//
+// Everything above generates. Everything below runs what was generated against
+// a real PostgreSQL, compiled to WebAssembly, in the reader's own browser.
+//
+// The runtime is ~15 MB and is not fetched until someone presses Run. The
+// module specifier lives in exactly one place — a dynamic import inside
+// pglite-worker.js — and the worker itself is not constructed until the first
+// Run, so nothing on the boot path can reach it.
+
+// executions lists the scenarios that compile a query and can therefore be
+// executed. Rename, Delta, Migration and Conformance are absent because they
+// produce no query: a Run control on them would have nothing to send.
+//
+// `schema` and `sql` are the *panes*, not the values. Run reads the SQL it
+// executes out of the pane the reader is looking at, so "the SQL shown is the
+// SQL executed" holds by construction rather than by convention.
+const executions = {
+  traversal: {
+    schema: 't-schema', sql: 't-sql', panel: 't-result', status: 't-exec-status',
+    seed: () => globalThis.gopgqlExampleSeed,
+  },
+  multipattern: {
+    schema: 'p-schema', sql: 'p-sql', panel: 'p-result', status: 'p-exec-status',
+    seed: () => globalThis.gopgqlExampleSeed,
+  },
+  directives: {
+    schema: 'c-schema', sql: 'c-sql', panel: 'c-result', status: 'c-exec-status',
+    seed: () => globalThis.gopgqlExampleDirectivesSeed,
+  },
+  constraints: {
+    schema: 'k-schema', sql: 'k-sql', panel: 'k-result', status: 'k-exec-status',
+    seed: () => globalThis.gopgqlExampleConstraintsSeed,
+  },
+  depth: {
+    schema: 'd-schema', sql: 'd-sql', panel: 'd-result', status: 'd-exec-status',
+    // The Depth tab shares the Traversal schema, so it shares its seed. It is
+    // runnable only when the ceiling was raised enough for a query to exist.
+    seed: () => globalThis.gopgqlExampleSeed,
+  },
+  interfaces: {
+    schema: 'i-schema', sql: 'i-sql', panel: 'i-result', status: 'i-exec-status',
+    seed: () => globalThis.gopgqlExampleInterfaceSeed,
+  },
+}
+
+// runState is per scenario: whether the last generation produced something
+// runnable, the bind values that go with it, and whether a run is in flight.
+const runState = new Map()
+
+// One worker for the whole page, built on the first Run and reused after it, so
+// a second Run does not re-download anything.
+let worker = null
+// runtimeUnavailable holds the reason the runtime could not be loaded, once it
+// has failed. Everything else on the page keeps working.
+let runtimeUnavailable = ''
+let nextRunId = 0
+const pending = new Map()
+
+/** The Run control for a scenario, if the markup declares one. */
+function execButton(name) {
+  return document.querySelector(`.exec[data-scenario="${name}"]`)
+}
+
+/**
+ * decodeArgs turns the compile result's `args` — a JSON array string — into the
+ * ordered values to bind. A module that predates this surface would omit the
+ * field entirely; the API version check refuses that pairing before any of this
+ * runs, so an empty array here means "this query binds nothing", never "the
+ * values were lost".
+ */
+function decodeArgs(raw) {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * setRunnable records what the last generation left behind. A scenario whose
+ * compile failed, or whose query was refused for exceeding the depth ceiling,
+ * is not runnable and its control says so.
+ */
+function setRunnable(name, ok, compiled) {
+  if (!executions[name]) return
+  const prior = runState.get(name)
+  const state = {
+    ok: Boolean(ok) && Boolean(compiled?.sql),
+    args: ok ? decodeArgs(compiled?.args) : [],
+    running: prior?.running ?? false,
+  }
+  runState.set(name, state)
+
+  const btn = execButton(name)
+  if (!btn) return
+  const blocked = !state.ok || state.running || runtimeUnavailable
+  if (blocked) btn.setAttribute('disabled', '')
+  else btn.removeAttribute('disabled')
+}
+
+// --- the worker ------------------------------------------------------------
+
+function failAllPending(reason) {
+  runtimeUnavailable = reason
+  for (const { reject } of pending.values()) reject(new Error(reason))
+  pending.clear()
+  for (const name of Object.keys(executions)) {
+    const btn = execButton(name)
+    if (btn) btn.setAttribute('disabled', '')
+  }
+}
+
+function ensureWorker() {
+  if (worker) return worker
+  // new URL(..., import.meta.url) is what lets Vite emit the worker as its own
+  // chunk with a path relative to the bundle — which is what makes it resolve
+  // under a pr-preview/pr-<N>/ subpath as well as at the site root.
+  worker = new Worker(new URL('./pglite-worker.js', import.meta.url), { type: 'module' })
+  worker.addEventListener('message', (event) => {
+    const msg = event.data
+    const entry = pending.get(msg?.id)
+    if (!entry) return
+    pending.delete(msg.id)
+    if (msg.type === 'error') entry.reject(new Error(msg.message))
+    else entry.resolve(msg)
+  })
+  // A worker that fails to start — or a runtime that fails to instantiate
+  // inside it — surfaces here rather than as a message.
+  worker.addEventListener('error', (event) => {
+    failAllPending(event.message || 'the PostgreSQL runtime failed to load')
+  })
+  return worker
+}
+
+function postRun(request) {
+  const w = ensureWorker()
+  const id = ++nextRunId
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject })
+    w.postMessage({ type: 'run', id, ...request })
+  })
+}
+
+// --- rendering a result ----------------------------------------------------
+
+/** Empty a panel and hand it back for rebuilding. */
+function resetPanel(id) {
+  const panel = el(id)
+  panel.textContent = ''
+  return panel
+}
+
+/** A short line of prose in the result panel. */
+function appendNote(panel, text, kind) {
+  const p = document.createElement('p')
+  p.className = kind ? `result-note ${kind}` : 'result-note'
+  p.textContent = text
+  panel.appendChild(p)
+}
+
+/**
+ * PostgreSQL's own message, verbatim, under the name of the step that raised
+ * it. Watching PostgreSQL accept or reject generated SQL is the feature, so
+ * nothing here paraphrases what it said.
+ */
+function appendDatabaseError(panel, step, message) {
+  appendNote(panel, `${step} failed:`, 'error')
+  const pre = document.createElement('pre')
+  pre.className = 'result-error'
+  pre.textContent = message
+  panel.appendChild(pre)
+}
+
+/** The rows, as a table with the result's own column names. */
+function appendTable(panel, columns, rows) {
+  const scroll = document.createElement('div')
+  scroll.className = 'result-scroll'
+  const table = document.createElement('table')
+  table.className = 'result-table'
+
+  const head = document.createElement('thead')
+  const headRow = document.createElement('tr')
+  for (const name of columns) {
+    const th = document.createElement('th')
+    th.textContent = name
+    headRow.appendChild(th)
+  }
+  head.appendChild(headRow)
+  table.appendChild(head)
+
+  const body = document.createElement('tbody')
+  for (const row of rows) {
+    const tr = document.createElement('tr')
+    for (const value of row) {
+      const td = document.createElement('td')
+      // A SQL NULL and the empty string are different results and have to look
+      // different.
+      if (value === null) {
+        td.textContent = 'NULL'
+        td.className = 'null'
+      } else {
+        td.textContent = String(value)
+      }
+      tr.appendChild(td)
+    }
+    body.appendChild(tr)
+  }
+  table.appendChild(body)
+  scroll.appendChild(table)
+  panel.appendChild(scroll)
+}
+
+/**
+ * renderRun writes one run's outcome. Every step is an outcome, not an
+ * exception: a rejected statement, an inapplicable seed and an empty result are
+ * all things PostgreSQL did, and the panel says which.
+ */
+function renderRun(spec, outcome) {
+  const panel = resetPanel(spec.panel)
+  const { steps, version } = outcome
+
+  if (!steps.schema?.ok) {
+    appendDatabaseError(panel, 'Applying the generated schema', steps.schema?.error ?? 'unknown error')
+    setStatus(spec.status, false, 'schema rejected')
+    return
+  }
+
+  // The seed is a fixture bound to an *example* schema. An edited schema it no
+  // longer fits is not a page error — the query still runs, and returns what it
+  // honestly finds.
+  if (steps.seed && !steps.seed.ok) {
+    appendNote(panel,
+      'The seed data did not apply to this schema — it is a fixture for the ' +
+      'example schema, and you have edited it. The query below still ran.',
+      'warn')
+    const pre = document.createElement('pre')
+    pre.className = 'result-error'
+    pre.textContent = steps.seed.error
+    panel.appendChild(pre)
+  }
+
+  if (!steps.query?.ok) {
+    appendDatabaseError(panel, 'Executing the query', steps.query?.error ?? 'unknown error')
+    setStatus(spec.status, false, 'query rejected')
+    return
+  }
+
+  const { columns, rows } = steps.query
+  if (rows.length === 0) {
+    appendNote(panel, 'The query succeeded and returned no rows.')
+  } else {
+    appendTable(panel, columns, rows)
+  }
+  if (version) appendNote(panel, version, 'provenance')
+
+  setStatus(spec.status, true,
+    rows.length === 1 ? '1 row' : `${rows.length} rows`)
+}
+
+/**
+ * execute runs one scenario: the generated DDL, then the scenario's seed, then
+ * the SQL in its pane with the bind values from its last compile.
+ *
+ * gopgqlSchema's DDL is what runs — not gopgqlMigration's document, which is
+ * goose-annotated across two files and would need a migration tool's annotation
+ * parser to apply.
+ */
+async function execute(name) {
+  const spec = executions[name]
+  const state = runState.get(name)
+  if (!spec || !state?.ok || state.running) return
+
+  const btn = execButton(name)
+  state.running = true
+  if (btn) btn.setAttribute('disabled', '')
+  setStatus(spec.status, true, 'running — this may take a few seconds…')
+  const panel = resetPanel(spec.panel)
+  appendNote(panel, 'Starting PostgreSQL in your browser…')
+
+  const request = {
+    ddl: valueOf(spec.schema),
+    seed: spec.seed() ?? '',
+    sql: valueOf(spec.sql),
+    args: state.args,
+  }
+  // A debugging affordance, and what the browser suite asserts against to prove
+  // the executed SQL is the SQL on the page.
+  globalThis.gopgqlLastRun = { scenario: name, ...request }
+
+  try {
+    renderRun(spec, await postRun(request))
+  } catch (err) {
+    const reason = String(err?.message ?? err)
+    const failed = resetPanel(spec.panel)
+    appendNote(failed,
+      `Execution is unavailable: ${reason}. Everything above is still ` +
+      'generated by the WebAssembly module and is unaffected.', 'error')
+    setStatus(spec.status, false, 'runtime unavailable')
+  } finally {
+    state.running = false
+    if (btn && !runtimeUnavailable && state.ok) btn.removeAttribute('disabled')
+  }
 }
 
 // scenarios maps each Generate button (and each live-edited input) to the
@@ -386,6 +703,11 @@ async function boot() {
 }
 
 upgradeEditors()
+
+for (const name of Object.keys(executions)) {
+  const btn = execButton(name)
+  if (btn) btn.addEventListener('click', () => execute(name))
+}
 
 for (const [name, scenario] of Object.entries(scenarios)) {
   for (const btn of document.querySelectorAll(`.run[data-scenario="${name}"]`)) {
