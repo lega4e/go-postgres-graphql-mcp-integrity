@@ -48,6 +48,12 @@ import (
 // nothing happens. Bump this whenever an exported function's arguments or
 // result shape change — and whenever the page starts depending on a new export,
 // so a panel cannot come up blank against a module that lacks it.
+//
+// Bump it in the **same commit** as REQUIRED_API_VERSION in docs/src/main.js.
+// Splitting the two leaves every build in between a mismatched pair that the
+// page refuses to run — invisible to CI, which never loads the page, and
+// immediately visible to anyone who opens a PR preview. TestAPIVersionsAgree
+// enforces this.
 const apiVersion = 6
 
 func main() {
