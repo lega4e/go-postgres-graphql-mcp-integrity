@@ -34,8 +34,8 @@
 
     <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <script type="module" crossorigin src="./assets/index-C7ZROl2-.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
+    <script type="module" crossorigin src="./assets/index-XK9rvpEZ.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Bh_L780E.css">
   </head>
   <body class="ga-theme">
     <main>
@@ -53,10 +53,15 @@
           hardcoded: every output is generated from your input.
         </p>
         <ga-note>
-          There is no database here, so query <em>results</em> can't be shown —
-          only the generated SQL. Shaping rows into nested JSON (with parent
-          dedup) happens at execution time against PostgreSQL; it is covered by
-          the godog integration suite, not this browser demo.
+          <strong>Generate</strong> is instant, pure and offline. Each query tab
+          also has a <strong>Run in PostgreSQL</strong> button, which executes
+          the generated schema and the compiled query against a real
+          PostgreSQL&nbsp;19 with SQL/PGQ, compiled to WebAssembly and running
+          in this tab — nothing is sent anywhere. It downloads a ~15&nbsp;MB
+          build the first time you press it and never before, and the database
+          is in memory only, so reloading the page starts clean. Shaping rows
+          into nested JSON (with parent dedup) is still out of scope here; it is
+          covered by the godog integration suite.
         </ga-note>
         <p id="boot" class="status">loading WebAssembly…</p>
       </header>
@@ -100,6 +105,23 @@
               <ga-code id="t-sql" data-lang="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="t-params"></ga-code>
+            </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="traversal" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="t-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, seed data and query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab. Nothing
+                is fetched until you press it: the first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire) and takes a few seconds to start.
+                The database is in memory only and is discarded afterwards.
+              </p>
+              <div id="t-result" class="result-panel"></div>
             </div>
           </div>
         </div>
@@ -145,6 +167,23 @@
               <label>Database query</label>
               <ga-code id="d-sql" data-lang="sql"></ga-code>
             </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="depth" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="d-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Unavailable while the query is refused — the rejection happens
+                at compile time, so there is no SQL to send. Raise the ceiling
+                until a query compiles and this becomes available. The first
+                press downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="d-result" class="result-panel"></div>
+            </div>
           </div>
         </div>
 
@@ -183,6 +222,23 @@
               <ga-code id="c-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
               <ga-code id="c-sql" data-lang="sql"></ga-code>
+            </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="directives" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="c-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, seed data and query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                result column is the renamed physical column. The first press
+                downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="c-result" class="result-panel"></div>
             </div>
           </div>
         </div>
@@ -236,6 +292,23 @@
               <ga-code id="k-sql" data-lang="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="k-params"></ga-code>
+            </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="constraints" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="k-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, seed data and query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                defaults and <code>CHECK</code> constraints are enforced by the
+                database itself. The first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire); nothing is fetched before that.
+              </p>
+              <div id="k-result" class="result-panel"></div>
             </div>
           </div>
 
@@ -311,6 +384,22 @@
               <label>Bind parameters</label>
               <ga-code id="p-params"></ga-code>
             </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="multipattern" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="p-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the joined <code>GRAPH_TABLE</code> calls above against
+                a real PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab.
+                The first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire); nothing is fetched before that.
+              </p>
+              <div id="p-result" class="result-panel"></div>
+            </div>
           </div>
         </div>
 
@@ -344,6 +433,23 @@
               <ga-code id="i-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
               <ga-code id="i-sql" data-lang="sql"></ga-code>
+            </div>
+            <div class="execution">
+              <div class="action">
+                <ga-button class="exec" data-scenario="interfaces" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="i-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, seed data and query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                rows come from both tables the interface spans. The first press
+                downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="i-result" class="result-panel"></div>
             </div>
           </div>
         </div>
