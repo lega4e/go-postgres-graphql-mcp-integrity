@@ -35,6 +35,32 @@ const ExampleSDL = `type Person @node(label: "person") {
                          @hasInverse(field: "follows")
 }`
 
+// ExampleSeed is the fixture ExampleSDL's generated tables are filled with
+// before a compiled query runs against them. A GRAPH_TABLE query over an empty
+// database returns zero rows, which demonstrates nothing; these rows are what
+// make the Traversal and Multi-pattern results readable.
+//
+// It is chosen for the two default queries at once. The chain Alice → Bob →
+// Carol → Dave is exactly three hops from Alice with four distinct vertices, so
+// ExampleQuery's isomorphism guards are all satisfied; the closing edge Dave →
+// Alice gives Alice an incoming follow, which is what
+// ExampleMultiPatternQuery's `followedBy` branch reads.
+//
+// The ids are literal so the fixture is deterministic: the generated table
+// defaults `id` to gen_random_uuid(), and edges have to name the vertices they
+// join.
+const ExampleSeed = `INSERT INTO persons (id, name, email) VALUES
+  ('a0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
+  ('a0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com'),
+  ('a0000000-0000-4000-8000-000000000003', 'Carol', 'carol@example.com'),
+  ('a0000000-0000-4000-8000-000000000004', 'Dave',  NULL);
+
+INSERT INTO follows (source_id, target_id) VALUES
+  ('a0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002'),
+  ('a0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000003'),
+  ('a0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000004'),
+  ('a0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000001');`
+
 // ExampleQuery is the M4 exit query (SPEC.md §7 → M4): a three-hop traversal
 // filtered by a bound variable, compiled to a single GRAPH_TABLE. It is
 // editable in the playground.
@@ -65,6 +91,18 @@ const ExampleDirectivesQuery = `{ products(title: $t) { title price category } }
 
 // ExampleDirectivesVars binds ExampleDirectivesQuery's variable.
 const ExampleDirectivesVars = `{ "t": "Chain" }`
+
+// ExampleDirectivesSeed fills ExampleDirectivesSDL's generated table. It is
+// written against the *physical* column names, so `title` is inserted as
+// `name` — the same rename the compiled query projects, which is the whole
+// point of the scenario.
+//
+// One row matches ExampleDirectivesVars' "Chain"; the others are there so the
+// filter is visibly doing something.
+const ExampleDirectivesSeed = `INSERT INTO products (id, sku, name, price, category, vendor) VALUES
+  ('b0000000-0000-4000-8000-000000000001', 'CHN-11S', 'Chain',    24.99, 'drivetrain',  'Shimano'),
+  ('b0000000-0000-4000-8000-000000000002', 'CST-11S', 'Cassette', 59.50, 'drivetrain',  'Shimano'),
+  ('b0000000-0000-4000-8000-000000000003', 'BTL-750', 'Bottle',    8.00, 'accessories', NULL);`
 
 // ExampleConstraintsSDL exercises the whole M7 constraint surface at once
 // (SPEC.md §5, §7 → M7): a column default, a column check, a table-level check
@@ -101,6 +139,22 @@ const ExampleConstraintsQuery = `{ employees(tenant: $t, email: $e) { role joine
 
 // ExampleConstraintsVars binds ExampleConstraintsQuery's two variables.
 const ExampleConstraintsVars = `{ "t": "acme", "e": "ada@acme.example" }`
+
+// ExampleConstraintsSeed fills ExampleConstraintsSDL's generated tables with
+// two employees of one tenant and the edge between them. The first row is the
+// one ExampleConstraintsVars selects by natural key.
+//
+// `role` is supplied on both rows and is inside the generated CHECK; `left_at`
+// is left out entirely, so the table-level check comparing it to `joined_at`
+// holds. Nothing here supplies a value the column defaults would have provided
+// — `joined_at` is given explicitly only so the rendered result is stable
+// rather than "whenever you pressed Run".
+const ExampleConstraintsSeed = `INSERT INTO employees (id, tenant, email, role, joined_at) VALUES
+  ('c0000000-0000-4000-8000-000000000001', 'acme', 'ada@acme.example',   'admin',  '2024-01-15T09:00:00Z'),
+  ('c0000000-0000-4000-8000-000000000002', 'acme', 'grace@acme.example', 'member', '2024-03-02T09:00:00Z');
+
+INSERT INTO reports_to (source_id, target_id) VALUES
+  ('c0000000-0000-4000-8000-000000000002', 'c0000000-0000-4000-8000-000000000001');`
 
 // RevisedConstraintsSDL renames one field of ExampleConstraintsSDL — `email`
 // becomes `workEmail`, mapped to the column `work_email` — and declares the
@@ -165,6 +219,25 @@ type Bot implements Actor & Profile @node(label: "bot") {
 // concrete type. Because an actor may be a person, the two positions could bind
 // the same row, so the compiler emits the isomorphism guard (SPEC.md §2.2).
 const ExampleInterfaceQuery = `{ actors { name follows { name } } }`
+
+// ExampleInterfaceSeed fills ExampleInterfaceSDL's four generated tables. Both
+// implementors of Actor are populated, and both edge tables carry a row, so
+// ExampleInterfaceQuery — which matches the shared `actor` label and traverses
+// `follows` — returns one row from each: a person following a person, and a bot
+// following a person. A seed covering only `persons` would return rows too, and
+// would hide the fact that the interface spans two tables.
+const ExampleInterfaceSeed = `INSERT INTO persons (id, name, email) VALUES
+  ('d0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
+  ('d0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com');
+
+INSERT INTO bots (id, name, vendor) VALUES
+  ('d0000000-0000-4000-8000-000000000003', 'Buildbot', 'acme');
+
+INSERT INTO follows (source_id, target_id) VALUES
+  ('d0000000-0000-4000-8000-000000000001', 'd0000000-0000-4000-8000-000000000002');
+
+INSERT INTO bot_follows (source_id, target_id) VALUES
+  ('d0000000-0000-4000-8000-000000000003', 'd0000000-0000-4000-8000-000000000001');`
 
 // ExampleVars is the initial variables document (JSON) bound to ExampleQuery.
 const ExampleVars = `{ "n": "Alice" }`
@@ -298,14 +371,21 @@ gopgql: compared elements, labels and properties only; defaults, constraints and
 gopgql: property graph "app_graph" has drifted from schema.graphql: 5 findings
 exit 2`
 
-// Compiled is the output of Compile: the GRAPH_TABLE SQL and a human-readable
-// rendering of its ordered bind parameters. Both are pure functions of the
-// inputs — no database is consulted (SPEC.md §6.1).
+// Compiled is the output of Compile: the GRAPH_TABLE SQL, its ordered bind
+// values, and a human-readable rendering of them. All three are pure functions
+// of the inputs — no database is consulted (SPEC.md §6.1).
 type Compiled struct {
 	// SQL is the compiled GRAPH_TABLE query, including any $n placeholders.
 	SQL string
-	// Params renders the ordered bind parameters, e.g. "$1 = Alice", or a note
-	// when the query carries none.
+	// Args are the ordered bind values the placeholders refer to: $1 is
+	// Args[0], $2 is Args[1], and so on. They are compiler.Compiled.Args
+	// carried through unconverted — same name, same values — so a caller that
+	// intends to *execute* the query has something to bind. It is nil when the
+	// query carries no variables, and nil on every error path.
+	Args []any
+	// Params renders Args for a reader, e.g. "$1 = Alice", or a note when the
+	// query carries none. It is the display form of Args, not a second fact:
+	// the two always describe the same values.
 	Params string
 }
 
@@ -333,7 +413,7 @@ func CompileWithMaxDepth(sdlSrc, query string, vars map[string]any, maxDepth int
 	if err != nil {
 		return Compiled{}, err
 	}
-	return Compiled{SQL: sql, Params: renderParams(args)}, nil
+	return Compiled{SQL: sql, Args: args, Params: renderParams(args)}, nil
 }
 
 // MaxDepth reports the compiler's default traversal-depth ceiling: what the

@@ -14,7 +14,7 @@
 //   - gopgqlSchema(sdl) -> {schema, error}
 //   - gopgqlGraph(sdl) -> {graph, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
-//   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, error, depthExceeded, maxDepth}
+//   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, args, error, depthExceeded, maxDepth}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
 //
 // gopgqlCompile classifies a depth rejection separately from other errors so the
@@ -48,7 +48,7 @@ import (
 // nothing happens. Bump this whenever an exported function's arguments or
 // result shape change — and whenever the page starts depending on a new export,
 // so a panel cannot come up blank against a module that lacks it.
-const apiVersion = 5
+const apiVersion = 6
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
@@ -60,17 +60,21 @@ func main() {
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
 	js.Global().Set("gopgqlExampleVars", js.ValueOf(playground.ExampleVars))
+	js.Global().Set("gopgqlExampleSeed", js.ValueOf(playground.ExampleSeed))
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
 	js.Global().Set("gopgqlExampleMultiQuery", js.ValueOf(playground.ExampleMultiPatternQuery))
 	js.Global().Set("gopgqlExampleDirectivesSDL", js.ValueOf(playground.ExampleDirectivesSDL))
 	js.Global().Set("gopgqlExampleDirectivesQuery", js.ValueOf(playground.ExampleDirectivesQuery))
 	js.Global().Set("gopgqlExampleDirectivesVars", js.ValueOf(playground.ExampleDirectivesVars))
+	js.Global().Set("gopgqlExampleDirectivesSeed", js.ValueOf(playground.ExampleDirectivesSeed))
 	js.Global().Set("gopgqlExampleInterfaceSDL", js.ValueOf(playground.ExampleInterfaceSDL))
 	js.Global().Set("gopgqlExampleInterfaceQuery", js.ValueOf(playground.ExampleInterfaceQuery))
+	js.Global().Set("gopgqlExampleInterfaceSeed", js.ValueOf(playground.ExampleInterfaceSeed))
 	js.Global().Set("gopgqlExampleConstraintsSDL", js.ValueOf(playground.ExampleConstraintsSDL))
 	js.Global().Set("gopgqlExampleConstraintsQuery", js.ValueOf(playground.ExampleConstraintsQuery))
 	js.Global().Set("gopgqlExampleConstraintsVars", js.ValueOf(playground.ExampleConstraintsVars))
+	js.Global().Set("gopgqlExampleConstraintsSeed", js.ValueOf(playground.ExampleConstraintsSeed))
 	js.Global().Set("gopgqlRevisedConstraintsSDL", js.ValueOf(playground.RevisedConstraintsSDL))
 	// A fixture, not a result: see playground.ExampleConformanceReport and the
 	// note on the page. It is exported alongside the generated values so the
@@ -145,13 +149,28 @@ func migration(_ js.Value, args []js.Value) any {
 // and an optional fourth: the traversal-depth ceiling, in hops from the root
 // field. Omitting it uses the compiler's default. The returned maxDepth is the
 // ceiling that was applied, so the page can always name the limit it is showing.
+//
+// It returns the bind values twice, for two different readers. `params` is the
+// rendering a person reads ("$1 = Alice"); `args` is a JSON array the page
+// decodes with JSON.parse and binds to a query it executes. JSON rather than
+// js.ValueOf on the []any because the boundary is then explicit, is symmetric
+// with how variables cross the other way (parseVars), and keeps this function
+// clear of js.ValueOf's panic-on-unsupported-type behaviour as the compiler's
+// value set grows.
+//
+// The precision limit is JavaScript's number model, not JSON's. A GraphQL Int
+// literal is a Go int64 (compiler.value parses ast.IntValue with
+// strconv.ParseInt), and *any* crossing into JS — JSON.parse or js.ValueOf
+// alike — lands it in a float64, so an integer past 2^53 loses precision either
+// way. Switching encodings would not change that. The example schemas use text
+// and small integers, so it does not bite in practice.
 func compile(_ js.Value, args []js.Value) any {
 	maxDepth := playground.MaxDepth()
 	if len(args) >= 4 && args[3].Type() == js.TypeNumber {
 		maxDepth = args[3].Int()
 	}
 	result := map[string]any{
-		"sql": "", "params": "", "error": "",
+		"sql": "", "params": "", "args": "[]", "error": "",
 		"depthExceeded": false, "maxDepth": maxDepth,
 	}
 	if len(args) < 3 || args[0].Type() != js.TypeString ||
@@ -172,6 +191,19 @@ func compile(_ js.Value, args []js.Value) any {
 			result["maxDepth"] = limit
 		}
 		return js.ValueOf(result)
+	}
+	// A query with no variables gets "[]" rather than json.Marshal's "null", so
+	// the page always JSON.parses an array and never has to special-case it.
+	if len(out.Args) > 0 {
+		encoded, err := json.Marshal(out.Args)
+		if err != nil {
+			// Unreachable for the types the compiler produces today, but a
+			// silently empty args is precisely the failure the API version bump
+			// exists to prevent, so it is reported rather than dropped.
+			result["error"] = "bind parameters: " + err.Error()
+			return js.ValueOf(result)
+		}
+		result["args"] = string(encoded)
 	}
 	result["sql"] = out.SQL
 	result["params"] = out.Params
