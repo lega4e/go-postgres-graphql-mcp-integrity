@@ -579,7 +579,7 @@ func ShapeJSON(sdlSrc, query string, vars map[string]any, maxDepth int, res Resu
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	return out, nil
 }
 
 // MaxDepth reports the compiler's default traversal-depth ceiling: what the
@@ -756,6 +756,12 @@ func ShapeParity(sdlSrc, query string, vars map[string]any, goRes, sqlRes Result
 
 	goResp, err := Shape(goCompiled.Projection, goRes)
 	if err != nil {
+		// ST1005 exempts a proper noun, and "Go" is one: it is the language's
+		// name, and "Go-side" is what this codebase calls the strategy
+		// everywhere else. staticcheck cannot tell it from a capitalised
+		// sentence, but lowercasing it here would leave "go-side" standing
+		// next to the "SQL-side" staticcheck accepts as an acronym.
+		//nolint:staticcheck // ST1005: "Go" is a proper noun.
 		return Parity{}, fmt.Errorf("Go-side: %w", err)
 	}
 	sqlResp, err := ShapeSQLSide(sqlCompiled.Projection, sqlRes)
@@ -765,6 +771,7 @@ func ShapeParity(sdlSrc, query string, vars map[string]any, goRes, sqlRes Result
 
 	goBytes, err := shape.Encode(goResp)
 	if err != nil {
+		//nolint:staticcheck // ST1005: proper noun, as above.
 		return Parity{}, fmt.Errorf("Go-side: %w", err)
 	}
 	sqlBytes, err := shape.Encode(sqlResp)
