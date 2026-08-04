@@ -456,7 +456,7 @@ test('the two shaping strategies agree, live', async ({ page }) => {
   // toggle is showing. Flipping it changes the SQL on screen and nothing else:
   // the bind parameters are part of the MATCH, which neither strategy touches.
   await expect(page.locator('#s-sql')).toContainText('GRAPH_TABLE')
-  const goSideSQL = await page.locator('#s-sql').textContent()
+  const goSideSQL = await readEditor(page, 's-sql')
   const params = await page.locator('#s-params').textContent()
 
   await runScenario(page, 'shaping', '#s-result')
