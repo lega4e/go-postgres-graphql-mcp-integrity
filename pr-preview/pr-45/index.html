@@ -34,8 +34,8 @@
 
     <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <script type="module" crossorigin src="./assets/index-BhcgsZ2D.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
+    <script type="module" crossorigin src="./assets/index-CkOFgVLb.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CUmt_lPO.css">
   </head>
   <body class="ga-theme">
     <main>
@@ -53,10 +53,29 @@
           hardcoded: every output is generated from your input.
         </p>
         <ga-note>
-          There is no database here, so query <em>results</em> can't be shown —
-          only the generated SQL. Shaping rows into nested JSON (with parent
-          dedup) happens at execution time against PostgreSQL; it is covered by
-          the godog integration suite, not this browser demo.
+          <strong>Generate</strong> is instant, pure and offline. Each query tab
+          also has a <strong>Run in PostgreSQL</strong> button, which executes
+          the generated schema, the data and the compiled query against a real
+          PostgreSQL&nbsp;19 with SQL/PGQ, compiled to WebAssembly and running
+          in this tab — nothing is sent anywhere. It downloads a ~15&nbsp;MB
+          build the first time you press it and never before, and the database
+          is in memory only, so reloading the page starts clean. The flat rows
+          that come back go through <code>gopgql</code> once more, which
+          regroups them — deduplicating parents across the one-to-many fan-out —
+          into the <strong>nested GraphQL response</strong> the panel leads
+          with. That is the whole round trip: a GraphQL query in, SQL out, rows
+          back, a GraphQL response out. The rows themselves stay one click away
+          underneath it.
+        </ga-note>
+        <ga-note>
+          Each runnable tab starts with the <code>INSERT</code> statements its
+          example schema needs, in an editable <strong>Data</strong> pane that
+          runs just before the query. Change them — <code>INSERT</code>,
+          <code>UPDATE</code>, <code>DELETE</code> — press Run, and the response
+          reflects what you did. Writes are plain SQL rather than GraphQL
+          mutations because a SQL/PGQ property graph is a read-only view:
+          <code>gopgql</code> compiles queries against it and never writes
+          through it.
         </ga-note>
         <p id="boot" class="status">loading WebAssembly…</p>
       </header>
@@ -100,6 +119,35 @@
               <ga-code id="t-sql" data-lang="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="t-params"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="t-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="t-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                These <code>INSERT</code>s fill the generated tables with the follow chain
+                Alice &rarr; Bob &rarr; Carol &rarr; Dave &rarr; Erin.
+                Edit it &mdash; <code>INSERT</code>, <code>UPDATE</code>
+                or <code>DELETE</code> &mdash; and press Run again to see the query answer
+                differently. A property graph is a read-only view, so gopgql compiles
+                queries and not mutations; changing data is plain SQL, and it runs against
+                the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="traversal" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="t-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, the data SQL and the query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab. Nothing
+                is fetched until you press it: the first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire) and takes a few seconds to start.
+                The database is in memory only and is discarded afterwards.
+              </p>
+              <div id="t-result" class="result-panel"></div>
             </div>
           </div>
         </div>
@@ -145,6 +193,35 @@
               <label>Database query</label>
               <ga-code id="d-sql" data-lang="sql"></ga-code>
             </div>
+            <div class="execution">
+              <label for="d-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="d-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                The same rows as the Traversal tab, which is the schema this tab shares. The
+                chain is five people long, so a four-hop query still finds a path whose
+                vertices are all distinct. Edit it &mdash; <code>INSERT</code>,
+                <code>UPDATE</code> or <code>DELETE</code> &mdash; and press Run again to
+                see the query answer differently. A property graph is a read-only view, so
+                gopgql compiles queries and not mutations; changing data is plain SQL, and
+                it runs against the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="depth" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="d-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Unavailable while the query is refused — the rejection happens
+                at compile time, so there is no SQL to send. Raise the ceiling
+                until a query compiles and this becomes available. The first
+                press downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="d-result" class="result-panel"></div>
+            </div>
           </div>
         </div>
 
@@ -183,6 +260,35 @@
               <ga-code id="c-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
               <ga-code id="c-sql" data-lang="sql"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="c-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="c-data" class="code-input" data-lang="sql" rows="5" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                Written against the <em>physical</em> column names, so the field
+                <code>title</code> is inserted as <code>name</code> &mdash; the same rename
+                the compiled query projects. Edit it &mdash; <code>INSERT</code>,
+                <code>UPDATE</code> or <code>DELETE</code> &mdash; and press Run again to
+                see the query answer differently. A property graph is a read-only view, so
+                gopgql compiles queries and not mutations; changing data is plain SQL, and
+                it runs against the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="directives" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="c-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, the data SQL and the query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                result column is the renamed physical column. The first press
+                downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="c-result" class="result-panel"></div>
             </div>
           </div>
         </div>
@@ -236,6 +342,34 @@
               <ga-code id="k-sql" data-lang="sql"></ga-code>
               <label>Ordered bind parameters</label>
               <ga-code id="k-params"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="k-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="k-data" class="code-input" data-lang="sql" rows="7" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                Two employees of one tenant and the edge between them. The first row is the
+                one the query selects by its natural key. Edit it &mdash;
+                <code>INSERT</code>, <code>UPDATE</code> or <code>DELETE</code> &mdash; and
+                press Run again to see the query answer differently. A property graph is a
+                read-only view, so gopgql compiles queries and not mutations; changing data
+                is plain SQL, and it runs against the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="constraints" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="k-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, the data SQL and the query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                defaults and <code>CHECK</code> constraints are enforced by the
+                database itself. The first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire); nothing is fetched before that.
+              </p>
+              <div id="k-result" class="result-panel"></div>
             </div>
           </div>
 
@@ -311,6 +445,34 @@
               <label>Bind parameters</label>
               <ga-code id="p-params"></ga-code>
             </div>
+            <div class="execution">
+              <label for="p-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="p-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                The same rows as the Traversal tab. Dave&rsquo;s follow back to Alice is
+                what gives her the incoming edge this query&rsquo;s <code>followedBy</code>
+                branch reads. Edit it &mdash; <code>INSERT</code>, <code>UPDATE</code> or
+                <code>DELETE</code> &mdash; and press Run again to see the query answer
+                differently. A property graph is a read-only view, so gopgql compiles
+                queries and not mutations; changing data is plain SQL, and it runs against
+                the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="multipattern" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="p-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the joined <code>GRAPH_TABLE</code> calls above against
+                a real PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab.
+                The first press downloads a
+                <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire); nothing is fetched before that.
+              </p>
+              <div id="p-result" class="result-panel"></div>
+            </div>
           </div>
         </div>
 
@@ -344,6 +506,34 @@
               <ga-code id="i-schema" data-lang="sql"></ga-code>
               <label>Database query</label>
               <ga-code id="i-sql" data-lang="sql"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="i-data">Data &mdash; SQL applied before the query</label>
+              <textarea id="i-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                Both implementors of <code>Actor</code> are filled, and both edge tables
+                carry a row, so matching the shared label returns one from each. Edit it
+                &mdash; <code>INSERT</code>, <code>UPDATE</code> or <code>DELETE</code>
+                &mdash; and press Run again to see the query answer differently. A property
+                graph is a read-only view, so gopgql compiles queries and not mutations;
+                changing data is plain SQL, and it runs against the same in-memory database.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="interfaces" variant="secondary" disabled>
+                  Run in PostgreSQL
+                </ga-button>
+                <span id="i-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Executes the schema, the data SQL and the query above against a real
+                PostgreSQL&nbsp;19 compiled to WebAssembly, in this tab — the
+                rows come from both tables the interface spans. The first press
+                downloads a <strong>~15&nbsp;MB PostgreSQL build</strong>
+                (about 4.7&nbsp;MB over the wire); nothing is fetched before
+                that.
+              </p>
+              <div id="i-result" class="result-panel"></div>
             </div>
           </div>
         </div>
@@ -459,9 +649,9 @@
           </div>
         </div>
         <!-- Shaping: the same query compiled under both result-shaping
-             strategies. It shows the SQL each one emits, and says plainly that
-             it shows SQL and not results — there is no database in a browser
-             (SPEC.md §7 → M8, design D8). -->
+             strategies, and — since gopgql#31 put a real PostgreSQL in the page
+             — run under both against one database, so the reader watches the
+             two responses come out the same (SPEC.md §7 → M8, design D8). -->
         <div slot="shaping">
           <p class="panel-hint">
             gopgql has two ways to turn a match into a nested GraphQL response.
@@ -484,13 +674,18 @@
             an array before the join, so that cross-product never forms.
           </p>
           <ga-note>
-            This panel shows <strong>generated SQL, not results</strong>. It
-            reports no response, no row count and no timing: the playground
-            compiles real Go to WebAssembly but has no database to run either
-            statement against. Executing SQL here is gopgql#31, which is blocked
-            on postgres-pglite#28. The two responses are proven byte-identical
-            against a real <code>postgres:19beta2</code> by the
-            <code>test/parity</code> suite, and measured against each other by
+            Run executes <strong>both</strong> statements against one database,
+            and shapes each result into a response. What it then compares is the
+            two <strong>canonical encodings</strong> &mdash;
+            <code>shape.Encode</code>, which is <code>encoding/json</code> over
+            the response value. It is <em>not</em> a comparison of the bytes
+            PostgreSQL sent: <code>json_build_object</code> spaces its colons and
+            emits keys in argument order, which <code>encoding/json</code> does
+            neither of. Both paths are decoded into the same Go value and
+            re-encoded by that one encoder, which is why the bytes agree. The
+            same comparison runs in CI against a real
+            <code>postgres:19beta2</code> in the <code>test/parity</code> suite;
+            the two strategies are measured against each other by
             <code>test/bench</code>.
           </ga-note>
           <div class="scenario">
@@ -518,12 +713,43 @@
               <span id="s-status" class="status"></span>
             </div>
             <div class="results">
+              <label>Database schema</label>
+              <ga-code id="s-schema" data-lang="sql"></ga-code>
               <label>Result set the statement asks for</label>
               <ga-code id="s-shape"></ga-code>
               <label>Database query</label>
               <ga-code id="s-sql" data-lang="sql"></ga-code>
-              <label>Ordered bind parameters — the same under both strategies</label>
+              <label>Ordered bind parameters &mdash; the same under both strategies</label>
               <ga-code id="s-params"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="s-data">Data &mdash; SQL applied before the queries</label>
+              <textarea id="s-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                These <code>INSERT</code>s branch on purpose: Alice follows two people
+                and is followed by two others. That is the case the two strategies
+                disagree about the <em>shape</em> of &mdash; Go-side asks for
+                2&times;2&nbsp;=&nbsp;4 flat rows, SQL-side for one &mdash; and
+                agree about the <em>response</em> to. Edit it and press Run again.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="shaping" variant="secondary" disabled>
+                  Run both strategies
+                </ga-button>
+                <span id="s-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Runs the schema, the data SQL, and then <strong>both</strong>
+                compiled statements against one real PostgreSQL&nbsp;19 compiled
+                to WebAssembly, in this tab. One database, so a difference
+                between the responses could only come from the strategies.
+                Nothing is fetched until you press it: the first press downloads
+                a <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire) and takes a few seconds to start. The
+                database is in memory only and is discarded afterwards.
+              </p>
+              <div id="s-result" class="result-panel"></div>
             </div>
           </div>
         </div>
