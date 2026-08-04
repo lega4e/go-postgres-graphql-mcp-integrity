@@ -1,19 +1,30 @@
 // Package playground is the thin driver behind the WASM playground. It runs the
-// real gopgql pipeline — sdl parse/validate, generator, migrate and compiler —
-// end to end on an editable SDL document, GraphQL query and variables, with no
-// JavaScript re-implementation and no database.
+// real gopgql pipeline — sdl parse/validate, generator, migrate, compiler and
+// shape — end to end on an editable SDL document, GraphQL query and variables,
+// with no JavaScript re-implementation.
 //
-// Everything it returns is *generated* from the inputs: the goose migration and
-// the compiled GRAPH_TABLE SQL with its ordered bind parameters. It never
-// fabricates query *results* — shaping a response requires rows from PostgreSQL,
-// which the browser has no access to (SPEC.md §4: only sdl/generator/migrate/
-// compiler are database-free and compile to WASM; exec/shape need a real DB).
+// Everything it returns is *generated* from the inputs: the goose migration, the
+// compiled GRAPH_TABLE SQL with its ordered bind parameters, and — given rows
+// somebody else executed — the nested GraphQL response those rows shape into.
+//
+// It never fabricates query *results*. Rows come from a real PostgreSQL, which
+// the browser now has: the playground runs the pinned wasm build of the fork in
+// a Web Worker (SPEC.md §8.6) and hands the flat result set back here to be
+// shaped. That last step is what makes the playground show gopgql's whole job
+// rather than two thirds of it — a GraphQL query in, a GraphQL response out.
+//
+// Shaping needs no database. `shape` imports `compiler` and `fmt` and nothing
+// else, so it sits on the database-free side of the WASM boundary alongside
+// sdl, schema, generator, migrate and compiler (SPEC.md §4.1). Only `exec`,
+// which owns the pgx connection, is excluded — and executing is precisely the
+// step the worker does instead.
 //
 // It is a normal Go package so it is unit-testable on the host and reused
 // verbatim by the js/wasm entry point in cmd/wasm.
 package playground
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +33,7 @@ import (
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/sdl"
+	"github.com/lega4e/gopgql/shape"
 )
 
 // ExampleSDL is the worked example from SPEC.md §5.2, loaded as the playground's
@@ -396,6 +408,13 @@ type Compiled struct {
 	// query carries none. It is the display form of Args, not a second fact:
 	// the two always describe the same values.
 	Params string
+	// Projection describes how the flat rows the SQL returns regroup into the
+	// nested GraphQL response. It is compiler.Compiled.Projection carried
+	// through unconverted, and it is what Shape consumes: a caller that has
+	// already compiled does not have to compile a second time to shape.
+	//
+	// It is the zero Projection on every error path.
+	Projection compiler.Projection
 }
 
 // Compile parses the SDL and compiles the GraphQL query against it, resolving
@@ -418,11 +437,103 @@ func CompileWithMaxDepth(sdlSrc, query string, vars map[string]any, maxDepth int
 	if err != nil {
 		return Compiled{}, err
 	}
-	sql, args, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).Compile(query, vars)
+	// CompileQuery rather than Compile: the two emit the same SQL and the same
+	// bind values, and the former also hands back the projection the response
+	// shaper needs. Compile is the SPEC.md §6.1 two-value contract and is left
+	// alone; there is nothing to gain here by discarding a value and then
+	// recompiling to get it back.
+	cq, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).CompileQuery(query, vars)
 	if err != nil {
 		return Compiled{}, err
 	}
-	return Compiled{SQL: sql, Args: args, Params: renderParams(args)}, nil
+	return Compiled{
+		SQL:        cq.SQL,
+		Args:       cq.Args,
+		Params:     renderParams(cq.Args),
+		Projection: cq.Projection,
+	}, nil
+}
+
+// Result is one execution's flat result set on its way back from the database:
+// the output column names, and one positional value list per row.
+//
+// It is positional rather than a list of objects because that is the honest
+// shape of what PostgreSQL returned. The compiler gives every projected column
+// a unique name, but a result read as objects would silently collapse two
+// columns that ever did share one — and the playground's whole claim is that
+// what it shows is what happened.
+//
+// The JSON tags are the wire form the page posts across the WASM boundary
+// (design D5): the Go module and the PostgreSQL module have separate linear
+// memories, so the rows cross as text, exactly as the bind values do on the way
+// out.
+type Result struct {
+	// Columns are the output column names, in result order.
+	Columns []string `json:"columns"`
+	// Rows are the values, one list per row, positionally aligned to Columns.
+	Rows [][]any `json:"rows"`
+}
+
+// Shape regroups a compiled query's flat rows into the nested GraphQL response
+// — the last step of gopgql's job, and the one the playground used to stop
+// short of.
+//
+// proj comes from Compiled.Projection. The rows are whatever executed the SQL:
+// pgx in the integration suites, PGlite in the browser. Shape does not care
+// which, and touches no database itself.
+//
+// A row whose length disagrees with Columns is refused rather than padded. It
+// would mean the result set and the column list came from different executions,
+// and a response shaped from that would be wrong in a way no reader could see.
+func Shape(proj compiler.Projection, res Result) (map[string]any, error) {
+	if proj.Root == nil {
+		return nil, errors.New("playground: no projection to shape the rows with")
+	}
+	flat := make([]map[string]any, 0, len(res.Rows))
+	for i, row := range res.Rows {
+		if len(row) != len(res.Columns) {
+			return nil, fmt.Errorf(
+				"playground: result row %d has %d values but the result declares %d columns",
+				i+1, len(row), len(res.Columns))
+		}
+		obj := make(map[string]any, len(res.Columns))
+		for j, col := range res.Columns {
+			obj[col] = row[j]
+		}
+		flat = append(flat, obj)
+	}
+	return shape.Rows(proj, flat), nil
+}
+
+// ShapeJSON compiles the query and shapes res into the nested GraphQL response,
+// rendered as indented JSON.
+//
+// It recompiles rather than taking a projection because it is the WASM entry
+// point's shape: a projection is a Go value and cannot cross into JavaScript,
+// so the page sends back the same three inputs it compiled with and the
+// projection is re-derived here. Compilation is pure and touches no database,
+// so re-deriving it costs nothing and cannot disagree with the first pass.
+//
+// What comes back is the response *payload* — the root field and its objects —
+// which is exactly what exec.Query returns to a Go caller. It is deliberately
+// not wrapped in a GraphQL `{"data": …}` envelope: gopgql is a library that
+// compiles and shapes, not a server that answers requests, and inventing an
+// envelope it does not produce would be the one fabricated panel on a page
+// whose whole claim is that nothing is.
+func ShapeJSON(sdlSrc, query string, vars map[string]any, maxDepth int, res Result) (string, error) {
+	compiled, err := CompileWithMaxDepth(sdlSrc, query, vars, maxDepth)
+	if err != nil {
+		return "", err
+	}
+	shaped, err := Shape(compiled.Projection, res)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.MarshalIndent(shaped, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("playground: render the shaped response as JSON: %w", err)
+	}
+	return string(out), nil
 }
 
 // MaxDepth reports the compiler's default traversal-depth ceiling: what the

@@ -1,16 +1,19 @@
 // Package seed_test is the contract between an example SDL in the playground
 // package and the seed fixture that sits beside it.
 //
-// The playground's Run button executes three things in a browser: the DDL
-// playground.Schema generates, then the scenario's seed, then the compiled
-// GRAPH_TABLE query with its bind values. Nothing in a unit test can tell
-// whether that sequence actually works — a seed naming a column the generator
-// renamed, or a row that fails to satisfy a query's isomorphism guards, is
-// indistinguishable from a correct one until a real PostgreSQL runs it.
+// The playground's Run button is four steps in a browser: the DDL
+// playground.Schema generates, then the tab's data SQL — the seed, and whatever
+// the reader edited it into — then the compiled GRAPH_TABLE query with its bind
+// values, then playground.Shape regrouping the flat rows into the nested
+// GraphQL response. Nothing in a unit test can tell whether that sequence
+// actually works: a seed naming a column the generator renamed, a row that
+// fails to satisfy a query's isomorphism guards, or a projection that no longer
+// lines up with the result set is indistinguishable from a correct one until a
+// real PostgreSQL runs it.
 //
 // So each test here runs exactly that sequence against a real postgres:19beta2
-// container and asserts the query returned rows. A seed that drifts from the
-// SDL it belongs to fails here, in CI, rather than in a reader's browser.
+// container and asserts on the response it produced. A seed that drifts from
+// the SDL it belongs to fails here, in CI, rather than in a reader's browser.
 //
 // This is deliberately *not* a test of PGlite. It proves the fixtures are
 // correct against the PostgreSQL they were written for; that the same sequence
@@ -196,9 +199,15 @@ var scenarios = []scenario{
 }
 
 // TestSeededScenarioReturnsRows runs the page's own sequence — schema, seed,
-// compiled query — for every runnable tab, and requires rows. Zero rows is a
-// legitimate outcome for an edited schema, but never for the defaults: a
-// playground whose Run button demonstrates an empty table demonstrates nothing.
+// compiled query, shaped response — for every runnable tab, and requires rows.
+// Zero rows is a legitimate outcome for an edited schema, but never for the
+// defaults: a playground whose Run button demonstrates an empty table
+// demonstrates nothing.
+//
+// The shaping step is asserted here for the same reason the rows are. A
+// projection that named a column the query no longer projects would shape into
+// an object of nulls — a response that looks like a response and carries
+// nothing — and nothing before the browser would notice.
 func TestSeededScenarioReturnsRows(t *testing.T) {
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
@@ -222,19 +231,131 @@ func TestSeededScenarioReturnsRows(t *testing.T) {
 			compiled, err := playground.CompileWithMaxDepth(s.sdl, s.query, s.vars, depth)
 			require.NoError(t, err, "Compile")
 
-			rows, err := conn.Query(ctx, compiled.SQL, compiled.Args...)
-			require.NoError(t, err, "execute:\n%s\nwith %v", compiled.SQL, compiled.Args)
-			defer rows.Close()
-
-			n := 0
-			for rows.Next() {
-				n++
-			}
-			require.NoError(t, rows.Err(), "read rows")
-			assert.Positive(t, n,
+			res := query(ctx, t, conn, compiled)
+			assert.NotEmpty(t, res.Rows,
 				"the default inputs must return rows; seed and query have drifted apart")
+
+			shaped, err := playground.Shape(compiled.Projection, res)
+			require.NoError(t, err, "Shape")
+			assert.NotEmpty(t, rootList(t, shaped),
+				"rows came back but the response is empty; the projection and the "+
+					"result set have drifted apart")
 		})
 	}
+}
+
+// query runs a compiled query and returns its result set in the positional form
+// the page posts back across the WASM boundary — the same shape, built the same
+// way, so what is shaped here is what would be shaped in a browser.
+func query(ctx context.Context, t *testing.T, conn *pgx.Conn, compiled playground.Compiled) playground.Result {
+	t.Helper()
+
+	rows, err := conn.Query(ctx, compiled.SQL, compiled.Args...)
+	require.NoError(t, err, "execute:\n%s\nwith %v", compiled.SQL, compiled.Args)
+	defer rows.Close()
+
+	res := playground.Result{}
+	for _, fd := range rows.FieldDescriptions() {
+		res.Columns = append(res.Columns, fd.Name)
+	}
+	for rows.Next() {
+		vals, err := rows.Values()
+		require.NoError(t, err, "read row")
+		res.Rows = append(res.Rows, vals)
+	}
+	require.NoError(t, rows.Err(), "read rows")
+	return res
+}
+
+// rootList unwraps a shaped response to the root field's objects. A shaped
+// response always has exactly one key — the root field's response key — because
+// the compiler accepts exactly one root field.
+func rootList(t *testing.T, shaped map[string]any) []any {
+	t.Helper()
+	require.Len(t, shaped, 1, "a response carries exactly one root field")
+	for _, v := range shaped {
+		list, ok := v.([]any)
+		require.True(t, ok, "the root field's value is a list of objects")
+		return list
+	}
+	return nil
+}
+
+// TestReadersDataChangesReachTheResponse is the page's Data pane, proven
+// against a real PostgreSQL.
+//
+// Every runnable tab lets a reader edit the SQL that runs between the generated
+// schema and the query — that is the write path, because a SQL/PGQ property
+// graph is a read-only view and gopgql compiles no mutations (SPEC.md §2). What
+// has to hold is that a write reaches the *response*: not the table, which is
+// PostgreSQL's business, but the shaped GraphQL document the page renders,
+// which is the only thing the reader sees.
+//
+// An UPDATE through the vertex table and an INSERT into the edge table are both
+// exercised, because they land in different places in the response — one
+// changes a property, the other changes how many children a parent has.
+func TestReadersDataChangesReachTheResponse(t *testing.T) {
+	ctx, conn := freshConn(t)
+
+	ddl, err := playground.Schema(playground.ExampleSDL)
+	require.NoError(t, err, "Schema")
+	_, err = conn.Exec(ctx, ddl)
+	require.NoError(t, err, "apply the generated DDL")
+	_, err = conn.Exec(ctx, playground.ExampleSeed)
+	require.NoError(t, err, "apply the seed")
+
+	// One hop, so the assertion is about Alice and who she follows and nothing
+	// deeper.
+	const oneHop = `{ persons(name: $n) { name follows { name } } }`
+	vars := map[string]any{"n": "Alice"}
+
+	compiled, err := playground.Compile(playground.ExampleSDL, oneHop, vars)
+	require.NoError(t, err, "Compile")
+
+	before, err := playground.Shape(compiled.Projection, query(ctx, t, conn, compiled))
+	require.NoError(t, err, "Shape")
+	assert.Equal(t, []string{"Bob"}, followedNames(t, before),
+		"the seed gives Alice exactly one outgoing follow")
+
+	// What a reader types into the Data pane: rename a vertex, and add an edge.
+	_, err = conn.Exec(ctx, `
+UPDATE persons SET name = 'Robert'
+ WHERE id = 'a0000000-0000-4000-8000-000000000002';
+INSERT INTO follows (source_id, target_id) VALUES
+  ('a0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000003');`)
+	require.NoError(t, err, "apply the reader's data changes")
+
+	after, err := playground.Shape(compiled.Projection, query(ctx, t, conn, compiled))
+	require.NoError(t, err, "Shape")
+	assert.Equal(t, []string{"Robert", "Carol"}, followedNames(t, after),
+		"the response reflects both the UPDATE and the INSERT")
+
+	// And still one Alice: the second edge fans the result out to two rows, and
+	// shaping is what collapses them back to one parent.
+	assert.Len(t, rootList(t, after), 1)
+}
+
+// followedNames reads the `name` of every person nested under the first (and
+// only) root object.
+func followedNames(t *testing.T, shaped map[string]any) []string {
+	t.Helper()
+
+	list := rootList(t, shaped)
+	require.Len(t, list, 1, "the query filters to one person")
+	person, ok := list[0].(map[string]any)
+	require.True(t, ok)
+	follows, ok := person["follows"].([]any)
+	require.True(t, ok, "the relationship field is a list")
+
+	names := make([]string, 0, len(follows))
+	for _, f := range follows {
+		obj, ok := f.(map[string]any)
+		require.True(t, ok)
+		name, ok := obj["name"].(string)
+		require.True(t, ok, "name is a text property")
+		names = append(names, name)
+	}
+	return names
 }
 
 // TestSeedDependsOnPhysicalColumnNames pins the one way a seed silently goes

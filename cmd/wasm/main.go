@@ -9,13 +9,21 @@
 // never fabricates query results, which would require rows from PostgreSQL
 // (SPEC.md §4).
 //
-// Five functions are exported:
+// Six functions are exported:
 //
 //   - gopgqlSchema(sdl) -> {schema, error}
 //   - gopgqlGraph(sdl) -> {graph, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
 //   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, args, error, depthExceeded, maxDepth}
+//   - gopgqlShape(sdl, query, varsJSON, resultJSON[, maxDepth]) -> {json, error}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
+//
+// gopgqlShape closes the round trip. The page compiles a GraphQL query here,
+// executes the SQL in a Web Worker running the pinned wasm PostgreSQL, and
+// sends the flat result set back to be regrouped into the nested GraphQL
+// response — the same shape.Rows the Go integration suites assert on. Shaping
+// needs no database (SPEC.md §4.1), so it belongs on this side of the boundary;
+// only exec, which owns the pgx connection, does not.
 //
 // gopgqlCompile classifies a depth rejection separately from other errors so the
 // page can show it as the designed outcome it is: SQL/PGQ has no
@@ -54,7 +62,7 @@ import (
 // page refuses to run — invisible to CI, which never loads the page, and
 // immediately visible to anyone who opens a PR preview. TestAPIVersionsAgree
 // enforces this.
-const apiVersion = 6
+const apiVersion = 7
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
@@ -62,6 +70,7 @@ func main() {
 	js.Global().Set("gopgqlGraph", js.FuncOf(graphDDL))
 	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
 	js.Global().Set("gopgqlCompile", js.FuncOf(compile))
+	js.Global().Set("gopgqlShape", js.FuncOf(shapeResult))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
@@ -213,6 +222,51 @@ func compile(_ js.Value, args []js.Value) any {
 	}
 	result["sql"] = out.SQL
 	result["params"] = out.Params
+	return js.ValueOf(result)
+}
+
+// shapeResult is bound to window.gopgqlShape. It expects four string arguments
+// — the SDL, the GraphQL query, a variables document as JSON (may be empty),
+// and the flat result set as JSON — and an optional fifth: the traversal-depth
+// ceiling, which must be the one the query was compiled at or the projection
+// re-derived here would not be the one that produced these rows.
+//
+// The result set is `{"columns": ["v0_k", …], "rows": [[…], …]}`: the shape
+// PostgreSQL returned, positionally, which is what the worker sends back. It
+// arrives as JSON for the same reason bind values leave as JSON — the Go module
+// and the PostgreSQL module have separate linear memories, so everything
+// between them is text (SPEC.md §8.6, design D5).
+//
+// It returns the nested GraphQL response as indented JSON. Errors are returned
+// in the result rather than thrown, like every other export here, so the page
+// can show a failed shaping beside the rows that failed to shape.
+func shapeResult(_ js.Value, args []js.Value) any {
+	result := map[string]any{"json": "", "error": ""}
+	if len(args) < 4 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString ||
+		args[2].Type() != js.TypeString || args[3].Type() != js.TypeString {
+		result["error"] = "gopgqlShape expects (sdl, query, varsJSON, resultJSON) string arguments"
+		return js.ValueOf(result)
+	}
+	maxDepth := playground.MaxDepth()
+	if len(args) >= 5 && args[4].Type() == js.TypeNumber {
+		maxDepth = args[4].Int()
+	}
+	vars, err := parseVars(args[2].String())
+	if err != nil {
+		result["error"] = "variables: " + err.Error()
+		return js.ValueOf(result)
+	}
+	var res playground.Result
+	if err := json.Unmarshal([]byte(args[3].String()), &res); err != nil {
+		result["error"] = "result set: " + err.Error()
+		return js.ValueOf(result)
+	}
+	out, err := playground.ShapeJSON(args[0].String(), args[1].String(), vars, maxDepth, res)
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["json"] = out
 	return js.ValueOf(result)
 }
 

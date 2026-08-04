@@ -47,6 +47,19 @@ async function runScenario(page, scenario, panel) {
   await expect(page.locator(panel)).not.toContainText('Starting PostgreSQL')
 }
 
+/**
+ * The shaped GraphQL response the panel leads with, parsed.
+ *
+ * This is the whole point of a Run: a GraphQL query went in, and this is the
+ * response gopgql built from the rows PostgreSQL returned. It is produced by
+ * the Go module — shape.Rows, the same function the integration suites assert
+ * on — so what is read here is the library's output, not the page's rendering
+ * of it.
+ */
+async function readResponse(page, panel) {
+  return JSON.parse(await page.locator(`${panel} pre.result-json`).textContent())
+}
+
 /** The rendered result table as { columns, rows }. */
 async function readTable(page, panel) {
   return page.locator(`${panel} table.result-table`).evaluate((table) => ({
@@ -64,6 +77,20 @@ async function readTable(page, panel) {
 async function readEditor(page, id) {
   const lines = await page.locator(`#${id} .cm-line`).allTextContents()
   return lines.join('\n').replace(/ /g, ' ')
+}
+
+/**
+ * The data SQL a scenario's pane was filled with, read from the WASM module.
+ *
+ * Deliberately not read back off the page: CodeMirror only renders the lines in
+ * its viewport, so `readEditor` on a pane taller than its box returns part of
+ * the document. Appending to that and writing it back would silently drop the
+ * rest of the seed — and the test would still pass, against data nobody meant
+ * to insert. The module's own export is the same text the page seeded the pane
+ * with, and all of it.
+ */
+async function seedData(page, exportName) {
+  return page.evaluate((name) => globalThis[name], exportName)
 }
 
 /** Replace a CodeMirror pane's whole document. */
@@ -196,6 +223,103 @@ test('bind values keep their kinds across the WASM boundary', async ({ page }) =
   expect(typeof args.parsed[1]).toBe('number')
   expect(typeof args.parsed[2]).toBe('number')
   expect(typeof args.parsed[3]).toBe('boolean')
+})
+
+// --- the response, and changing the data it is built from --------------------
+//
+// Executing is only two thirds of gopgql's job. The rows PostgreSQL returns are
+// flat and carry the compiler's own column names; what a GraphQL client asked
+// for is a nested document. These tests assert the last leg — and then assert
+// that a reader who changes the data gets a different one.
+
+test('the flat rows are shaped into the nested GraphQL response', async ({ page }) => {
+  await boot(page)
+  await runScenario(page, 'traversal', '#t-result')
+
+  // The three-hop query nests three levels deep, and the response mirrors the
+  // query's own shape rather than the result set's: GraphQL response keys, not
+  // v0_c0.
+  expect(await readResponse(page, '#t-result')).toEqual({
+    persons: [{
+      name: 'Alice',
+      follows: [{ name: 'Bob', follows: [{ name: 'Carol', follows: [{ name: 'Dave' }] }] }],
+    }],
+  })
+
+  // The flat rows are still there, one disclosure away: they are the evidence
+  // the response was built from, and the page does not ask to be believed.
+  expect((await readTable(page, '#t-result')).rows).toHaveLength(1)
+
+  // No `{"data": …}` envelope. gopgql shapes a payload; it is not a server
+  // answering a request, and an envelope it never produces would be the page's
+  // one invented value.
+  const shaped = JSON.parse(await page.evaluate(() => globalThis.gopgqlLastRun.shaped))
+  expect(shaped).not.toHaveProperty('data')
+  expect(Object.keys(shaped)).toEqual(['persons'])
+})
+
+test('an UPDATE the reader writes changes the next response', async ({ page }) => {
+  await boot(page)
+  await runScenario(page, 'traversal', '#t-result')
+  expect((await readResponse(page, '#t-result')).persons[0].follows[0].name).toBe('Bob')
+
+  // What the Data pane is for. A property graph is a read-only view, so this is
+  // SQL rather than a GraphQL mutation — and it runs against the same in-memory
+  // database the query is about to read.
+  await expect(page.locator('#t-data'),
+    'the pane starts with the seed INSERTs').toContainText('INSERT INTO persons')
+
+  const seeded = await seedData(page, 'gopgqlExampleSeed')
+  await setEditor(page, 't-data',
+    `${seeded}\n\nUPDATE persons SET name = 'Robert' WHERE name = 'Bob';`)
+
+  await runScenario(page, 'traversal', '#t-result')
+
+  const after = await readResponse(page, '#t-result')
+  expect(after.persons[0].follows[0].name).toBe('Robert')
+  expect(after.persons[0].name).toBe('Alice')
+  await expect(page.locator('#t-result .result-note.warn')).toHaveCount(0)
+})
+
+test('an INSERT fans the result out, and shaping still carries one parent', async ({ page }) => {
+  await boot(page)
+
+  // A second outgoing edge from Alice gives the pattern a second three-hop path
+  // (Alice -> Carol -> Dave -> Erin), so PostgreSQL returns two rows that repeat
+  // Alice. Deduplicating her is exactly what shaping is for, and it is only
+  // visible once there is a fan-out to collapse.
+  const seeded = await seedData(page, 'gopgqlExampleSeed')
+  await setEditor(page, 't-data', `${seeded}\n\nINSERT INTO follows (source_id, target_id) VALUES\n` +
+    `  ('a0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000003');`)
+
+  await runScenario(page, 'traversal', '#t-result')
+
+  expect((await readTable(page, '#t-result')).rows,
+    'two paths satisfy the pattern').toHaveLength(2)
+
+  const response = await readResponse(page, '#t-result')
+  expect(response.persons, 'both rows repeat Alice; the response carries her once').toHaveLength(1)
+  // Row order is PostgreSQL's to choose, so the set is asserted, not the order.
+  expect(response.persons[0].follows.map((f) => f.name).sort()).toEqual(['Bob', 'Carol'])
+})
+
+test('data SQL the database refuses is reported, and the query still answers', async ({ page }) => {
+  await boot(page)
+
+  await setEditor(page, 't-data', `UPDATE persons SET nosuchcolumn = 1;`)
+
+  await runScenario(page, 'traversal', '#t-result')
+
+  // The reader's own mistake, named as theirs and shown in PostgreSQL's words.
+  await expect(page.locator('#t-result .result-note.warn')).toBeVisible()
+  await expect(page.locator('#t-result .result-error')).toContainText('nosuchcolumn')
+
+  // And the run is not abandoned: the query still executed against the empty
+  // schema, and its response is an empty list rather than an error or a blank
+  // panel.
+  await expect(page.locator('#t-result')).toContainText('returned no rows')
+  expect(await readResponse(page, '#t-result')).toEqual({ persons: [] })
+  await expect(page.locator('#t-result .result-note.error')).toHaveCount(0)
 })
 
 const runnable = [

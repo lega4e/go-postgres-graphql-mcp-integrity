@@ -10,7 +10,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 6
+const REQUIRED_API_VERSION = 7
 
 const el = (id) => document.getElementById(id)
 
@@ -237,7 +237,9 @@ function renderDelta() {
 // --- execution ------------------------------------------------------------
 //
 // Everything above generates. Everything below runs what was generated against
-// a real PostgreSQL, compiled to WebAssembly, in the reader's own browser.
+// a real PostgreSQL, compiled to WebAssembly, in the reader's own browser — and
+// then hands the rows back to the Go module to be shaped into the GraphQL
+// response, which is the half of gopgql's job the page used to stop short of.
 //
 // The runtime is ~15 MB and is not fetched until someone presses Run. The
 // module specifier lives in exactly one place — a dynamic import inside
@@ -248,36 +250,62 @@ function renderDelta() {
 // executed. Rename, Delta, Migration and Conformance are absent because they
 // produce no query: a Run control on them would have nothing to send.
 //
-// `schema` and `sql` are the *panes*, not the values. Run reads the SQL it
-// executes out of the pane the reader is looking at, so "the SQL shown is the
-// SQL executed" holds by construction rather than by convention.
+// Every field is a *pane*, not a value. Run reads the SQL it executes, and the
+// data it applies, out of the panes the reader is looking at, so "what is shown
+// is what ran" holds by construction rather than by convention. `sdl`, `query`
+// and `vars` are read again after the run, to re-derive the projection the
+// response is shaped with: a projection is a Go value and cannot cross into
+// JavaScript, so the module recompiles from the same inputs instead.
+//
+// `vars` is absent on the tabs whose query binds nothing.
 const executions = {
   traversal: {
     schema: 't-schema', sql: 't-sql', panel: 't-result', status: 't-exec-status',
-    seed: () => globalThis.gopgqlExampleSeed,
+    data: 't-data', sdl: 't-sdl', query: 't-query', vars: 't-vars',
   },
   multipattern: {
     schema: 'p-schema', sql: 'p-sql', panel: 'p-result', status: 'p-exec-status',
-    seed: () => globalThis.gopgqlExampleSeed,
+    data: 'p-data', sdl: 'p-sdl', query: 'p-query', vars: 'p-vars',
   },
   directives: {
     schema: 'c-schema', sql: 'c-sql', panel: 'c-result', status: 'c-exec-status',
-    seed: () => globalThis.gopgqlExampleDirectivesSeed,
+    data: 'c-data', sdl: 'c-sdl', query: 'c-query', vars: 'c-vars',
   },
   constraints: {
     schema: 'k-schema', sql: 'k-sql', panel: 'k-result', status: 'k-exec-status',
-    seed: () => globalThis.gopgqlExampleConstraintsSeed,
+    data: 'k-data', sdl: 'k-sdl', query: 'k-query', vars: 'k-vars',
   },
   depth: {
     schema: 'd-schema', sql: 'd-sql', panel: 'd-result', status: 'd-exec-status',
-    // The Depth tab shares the Traversal schema, so it shares its seed. It is
-    // runnable only when the ceiling was raised enough for a query to exist.
-    seed: () => globalThis.gopgqlExampleSeed,
+    // The Depth tab shares the Traversal schema, so it starts from the same
+    // data. It is runnable only when the ceiling was raised enough for a query
+    // to exist — and the response has to be shaped at that same raised ceiling,
+    // or the recompile behind it would be refused where the first one was not.
+    data: 'd-data', sdl: 'd-sdl', query: 'd-query', vars: 'd-vars',
+    maxDepth: depthLimit,
   },
   interfaces: {
     schema: 'i-schema', sql: 'i-sql', panel: 'i-result', status: 'i-exec-status',
-    seed: () => globalThis.gopgqlExampleInterfaceSeed,
+    data: 'i-data', sdl: 'i-sdl', query: 'i-query',
   },
+}
+
+// dataSeeds maps each runnable scenario's data pane to the seed the module
+// exports for it. The page starts every tab with the INSERTs its example schema
+// needs — a GRAPH_TABLE query over an empty database returns nothing, which
+// demonstrates nothing — and the pane is editable, so a reader can INSERT,
+// UPDATE or DELETE and watch the next Run answer differently.
+//
+// Traversal, Multi-pattern and Depth read one schema and therefore start from
+// one seed; each still gets its own pane, so editing the data in one tab does
+// not silently change what another tab demonstrates.
+const dataSeeds = {
+  't-data': () => globalThis.gopgqlExampleSeed,
+  'p-data': () => globalThis.gopgqlExampleSeed,
+  'd-data': () => globalThis.gopgqlExampleSeed,
+  'c-data': () => globalThis.gopgqlExampleDirectivesSeed,
+  'k-data': () => globalThis.gopgqlExampleConstraintsSeed,
+  'i-data': () => globalThis.gopgqlExampleInterfaceSeed,
 }
 
 // runState is per scenario: whether the last generation produced something
@@ -410,6 +438,41 @@ function appendDatabaseError(panel, step, message) {
   panel.appendChild(pre)
 }
 
+/** A heading over one part of a result panel. */
+function appendLabel(panel, text) {
+  const label = document.createElement('p')
+  label.className = 'result-label'
+  label.textContent = text
+  panel.appendChild(label)
+}
+
+/**
+ * shapeRows regroups a flat result set into the nested GraphQL response, by
+ * calling the Go module — the same shape.Rows the integration suites assert on,
+ * not a JavaScript re-implementation of it.
+ *
+ * The module needs the projection, which is a Go value and cannot cross into
+ * JavaScript, so the same SDL, query and variables that were compiled go back
+ * across and the projection is re-derived there. Compiling is pure, so the
+ * second pass cannot disagree with the first.
+ */
+function shapeRows(spec, columns, rows) {
+  return globalThis.gopgqlShape(
+    valueOf(spec.sdl),
+    valueOf(spec.query),
+    spec.vars ? valueOf(spec.vars) : '',
+    JSON.stringify({ columns, rows }),
+    spec.maxDepth ? spec.maxDepth() : (globalThis.gopgqlMaxDepth ?? 3))
+}
+
+/** The shaped GraphQL response, as JSON. */
+function appendJSON(panel, text) {
+  const pre = document.createElement('pre')
+  pre.className = 'result-json'
+  pre.textContent = text
+  panel.appendChild(pre)
+}
+
 /** The rows, as a table with the result's own column names. */
 function appendTable(panel, columns, rows) {
   const scroll = document.createElement('div')
@@ -451,8 +514,13 @@ function appendTable(panel, columns, rows) {
 
 /**
  * renderRun writes one run's outcome. Every step is an outcome, not an
- * exception: a rejected statement, an inapplicable seed and an empty result are
- * all things PostgreSQL did, and the panel says which.
+ * exception: a rejected statement, data SQL that did not apply and an empty
+ * result are all things PostgreSQL did, and the panel says which.
+ *
+ * The shaped GraphQL response leads, because it is what the reader asked for: a
+ * GraphQL query went in, and this is the response gopgql builds from it. The
+ * flat rows stay one click away — they are the evidence behind the response,
+ * and the fan-out they show is exactly what shaping collapses.
  */
 function renderRun(spec, outcome) {
   const panel = resetPanel(spec.panel)
@@ -464,17 +532,18 @@ function renderRun(spec, outcome) {
     return
   }
 
-  // The seed is a fixture bound to an *example* schema. An edited schema it no
-  // longer fits is not a page error — the query still runs, and returns what it
-  // honestly finds.
-  if (steps.seed && !steps.seed.ok) {
+  // The data SQL is the reader's. A statement of theirs that PostgreSQL refused
+  // — or the starting seed left against a schema they edited underneath it — is
+  // not a page error: the query still runs, and returns what it honestly finds.
+  if (steps.data && !steps.data.ok) {
     appendNote(panel,
-      'The seed data did not apply to this schema — it is a fixture for the ' +
-      'example schema, and you have edited it. The query below still ran.',
+      'The data SQL did not apply to this schema. It starts as the seed for ' +
+      'the example schema, so an edit to either can leave the two disagreeing. ' +
+      'The query below still ran.',
       'warn')
     const pre = document.createElement('pre')
     pre.className = 'result-error'
-    pre.textContent = steps.seed.error
+    pre.textContent = steps.data.error
     panel.appendChild(pre)
   }
 
@@ -485,11 +554,31 @@ function renderRun(spec, outcome) {
   }
 
   const { columns, rows } = steps.query
+
+  // Shaped even when there are none: a query that matched nothing still has a
+  // response, and an empty list is what it honestly is.
+  const shaped = shapeRows(spec, columns, rows)
+  if (shaped.error) {
+    appendNote(panel, `gopgql could not shape these rows into a response: ${shaped.error}`, 'error')
+  } else {
+    appendLabel(panel, 'GraphQL response — shaped from the rows by gopgql')
+    appendJSON(panel, shaped.json)
+    if (globalThis.gopgqlLastRun) globalThis.gopgqlLastRun.shaped = shaped.json
+  }
+
   if (rows.length === 0) {
     appendNote(panel, 'The query succeeded and returned no rows.')
-  } else {
-    appendTable(panel, columns, rows)
   }
+  const details = document.createElement('details')
+  details.className = 'result-rows'
+  const summary = document.createElement('summary')
+  summary.textContent = rows.length === 1
+    ? '1 flat row from PostgreSQL'
+    : `${rows.length} flat rows from PostgreSQL`
+  details.appendChild(summary)
+  appendTable(details, columns, rows)
+  panel.appendChild(details)
+
   // Provenance: what PostgreSQL says about itself, and which pinned build of
   // the fork that PostgreSQL came from. __PGLITE_BUILD__ is derived at build
   // time from the pin in package.json, so it cannot drift from what was
@@ -502,8 +591,8 @@ function renderRun(spec, outcome) {
 }
 
 /**
- * execute runs one scenario: the generated DDL, then the scenario's seed, then
- * the SQL in its pane with the bind values from its last compile.
+ * execute runs one scenario: the generated DDL, then the reader's data SQL,
+ * then the SQL in its pane with the bind values from its last compile.
  *
  * gopgqlSchema's DDL is what runs — not gopgqlMigration's document, which is
  * goose-annotated across two files and would need a migration tool's annotation
@@ -523,7 +612,7 @@ async function execute(name) {
 
   const request = {
     ddl: valueOf(spec.schema),
-    seed: spec.seed() ?? '',
+    data: valueOf(spec.data),
     sql: valueOf(spec.sql),
     args: state.args,
   }
@@ -692,6 +781,10 @@ async function boot() {
 
     seed('m-sdl', globalThis.gopgqlExampleSDL)
     seed('m-sdl2', globalThis.gopgqlRevisedExampleSDL)
+
+    // The data panes: every runnable tab starts with the INSERTs its example
+    // schema needs, and the reader can change them.
+    for (const [id, value] of Object.entries(dataSeeds)) seed(id, value())
 
     maxDepthEl.textContent = String(globalThis.gopgqlMaxDepth ?? 3)
 

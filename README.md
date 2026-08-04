@@ -284,9 +284,10 @@ gone; and a fold-correctness scenario applies the folded output and a direct
 apply of the same final schema and asserts the resulting schemas are identical.
 
 The **WASM playground** (`cmd/wasm` + `docs/`) runs the real
-`sdl`+`generator`+`migrate`+`compiler` in the browser as compiled Go. Each tab is
-one complete, editable scenario — schema and query in on the left, **Generate**
-in the middle, generated database schema and compiled query on the right. Every
+`sdl`+`generator`+`migrate`+`compiler`+`shape` in the browser as compiled Go.
+Each tab is one complete, editable scenario — schema and query in on the left,
+**Generate** in the middle, generated database schema and compiled query on the
+right. Every
 pane is a CodeMirror 6 editor: GraphQL on the inputs, JSON on the variables, and
 SQL on the generated output — the stock PostgreSQL dialect **extended** with
 PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
@@ -302,6 +303,22 @@ PostgreSQL 19's graph vocabulary (`GRAPH_TABLE`, `MATCH`, `COLUMNS`,
 | *Interfaces*  | The shared `LABEL` clauses in the generated graph, and both interface mappings in the compiled pattern.|
 | *Migration*   | Two stacked scenarios: the initial `0001_init.sql`, then a revised schema folded and diffed to a delta.|
 | *Conformance* | The graph mapping `conform` compares — generated here, and visibly *not* containing the defaults, checks and unique the same schema declares — beside a **fixture** report showing all five finding kinds. A browser has no database, so this is the one output on the page that is not generated, and the panel says so. |
+
+Every query tab also **runs** what it generated. **Run in PostgreSQL** starts a
+real PostgreSQL 19 with SQL/PGQ — the pinned wasm build of the fork, in a Web
+Worker, in memory only — applies the generated DDL and the tab's data, executes
+the compiled `GRAPH_TABLE` query with its bind values, and hands the flat rows
+back to `shape`, which regroups them into the **nested GraphQL response** the
+panel leads with. That is the full round trip: a GraphQL query in, a GraphQL
+response out, with the rows one disclosure underneath as the evidence. Nothing
+is fetched until the button is pressed ([`SPEC.md` §8.6](./SPEC.md)).
+
+Each of those tabs carries an editable **Data** pane, pre-filled with the
+`INSERT`s its schema needs and applied just before the query, so a reader can
+`INSERT`, `UPDATE` or `DELETE` and watch the response change. Writes are plain
+SQL rather than GraphQL mutations because a SQL/PGQ property graph is a
+read-only view: `gopgql` compiles queries against it and never writes through
+it, and `CompileQuery` refuses any operation that is not a `query`.
 
 ## Install
 

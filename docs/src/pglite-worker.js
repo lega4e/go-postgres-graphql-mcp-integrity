@@ -13,9 +13,16 @@
 //
 // The protocol is three messages:
 //
-//   in   { type: 'run', id, ddl, seed, sql, args }
-//   out  { type: 'result', id, version, steps: { schema, seed, query } }
+//   in   { type: 'run', id, ddl, data, sql, args }
+//   out  { type: 'result', id, version, steps: { schema, data, query } }
 //   out  { type: 'error', id, message }
+//
+// `data` is the reader's own SQL: the seed INSERTs the page starts them with,
+// and whatever they changed them to. It is applied between the generated schema
+// and the compiled query, so an INSERT, UPDATE or DELETE they write is visible
+// in the result of the query that follows it. A property graph is a read-only
+// view (SPEC.md §2), so writing through the *GraphQL* side is not a thing gopgql
+// does — this is the write path, and it is plain SQL on purpose.
 //
 // `result` reports each step separately so the page can name the one that
 // failed; `error` is for a failure that is not a step — the runtime itself
@@ -100,7 +107,7 @@ function messageOf(err) {
 }
 
 /**
- * Apply one multi-statement document — the generated DDL, or a seed.
+ * Apply one multi-statement document — the generated DDL, or the data SQL.
  *
  * `exec` is the multi-statement entry point; `query` is the single-statement,
  * parameter-binding one. The generated schema is several statements, so it has
@@ -138,25 +145,26 @@ async function runQuery(sql, args) {
 }
 
 /**
- * One run: a fresh database, the generated schema, the seed, then the query.
+ * One run: a fresh database, the generated schema, the data SQL, then the query.
  *
- * A seed failure does **not** abort the run. The seed is a fixture bound to an
- * *example* schema, so a reader who edited the schema should see the seed fail
- * and the query still execute — returning no rows, honestly, rather than being
- * told the page is broken (design D7).
+ * A data failure does **not** abort the run. That SQL is the reader's to edit —
+ * a mistyped UPDATE, or the starting seed left in place against a schema they
+ * changed underneath it — and in either case the query should still execute and
+ * report what it honestly found rather than the page claiming to be broken
+ * (design D7). The statement PostgreSQL rejected is shown as itself.
  *
  * A schema failure does abort: every later step would fail with "relation does
  * not exist", which buries the one error that actually explains the run.
  */
-async function run({ ddl, seed, sql, args }) {
+async function run({ ddl, data, sql, args }) {
   await freshDatabase()
 
-  const steps = { schema: null, seed: null, query: null }
+  const steps = { schema: null, data: null, query: null }
 
   steps.schema = await applyDocument(ddl)
   if (!steps.schema.ok) return { steps }
 
-  steps.seed = await applyDocument(seed)
+  steps.data = await applyDocument(data)
   steps.query = await runQuery(sql, args)
   return { steps }
 }
