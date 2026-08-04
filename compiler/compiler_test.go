@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/sdl"
 )
@@ -581,4 +584,117 @@ func TestCompileRejects(t *testing.T) {
 			t.Errorf("%s: expected error, got nil for %q", name, tc.op)
 		}
 	}
+}
+
+// --- M8: deterministic order, and the strategy selector ---
+
+// TestOrderByCoversEveryLevel is task 1.3. Byte-identity between the two
+// strategies is impossible while list order is whatever the planner produced, so
+// the flat query orders by every level's key column, outermost first. A level
+// that stopped contributing its key would leave that level's list free to come
+// back in a different order from the SQL-side strategy's json_agg.
+func TestOrderByCoversEveryLevel(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "a three-hop chain orders by all four levels",
+			query: `{ persons { name follows { name follows { name follows { name } } } } }`,
+			want:  "\nORDER BY v0_k, v1_k, v2_k, v3_k",
+		},
+		{
+			name:  "an M5 branch split orders by each branch's key, qualified by its fragment",
+			query: `{ persons { name follows { name } followedBy { name } } }`,
+			want:  "\nORDER BY q0.v0_k, q1.v2_k, q2.v4_k",
+		},
+		{
+			name:  "a single level still orders",
+			query: `{ persons { name } }`,
+			want:  "\nORDER BY v0_k",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql, _, err := compiler.New(doc).Compile(tt.query, nil)
+			require.NoError(t, err)
+			assert.True(t, strings.HasSuffix(sql, tt.want),
+				"the statement must close with %q:\n%s", tt.want, sql)
+		})
+	}
+}
+
+// TestShapingIsRecordedOnTheCompiledQuery covers the selector itself: it
+// defaults to Go-side, WithShaping changes it, and the choice rides on the
+// compiled query so exec can dispatch without being told again (design D1).
+func TestShapingIsRecordedOnTheCompiledQuery(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	assert.Equal(t, compiler.GoSide, compiler.DefaultShaping,
+		"a caller that sets nothing must get exactly the behaviour M3-M7 shipped")
+
+	plain := compiler.New(doc)
+	assert.Equal(t, compiler.GoSide, plain.Shaping())
+	cq, err := plain.CompileQuery(`{ persons { name } }`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, compiler.GoSide, cq.Shaping)
+
+	shaped := compiler.New(doc, compiler.WithShaping(compiler.SQLSide))
+	assert.Equal(t, compiler.SQLSide, shaped.Shaping())
+	cq, err = shaped.CompileQuery(`{ persons { name } }`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, compiler.SQLSide, cq.Shaping)
+
+	assert.Equal(t, "go-side", compiler.GoSide.String())
+	assert.Equal(t, "sql-side", compiler.SQLSide.String())
+}
+
+// TestSQLSideEmitsAggregationNotAFlatProjection checks the emitted statement is
+// the aggregating one: json throughout, never jsonb, every aggregate COALESCEd,
+// and one output column.
+func TestSQLSideEmitsAggregationNotAFlatProjection(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	sql, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).
+		Compile(`{ persons { name follows { name } } }`, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "AS response", "the result is one named column")
+	assert.Contains(t, sql, "::text", "the outermost expression is cast to text")
+	assert.Contains(t, sql, "json_build_object")
+	assert.Contains(t, sql, "json_agg")
+	assert.NotContains(t, sql, "jsonb",
+		"jsonb sorts keys by length-then-bytes and drops duplicates (design D2)")
+
+	// json_agg over an empty set returns SQL NULL where the Go-side shaper
+	// returns an empty list, so every aggregate is COALESCEd.
+	assert.Equal(t, strings.Count(sql, "json_agg("), strings.Count(sql, "COALESCE(json_agg("),
+		"every json_agg must be COALESCEd to '[]'::json:\n%s", sql)
+}
+
+// TestSQLSideAggregatesEachBranchBeforeTheJoin is the reason SQL-side shaping
+// can win on a branching query: the flat statement LEFT JOINs both branches
+// together, so a parent with m and n children yields m*n rows, while each
+// branch here is aggregated to an array against the spine alone.
+func TestSQLSideAggregatesEachBranchBeforeTheJoin(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	sql, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).
+		Compile(`{ persons { name follows { name } followedBy { name } } }`, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "q0 LEFT JOIN q1")
+	assert.Contains(t, sql, "q0 LEFT JOIN q2")
+	assert.NotContains(t, sql, "q1 LEFT JOIN q2",
+		"the two branches must never be joined to each other; that is the m*n cross-product")
+	assert.NotContains(t, sql, "q2 LEFT JOIN q1",
+		"the two branches must never be joined to each other; that is the m*n cross-product")
 }

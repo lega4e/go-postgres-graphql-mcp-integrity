@@ -117,11 +117,18 @@ func Decode(proj compiler.Projection, jsonText string) (map[string]any, error) {
 }
 
 // decodeList decodes one level's JSON array into the canonical list of objects.
-// A missing or null array becomes an empty list, matching the Go-side shaper —
-// though the compiler's COALESCE means the database should never send one.
+//
+// A null is an error rather than an empty list. Every list in a gopgql response
+// is a non-null GraphQL list, and json_agg over an empty set returns SQL NULL —
+// so a null arriving here means an aggregate lost its COALESCE and the response
+// is about to disagree with the Go-side shaper's empty list. Quietly repairing
+// it would make that mistake untestable, which is how the guarantee erodes.
 func decodeList(sel *compiler.Selection, v any) ([]any, error) {
 	if v == nil {
-		return []any{}, nil
+		return nil, fmt.Errorf(
+			"shape: the database returned null for the list %q; json_agg over an empty set returns NULL "+
+				"and must be COALESCEd to '[]'::json, or this response disagrees with the Go-side shaper",
+			sel.ResponseKey)
 	}
 	items, ok := v.([]any)
 	if !ok {
