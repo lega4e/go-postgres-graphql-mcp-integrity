@@ -13,5 +13,13 @@
 /docs/node_modules/
 /docs/dist/
 
+# Browser suite (docs/e2e): installed on demand in CI, never committed. It has
+# no lockfile on purpose — exact versions are pinned in its package.json, and
+# keeping a browser driver out of docs/package-lock.json means a deploy's
+# `npm ci` never installs one.
+/docs/e2e/node_modules/
+/docs/e2e/test-results/
+/docs/e2e/playwright-report/
+
 # Editor / OS
 .DS_Store

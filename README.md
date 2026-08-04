@@ -19,14 +19,28 @@ limitations gopgql works around.
 ## Try it in the browser
 
 **[gopgql.garutyunov.com](https://gopgql.garutyunov.com/)** runs the real
-`sdl` + `generator` + `migrate` + `compiler` packages as WebAssembly. Edit an
-SDL document and a GraphQL query on the left and the generated DDL, migrations
-and compiled SQL update on the right — traversals, migration deltas, the depth
-limit, interfaces and every mapping directive, each as an editable scenario.
+`sdl` + `generator` + `migrate` + `compiler` + `shape` packages as WebAssembly.
+Edit an SDL document and a GraphQL query on the left and the generated DDL,
+migrations and compiled SQL update on the right — traversals, migration deltas,
+the depth limit, interfaces and every mapping directive, each as an editable
+scenario.
 
-There is no database in the page, so it shows the SQL gopgql *generates*, not
-query results. To run queries against real data, use the
-[examples](#run-an-example) below.
+Every query tab also **runs** what it generated. **Run in PostgreSQL** starts a
+real PostgreSQL 19 with SQL/PGQ — a wasm build of the fork, in a Web Worker, in
+memory only — applies the generated DDL and the tab's data, executes the
+compiled `GRAPH_TABLE` query with its bind values, and hands the flat rows back
+to `shape`, which regroups them into the **nested GraphQL response** the panel
+leads with. That is the whole round trip: a GraphQL query in, a GraphQL response
+out, with the rows one disclosure underneath as the evidence. Nothing is fetched
+until the button is pressed, and nothing is sent anywhere
+([`SPEC.md` §8.6](./SPEC.md)).
+
+Each of those tabs carries an editable **Data** pane, pre-filled with the
+`INSERT`s its schema needs and applied just before the query, so you can
+`INSERT`, `UPDATE` or `DELETE` and watch the response change. Writes are plain
+SQL rather than GraphQL mutations because a SQL/PGQ property graph is a
+read-only view: gopgql compiles queries against it and never writes through it,
+and `CompileQuery` refuses any operation that is not a `query`.
 
 ## What it looks like
 

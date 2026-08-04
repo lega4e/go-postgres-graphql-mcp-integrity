@@ -1,19 +1,30 @@
 // Package playground is the thin driver behind the WASM playground. It runs the
-// real gopgql pipeline — sdl parse/validate, generator, migrate and compiler —
-// end to end on an editable SDL document, GraphQL query and variables, with no
-// JavaScript re-implementation and no database.
+// real gopgql pipeline — sdl parse/validate, generator, migrate, compiler and
+// shape — end to end on an editable SDL document, GraphQL query and variables,
+// with no JavaScript re-implementation.
 //
-// Everything it returns is *generated* from the inputs: the goose migration and
-// the compiled GRAPH_TABLE SQL with its ordered bind parameters. It never
-// fabricates query *results* — shaping a response requires rows from PostgreSQL,
-// which the browser has no access to (SPEC.md §4: only sdl/generator/migrate/
-// compiler are database-free and compile to WASM; exec/shape need a real DB).
+// Everything it returns is *generated* from the inputs: the goose migration, the
+// compiled GRAPH_TABLE SQL with its ordered bind parameters, and — given rows
+// somebody else executed — the nested GraphQL response those rows shape into.
+//
+// It never fabricates query *results*. Rows come from a real PostgreSQL, which
+// the browser now has: the playground runs the pinned wasm build of the fork in
+// a Web Worker (SPEC.md §8.6) and hands the flat result set back here to be
+// shaped. That last step is what makes the playground show gopgql's whole job
+// rather than two thirds of it — a GraphQL query in, a GraphQL response out.
+//
+// Shaping needs no database. `shape` imports `compiler` and `fmt` and nothing
+// else, so it sits on the database-free side of the WASM boundary alongside
+// sdl, schema, generator, migrate and compiler (SPEC.md §4.1). Only `exec`,
+// which owns the pgx connection, is excluded — and executing is precisely the
+// step the worker does instead.
 //
 // It is a normal Go package so it is unit-testable on the host and reused
 // verbatim by the js/wasm entry point in cmd/wasm.
 package playground
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +33,7 @@ import (
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/sdl"
+	"github.com/lega4e/gopgql/shape"
 )
 
 // ExampleSDL is the worked example from SPEC.md §5.2, loaded as the playground's
@@ -34,6 +46,41 @@ const ExampleSDL = `type Person @node(label: "person") {
   followedBy: [Person!]! @relationship(type: "follows", direction: IN)
                          @hasInverse(field: "follows")
 }`
+
+// ExampleSeed is the fixture ExampleSDL's generated tables are filled with
+// before a compiled query runs against them. A GRAPH_TABLE query over an empty
+// database returns zero rows, which demonstrates nothing; these rows are what
+// make the Traversal and Multi-pattern results readable.
+//
+// It is chosen for three default queries at once, all of which read this one
+// schema:
+//
+//   - the chain Alice → Bob → Carol → Dave → Erin is five distinct people, so
+//     ExampleQuery's three hops and ExampleDeepQuery's four both find a path
+//     whose vertices are all different — which is what the compiler's
+//     isomorphism guards require. A shorter chain would satisfy the first and
+//     silently return nothing for the second;
+//   - the closing edge Dave → Alice gives Alice an incoming follow, which is
+//     what ExampleMultiPatternQuery's `followedBy` branch reads. It closes a
+//     cycle without shortening the chain: Alice still has exactly one outgoing
+//     edge, so the traversal queries still match exactly one path.
+//
+// The ids are literal so the fixture is deterministic: the generated table
+// defaults `id` to gen_random_uuid(), and edges have to name the vertices they
+// join.
+const ExampleSeed = `INSERT INTO persons (id, name, email) VALUES
+  ('a0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
+  ('a0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com'),
+  ('a0000000-0000-4000-8000-000000000003', 'Carol', 'carol@example.com'),
+  ('a0000000-0000-4000-8000-000000000004', 'Dave',  NULL),
+  ('a0000000-0000-4000-8000-000000000005', 'Erin',  'erin@example.com');
+
+INSERT INTO follows (source_id, target_id) VALUES
+  ('a0000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000002'),
+  ('a0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000003'),
+  ('a0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000004'),
+  ('a0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000005'),
+  ('a0000000-0000-4000-8000-000000000004', 'a0000000-0000-4000-8000-000000000001');`
 
 // ExampleQuery is the M4 exit query (SPEC.md §7 → M4): a three-hop traversal
 // filtered by a bound variable, compiled to a single GRAPH_TABLE. It is
@@ -65,6 +112,18 @@ const ExampleDirectivesQuery = `{ products(title: $t) { title price category } }
 
 // ExampleDirectivesVars binds ExampleDirectivesQuery's variable.
 const ExampleDirectivesVars = `{ "t": "Chain" }`
+
+// ExampleDirectivesSeed fills ExampleDirectivesSDL's generated table. It is
+// written against the *physical* column names, so `title` is inserted as
+// `name` — the same rename the compiled query projects, which is the whole
+// point of the scenario.
+//
+// One row matches ExampleDirectivesVars' "Chain"; the others are there so the
+// filter is visibly doing something.
+const ExampleDirectivesSeed = `INSERT INTO products (id, sku, name, price, category, vendor) VALUES
+  ('b0000000-0000-4000-8000-000000000001', 'CHN-11S', 'Chain',    24.99, 'drivetrain',  'Shimano'),
+  ('b0000000-0000-4000-8000-000000000002', 'CST-11S', 'Cassette', 59.50, 'drivetrain',  'Shimano'),
+  ('b0000000-0000-4000-8000-000000000003', 'BTL-750', 'Bottle',    8.00, 'accessories', NULL);`
 
 // ExampleConstraintsSDL exercises the whole M7 constraint surface at once
 // (SPEC.md §5, §7 → M7): a column default, a column check, a table-level check
@@ -101,6 +160,22 @@ const ExampleConstraintsQuery = `{ employees(tenant: $t, email: $e) { role joine
 
 // ExampleConstraintsVars binds ExampleConstraintsQuery's two variables.
 const ExampleConstraintsVars = `{ "t": "acme", "e": "ada@acme.example" }`
+
+// ExampleConstraintsSeed fills ExampleConstraintsSDL's generated tables with
+// two employees of one tenant and the edge between them. The first row is the
+// one ExampleConstraintsVars selects by natural key.
+//
+// `role` is supplied on both rows and is inside the generated CHECK; `left_at`
+// is left out entirely, so the table-level check comparing it to `joined_at`
+// holds. Nothing here supplies a value the column defaults would have provided
+// — `joined_at` is given explicitly only so the rendered result is stable
+// rather than "whenever you pressed Run".
+const ExampleConstraintsSeed = `INSERT INTO employees (id, tenant, email, role, joined_at) VALUES
+  ('c0000000-0000-4000-8000-000000000001', 'acme', 'ada@acme.example',   'admin',  '2024-01-15T09:00:00Z'),
+  ('c0000000-0000-4000-8000-000000000002', 'acme', 'grace@acme.example', 'member', '2024-03-02T09:00:00Z');
+
+INSERT INTO reports_to (source_id, target_id) VALUES
+  ('c0000000-0000-4000-8000-000000000002', 'c0000000-0000-4000-8000-000000000001');`
 
 // RevisedConstraintsSDL renames one field of ExampleConstraintsSDL — `email`
 // becomes `workEmail`, mapped to the column `work_email` — and declares the
@@ -165,6 +240,25 @@ type Bot implements Actor & Profile @node(label: "bot") {
 // concrete type. Because an actor may be a person, the two positions could bind
 // the same row, so the compiler emits the isomorphism guard (SPEC.md §2.2).
 const ExampleInterfaceQuery = `{ actors { name follows { name } } }`
+
+// ExampleInterfaceSeed fills ExampleInterfaceSDL's four generated tables. Both
+// implementors of Actor are populated, and both edge tables carry a row, so
+// ExampleInterfaceQuery — which matches the shared `actor` label and traverses
+// `follows` — returns one row from each: a person following a person, and a bot
+// following a person. A seed covering only `persons` would return rows too, and
+// would hide the fact that the interface spans two tables.
+const ExampleInterfaceSeed = `INSERT INTO persons (id, name, email) VALUES
+  ('d0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
+  ('d0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com');
+
+INSERT INTO bots (id, name, vendor) VALUES
+  ('d0000000-0000-4000-8000-000000000003', 'Buildbot', 'acme');
+
+INSERT INTO follows (source_id, target_id) VALUES
+  ('d0000000-0000-4000-8000-000000000001', 'd0000000-0000-4000-8000-000000000002');
+
+INSERT INTO bot_follows (source_id, target_id) VALUES
+  ('d0000000-0000-4000-8000-000000000003', 'd0000000-0000-4000-8000-000000000001');`
 
 // ExampleVars is the initial variables document (JSON) bound to ExampleQuery.
 const ExampleVars = `{ "n": "Alice" }`
@@ -298,15 +392,29 @@ gopgql: compared elements, labels and properties only; defaults, constraints and
 gopgql: property graph "app_graph" has drifted from schema.graphql: 5 findings
 exit 2`
 
-// Compiled is the output of Compile: the GRAPH_TABLE SQL and a human-readable
-// rendering of its ordered bind parameters. Both are pure functions of the
-// inputs — no database is consulted (SPEC.md §6.1).
+// Compiled is the output of Compile: the GRAPH_TABLE SQL, its ordered bind
+// values, and a human-readable rendering of them. All three are pure functions
+// of the inputs — no database is consulted (SPEC.md §6.1).
 type Compiled struct {
 	// SQL is the compiled GRAPH_TABLE query, including any $n placeholders.
 	SQL string
-	// Params renders the ordered bind parameters, e.g. "$1 = Alice", or a note
-	// when the query carries none.
+	// Args are the ordered bind values the placeholders refer to: $1 is
+	// Args[0], $2 is Args[1], and so on. They are compiler.Compiled.Args
+	// carried through unconverted — same name, same values — so a caller that
+	// intends to *execute* the query has something to bind. It is nil when the
+	// query carries no variables, and nil on every error path.
+	Args []any
+	// Params renders Args for a reader, e.g. "$1 = Alice", or a note when the
+	// query carries none. It is the display form of Args, not a second fact:
+	// the two always describe the same values.
 	Params string
+	// Projection describes how the flat rows the SQL returns regroup into the
+	// nested GraphQL response. It is compiler.Compiled.Projection carried
+	// through unconverted, and it is what Shape consumes: a caller that has
+	// already compiled does not have to compile a second time to shape.
+	//
+	// It is the zero Projection on every error path.
+	Projection compiler.Projection
 }
 
 // Compile parses the SDL and compiles the GraphQL query against it, resolving
@@ -329,11 +437,103 @@ func CompileWithMaxDepth(sdlSrc, query string, vars map[string]any, maxDepth int
 	if err != nil {
 		return Compiled{}, err
 	}
-	sql, args, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).Compile(query, vars)
+	// CompileQuery rather than Compile: the two emit the same SQL and the same
+	// bind values, and the former also hands back the projection the response
+	// shaper needs. Compile is the SPEC.md §6.1 two-value contract and is left
+	// alone; there is nothing to gain here by discarding a value and then
+	// recompiling to get it back.
+	cq, err := compiler.New(doc, compiler.WithMaxDepth(maxDepth)).CompileQuery(query, vars)
 	if err != nil {
 		return Compiled{}, err
 	}
-	return Compiled{SQL: sql, Params: renderParams(args)}, nil
+	return Compiled{
+		SQL:        cq.SQL,
+		Args:       cq.Args,
+		Params:     renderParams(cq.Args),
+		Projection: cq.Projection,
+	}, nil
+}
+
+// Result is one execution's flat result set on its way back from the database:
+// the output column names, and one positional value list per row.
+//
+// It is positional rather than a list of objects because that is the honest
+// shape of what PostgreSQL returned. The compiler gives every projected column
+// a unique name, but a result read as objects would silently collapse two
+// columns that ever did share one — and the playground's whole claim is that
+// what it shows is what happened.
+//
+// The JSON tags are the wire form the page posts across the WASM boundary
+// (design D5): the Go module and the PostgreSQL module have separate linear
+// memories, so the rows cross as text, exactly as the bind values do on the way
+// out.
+type Result struct {
+	// Columns are the output column names, in result order.
+	Columns []string `json:"columns"`
+	// Rows are the values, one list per row, positionally aligned to Columns.
+	Rows [][]any `json:"rows"`
+}
+
+// Shape regroups a compiled query's flat rows into the nested GraphQL response
+// — the last step of gopgql's job, and the one the playground used to stop
+// short of.
+//
+// proj comes from Compiled.Projection. The rows are whatever executed the SQL:
+// pgx in the integration suites, PGlite in the browser. Shape does not care
+// which, and touches no database itself.
+//
+// A row whose length disagrees with Columns is refused rather than padded. It
+// would mean the result set and the column list came from different executions,
+// and a response shaped from that would be wrong in a way no reader could see.
+func Shape(proj compiler.Projection, res Result) (map[string]any, error) {
+	if proj.Root == nil {
+		return nil, errors.New("playground: no projection to shape the rows with")
+	}
+	flat := make([]map[string]any, 0, len(res.Rows))
+	for i, row := range res.Rows {
+		if len(row) != len(res.Columns) {
+			return nil, fmt.Errorf(
+				"playground: result row %d has %d values but the result declares %d columns",
+				i+1, len(row), len(res.Columns))
+		}
+		obj := make(map[string]any, len(res.Columns))
+		for j, col := range res.Columns {
+			obj[col] = row[j]
+		}
+		flat = append(flat, obj)
+	}
+	return shape.Rows(proj, flat), nil
+}
+
+// ShapeJSON compiles the query and shapes res into the nested GraphQL response,
+// rendered as indented JSON.
+//
+// It recompiles rather than taking a projection because it is the WASM entry
+// point's shape: a projection is a Go value and cannot cross into JavaScript,
+// so the page sends back the same three inputs it compiled with and the
+// projection is re-derived here. Compilation is pure and touches no database,
+// so re-deriving it costs nothing and cannot disagree with the first pass.
+//
+// What comes back is the response *payload* — the root field and its objects —
+// which is exactly what exec.Query returns to a Go caller. It is deliberately
+// not wrapped in a GraphQL `{"data": …}` envelope: gopgql is a library that
+// compiles and shapes, not a server that answers requests, and inventing an
+// envelope it does not produce would be the one fabricated panel on a page
+// whose whole claim is that nothing is.
+func ShapeJSON(sdlSrc, query string, vars map[string]any, maxDepth int, res Result) (string, error) {
+	compiled, err := CompileWithMaxDepth(sdlSrc, query, vars, maxDepth)
+	if err != nil {
+		return "", err
+	}
+	shaped, err := Shape(compiled.Projection, res)
+	if err != nil {
+		return "", err
+	}
+	out, err := json.MarshalIndent(shaped, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("playground: render the shaped response as JSON: %w", err)
+	}
+	return string(out), nil
 }
 
 // MaxDepth reports the compiler's default traversal-depth ceiling: what the

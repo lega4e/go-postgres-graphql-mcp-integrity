@@ -193,7 +193,9 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`cmd/gopgql`|CLI: `generate` (SDL → migration), `migrate` (generate + apply) and `conform` (drift check). `compile` is not implemented yet.|
 |`cmd/gopgql-mcp`|The MCP server binary: one SDL, one DSN, stdio or streamable-HTTP transport.                       |
 
-`sdl`, `schema`, `generator`, `migrate`, and `compiler` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `conform` reflects a live catalog and so imports it too; `mcp` and `cmd/gopgql-mcp` build on `exec`. None of those four are part of the WASM surface, and nothing on the WASM side may import them — the boundary is what makes the browser playground possible at all.
+`sdl`, `schema`, `generator`, `migrate`, `compiler` and `shape` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `conform` reflects a live catalog and so imports it too; `mcp` and `cmd/gopgql-mcp` build on `exec`. None of those four are part of the WASM surface, and nothing on the WASM side may import them — the boundary is what makes the browser playground possible at all.
+
+`shape` is on the WASM side, and the distinction is worth stating because it is easy to get backwards. Shaping is often described together with executing — `exec` does both, in that order — which makes it sound as though shaping needs a database. It does not: `shape` imports `compiler` and `fmt`, takes a projection and a slice of rows, and returns a nested response. *Executing* needs `pgx`. So the browser can do everything except the middle step, and the playground does exactly that — it compiles here, executes in a Web Worker running the pinned wasm PostgreSQL (§8.6), and shapes the rows that come back here. Placing `shape` on the database side would have cost the playground the one thing that makes it a demonstration of gopgql rather than of a SQL generator.
 
 `conform` reflects **into `schema.Schema`**, the same model `generator` builds from SDL, so a drift check is a comparison of two values of one type rather than a model-versus-database special case. That is also why it can sit outside the WASM surface without splitting the model: the shared type is on the database-free side, and only the reflection is not. The playground therefore shows the SDL half of the comparison — the generated `CREATE PROPERTY GRAPH` — beside a recorded report, and says which is which.
 
@@ -561,6 +563,7 @@ jobs:
 - **Vite `base` must be `'./'`** — relative paths, required for PR preview subpath compatibility.
 - **No Git LFS** for any asset served by Pages; LFS objects are not served.
 - The WASM binary is a build artifact, never committed.
+- **No COOP/COEP headers, and none are needed** (§8.6). GitHub Pages cannot set response headers anyway, which is why the PostgreSQL runtime the playground executes against has to be a single-threaded build.
 
 ### 8.4 CI
 
@@ -585,6 +588,44 @@ Pages (§8.1–§8.2) publishes the docs site. The binaries and the container im
 **The trigger is a semver tag push** — `v[0-9]+.[0-9]+.[0-9]+*`, spelled out rather than `v*` so a non-release tag cannot publish. `permissions: contents: write` (the release and its archives) and `packages: write` (GHCR) are the whole grant, and the workflow's own `GITHUB_TOKEN` authenticates to `ghcr.io`: **no PAT and no repository secret** is required. Checkout is `fetch-depth: 0`, since goreleaser derives the version from the tag and the changelog from the commits since the previous one. `docker/setup-qemu-action` and `docker/setup-buildx-action` precede the release step because the arm64 image is built under emulation on an amd64 runner.
 
 **The test suite does not re-run at release time.** It requires Docker and a real `postgres:19beta2`, has no skip path (§10), and costs up to 20 minutes; running it again on a commit `ci.yml` already proved green on `main` would double the release's runtime to re-test the same tree. The gate is therefore ordering — green CI on `main`, then the tag. What *is* checked on every PR is the release configuration itself: a `release-config` job runs `goreleaser check` and a snapshot build with `--skip=publish,docker,announce`, so a broken `.goreleaser.yaml` fails on the PR rather than after a tag is already pushed and a retag is the only fix. The multi-arch image build is exercised only on a tag.
+
+### 8.6 In-browser execution — the pinned PostgreSQL runtime
+
+The playground does not only generate. Each tab that compiles a query — Traversal, Multi-pattern, Directives, Constraints, Depth limit, Interfaces — carries a **Run** control that executes what it generated against a real PostgreSQL 19 with SQL/PGQ, compiled to WebAssembly and running in the reader's own tab. Generate is unchanged: still pure, instant and offline.
+
+**The round trip is complete.** A Run is four steps, not three: compile the GraphQL query to `GRAPH_TABLE` (Go, main thread), execute it (PostgreSQL, worker), hand the flat rows back to `shape` (Go, main thread), and render the **nested GraphQL response** it returns. That last step is the one that makes the page a demonstration of gopgql: a SQL generator would stop at the rows, and rows are not what a GraphQL client asked for. The response leads the result panel; the flat rows sit under it in a disclosure, because the fan-out they show is exactly what shaping collapses and seeing both is how the parent dedup becomes legible. `cmd/wasm` exports `gopgqlShape` for this; it re-derives the projection by recompiling, since a `compiler.Projection` is a Go value and cannot cross into JavaScript.
+
+What is rendered is the response *payload* — the root field and its objects — which is what `exec.Query` returns to a Go caller. It is deliberately **not** wrapped in a GraphQL `{"data": …}` envelope: gopgql is a library that compiles and shapes, not a server that answers requests, and an envelope it does not produce would be the one fabricated panel on a page whose entire claim is that nothing is.
+
+**Changing the data is plain SQL, by design.** Every runnable tab carries an editable **Data** pane, pre-filled with the `INSERT`s its example schema needs and applied between the generated DDL and the query, so a reader can `INSERT`, `UPDATE` or `DELETE` and watch the next Run answer differently. It is SQL and not a GraphQL mutation because §2 is a hard constraint, not an omission: a SQL/PGQ property graph is a read-only view, `compiler.CompileQuery` refuses any operation that is not a `query`, and the MCP server's introspection reports a null `mutationType`. gopgql has no write path to expose, so the playground exposes the database's. A failed statement in that pane does not abort the run — the query still executes and reports what it honestly found — because the pane is the reader's to break.
+
+**Where the runtime comes from.** `docs/package.json` depends on an npm package tarball published as a **release asset of `lega4e/postgres-pglite`**, by URL:
+
+| | |
+| --- | --- |
+| Release tag | `pglite-wasm-19beta2.1` |
+| Package | `@electric-sql/pglite@0.5.4-pg19beta2` |
+| PostgreSQL | 19beta2 |
+| Fork ref built from | `REL_19_BETA2-pglite` @ `edf1a2c0d7477ef0a458861bf3e55a31ff5dc917` |
+| Toolchain | emscripten 3.1.74, linked `-sUSE_PTHREADS=0` |
+| `pglite.wasm` | 9,379,167 B (3,126,403 B gzipped), sha256 `37f1ffbe…` |
+| `pglite.data` | 5,434,026 B (~1.5 MB gzipped), sha256 `03aad8eb…` |
+
+The package name is unchanged from upstream, so `import { PGlite } from '@electric-sql/pglite'` is a drop-in. The raw `pglite.wasm` and `pglite.data` published beside it are **not loadable on their own** — PGlite's emscripten glue size-checks the filesystem bundle against a value fixed at link time — which is why the tarball, carrying the matching JS runtime and `initdb` module, is what gets pinned.
+
+Pinning is by URL plus `package-lock.json`'s integrity hash: `npm ci` reproduces exactly those bytes on every machine and every CI run, or fails. No registry credential, no vendored binary in git, no build step to reproduce. Moving to a newer build is a pin bump plus `npm install` in one reviewable commit — which is what `postgres-pglite#10`'s re-pin to `REL_19_0` at GA will be.
+
+**The build is beta.** PostgreSQL 19beta2 is a beta and this pin will be replaced at GA. What this build has been exercised for is property-graph DDL, `GRAPH_TABLE` evaluation with bind parameters, and ordinary DDL/DML. What it has **not** been exercised for, and nothing should be built on: extension loading, `pg_dump`, the socket server, and any form of persistence.
+
+**Lazy, and enforced.** The module specifier appears in exactly one place — a dynamic `import()` inside `docs/src/pglite-worker.js` — and the worker itself is not constructed until the first Run. A reader who never presses Run downloads exactly what the site cost before execution existed. `docs/scripts/check-lazy-runtime.mjs` runs as npm's `postbuild` hook, walks Vite's static import graph from every entry, and **fails the build** if anything reachable that way references `pglite.wasm` or `pglite.data`. Laziness that regresses silently on a bundler upgrade is worth nothing.
+
+**In memory only.** `new PGlite()` with no `dataDir`. No IndexedDB, no OPFS, no persistence of any kind, and no cross-tab sharing — `@electric-sql/pglite/worker` is deliberately *not* used, because its leader election exists to share a *persisted* database between tabs, which is the opposite of what this is. Each Run builds a fresh database, applies the generated DDL, applies the tab's data SQL, executes the compiled query with its bind values, and discards the database. A reader's edits therefore survive as long as the text in the pane and no longer, which is the same lifetime as everything else on the page.
+
+**The two WebAssembly modules never meet.** `gopgql.wasm` stays on the main thread; PGlite runs in a dedicated Web Worker. They have separate linear memories and nothing is shared between them: what crosses is text, plain arrays and plain values, structured-cloned by `postMessage`.
+
+**Previews keep parity with production.** No asset is withheld from a preview, because the runtime's bytes come from an immutable pinned tarball and are byte-identical on every build — so `gh-pages` stores one git blob for them however many previews reference it. Contrast `gopgql.wasm`, rebuilt from Go source on every commit, which adds a fresh blob per deploy. The cost that actually matters is the reader's download, and the lazy-load contract already bounds that to people who asked for it.
+
+**How it is proven.** `test/seed` runs the schema → data → query → **shape** sequence for every runnable tab against a real `postgres:19beta2` container, so neither a fixture nor a projection can drift from the SDL beside it. `docs/e2e` then runs the same sequence in a real Chromium, in a Web Worker, on the pinned wasm build, served from a preview-shaped subpath by a server that sets no isolation headers — and asserts the nested response comes back with the values the seed put in. It also asserts the write path end to end: an `UPDATE` typed into the Data pane changes the response the next Run returns. Both suites are merge gates. Nothing here is inferred from the fork branch a build came from or from symbols in the binary.
 
 -----
 

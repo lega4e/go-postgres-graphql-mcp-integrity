@@ -1,0 +1,13 @@
+{
+  "name": "gopgql-docs-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Browser suite for the playground's PostgreSQL execution. Kept out of docs/package.json so the site's own lockfile stays small and `npm ci` for a deploy never installs a browser driver.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}
