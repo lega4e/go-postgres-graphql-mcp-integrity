@@ -33,15 +33,61 @@ type Querier interface {
 //
 // The compiled SQL carries placeholders for every argument; values travel as
 // bind parameters and are never interpolated into the statement.
+//
+// It dispatches on the strategy the query was compiled under (SPEC.md §7 → M8):
+// a Go-side query returns one flat column per projected field and is regrouped
+// here, an SQL-side query returns a single `response` column PostgreSQL has
+// already assembled and is decoded. The signature is the same either way, so
+// every caller — the integration suites, mcp — keeps working and inherits
+// whichever strategy its compiler was configured with (design D1).
 func Query(ctx context.Context, db Querier, cq *compiler.Compiled) (map[string]any, error) {
 	if cq == nil {
 		return nil, fmt.Errorf("exec: nil compiled query")
+	}
+	if cq.Shaping == compiler.SQLSide {
+		return queryShaped(ctx, db, cq)
 	}
 	flat, err := Rows(ctx, db, cq.SQL, cq.Args...)
 	if err != nil {
 		return nil, err
 	}
-	return shape.Rows(cq.Projection, flat), nil
+	return shape.Rows(cq.Projection, flat)
+}
+
+// queryShaped runs an SQL-side-shaped query, whose result is one row of one text
+// column holding the whole response.
+//
+// The column is read as a string and never through the driver's JSON codec: a
+// generic JSON decode turns `19.90` into float64 19.9, which would lose on this
+// path a digit the Go-side path keeps.
+func queryShaped(ctx context.Context, db Querier, cq *compiler.Compiled) (map[string]any, error) {
+	rows, err := db.Query(ctx, cq.SQL, cq.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	defer rows.Close()
+
+	if fds := rows.FieldDescriptions(); len(fds) != 1 {
+		return nil, fmt.Errorf("exec: an SQL-side shaped query returns one column, got %d", len(fds))
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("exec: %w", err)
+		}
+		return nil, fmt.Errorf("exec: an SQL-side shaped query returns one row, got none")
+	}
+
+	var response string
+	if err := rows.Scan(&response); err != nil {
+		return nil, fmt.Errorf("exec: read the shaped response: %w", err)
+	}
+	if rows.Next() {
+		return nil, fmt.Errorf("exec: an SQL-side shaped query returns one row, got more than one")
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	return shape.Decode(cq.Projection, response)
 }
 
 // Rows executes a statement and returns its rows as column-name maps, the flat

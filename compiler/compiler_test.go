@@ -76,7 +76,8 @@ func TestCompileSingleVertex(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if sql != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", sql, want)
 	}
@@ -95,7 +96,8 @@ func TestCompileMultipleProperties(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.id AS v0_c0, v0.name AS v0_c1, v0.email AS v0_c2)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -117,7 +119,8 @@ func TestCompileAlias(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -139,7 +142,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.name = $1 AND v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -167,7 +171,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) <-[e0 IS follows]- (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -186,7 +191,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   WHERE v0.name = $1 AND v0.age = $2
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if sql != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", sql, want)
 	}
@@ -208,7 +214,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -249,7 +256,8 @@ FROM GRAPH_TABLE (app_graph
 		`AND v1.id <> v2.id AND v1.id <> v3.id AND v2.id <> v3.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0, ` +
 		`v2.id AS v2_k, v2.name AS v2_c0, v3.id AS v3_k, v3.name AS v3_c0)
-)`
+)
+ORDER BY v0_k, v1_k, v2_k, v3_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -344,7 +352,8 @@ func TestCompileSharedLabelInterface(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS actor)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -362,7 +371,8 @@ func TestCompileLabelAlternation(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS bot|person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -382,7 +392,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS actor) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -416,7 +427,8 @@ LEFT JOIN GRAPH_TABLE (app_graph
     MATCH (v3 IS person) <-[e1 IS follows]- (v4 IS person)
     WHERE v3.id <> v4.id
     COLUMNS (v3.id AS v3_j, v4.id AS v4_k, v4.name AS v4_c0)
-  ) AS q2 ON q2.v3_j = q0.v0_k`
+  ) AS q2 ON q2.v3_j = q0.v0_k
+ORDER BY q0.v0_k, q1.v2_k, q2.v4_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}

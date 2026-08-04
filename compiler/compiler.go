@@ -105,6 +105,7 @@ type Compiler struct {
 	doc       *sdl.Document
 	graphName string
 	maxDepth  int
+	shaping   Shaping
 }
 
 // Option configures a Compiler.
@@ -134,7 +135,12 @@ func (c *Compiler) MaxDepth() int { return c.maxDepth }
 
 // New returns a Compiler for the given SDL document.
 func New(doc *sdl.Document, opts ...Option) *Compiler {
-	c := &Compiler{doc: doc, graphName: generator.DefaultGraphName, maxDepth: DefaultMaxDepth}
+	c := &Compiler{
+		doc:       doc,
+		graphName: generator.DefaultGraphName,
+		maxDepth:  DefaultMaxDepth,
+		shaping:   DefaultShaping,
+	}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -154,6 +160,19 @@ type ProjectedField struct {
 	// distinct from ResponseKey so the same field name at two nesting levels does
 	// not collide.
 	Column string
+	// GraphQLType is the named GraphQL scalar the SDL declares for this field
+	// (Int, DateTime, …), with list and non-null wrappers stripped.
+	GraphQLType string
+	// ColumnType is the @column(type:) override, or empty when the field takes
+	// the default scalar mapping (SPEC.md §5.1).
+	ColumnType string
+	// List is true when the field is a list type, e.g. [Int!]!.
+	List bool
+	// Scalar is the canonical response form this field's value takes. shape
+	// normalises a leaf through it so a pgx-scanned value and a value decoded
+	// out of the database's own JSON reach the same Go representation
+	// (design D5). Only the compiler knows it, which is why it is recorded here.
+	Scalar ScalarKind
 }
 
 // Selection is one vertex level of the projected result tree: its scalar fields,
@@ -175,6 +194,12 @@ type Selection struct {
 	// means the level branches: each child was compiled into its own GRAPH_TABLE
 	// joined on this level's KeyColumn (SPEC.md §7 → M5).
 	Children []*Selection
+
+	// frag is the query fragment this level's columns are projected by. It is
+	// unexported because it is an emission detail: the SQL-side renderer needs
+	// it to know which GRAPH_TABLE a level reads from, and nothing outside this
+	// package does.
+	frag *fragment
 }
 
 // Projection describes how to shape a compiled query's flat rows into the nested
@@ -193,6 +218,11 @@ type Compiled struct {
 	// Projection describes how to shape the returned rows into the GraphQL
 	// response.
 	Projection Projection
+	// Shaping is the strategy this query was compiled under, recorded so exec
+	// can dispatch on it without being told again (design D1). Under SQLSide the
+	// SQL returns a single `response` column the database has already
+	// assembled; under GoSide it returns one flat column per projected field.
+	Shaping Shaping
 }
 
 // Compile matches the SPEC.md §6.1 contract: it returns the SQL and ordered
@@ -237,14 +267,24 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		varDefs[vd.Variable] = vd
 	}
 
-	b := newBuilder(c.doc, vars, varDefs, c.maxDepth)
+	b := newBuilder(c.doc, vars, varDefs, c.maxDepth, c.shaping)
 	rootSel, err := b.vertex(target, root, 0, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	sql := b.render(c.graphName)
-	return &Compiled{SQL: sql, Args: b.args, Projection: Projection{Root: rootSel}}, nil
+	var sql string
+	if c.shaping == SQLSide {
+		sql = b.renderShaped(c.graphName, rootSel)
+	} else {
+		sql = b.render(c.graphName)
+	}
+	return &Compiled{
+		SQL:        sql,
+		Args:       b.args,
+		Projection: Projection{Root: rootSel},
+		Shaping:    c.shaping,
+	}, nil
 }
 
 // builder walks a root field's selection tree, accumulating one or more query
@@ -260,14 +300,54 @@ type builder struct {
 	vars     map[string]any
 	varDefs  map[string]*ast.VariableDefinition
 	maxDepth int
+	shaping  Shaping
 
 	aliasN int
 	edgeN  int
+	relN   int   // derived-table aliases in the SQL-side statement
 	args   []any // bind parameters in $-order
 
 	frags []*fragment // fragment 0 is the spine; the rest are branches
 	cur   *fragment   // the fragment currently being written
 	path  []vertexPos // ancestor positions on the walk, root first
+
+	// order is every level's key column in walk order — outermost level first —
+	// each tagged with the fragment projecting it. It is what the flat query's
+	// ORDER BY is built from, and the order is total because every key is a
+	// level's unique id (design D4).
+	order []orderKey
+}
+
+// orderKey is one level's key column and the fragment that projects it.
+type orderKey struct {
+	frag *fragment
+	col  string
+}
+
+// outCol is one column the outer query exposes: the name it is projected under
+// and, where the value needs one, a cast applied outside the GRAPH_TABLE call.
+type outCol struct {
+	// name is the output-column name, which is also the key the flat row
+	// carries and the name the projection refers to.
+	name string
+	// cast is a PostgreSQL type the column is cast to in the outer SELECT, or
+	// empty for none. A JSON-typed column is cast to text under **both**
+	// strategies: left to the driver's own JSON decode, `19.90` inside a jsonb
+	// document comes back as float64 19.9 on the Go-side path only (design D5).
+	cast string
+}
+
+// selectExpr renders the column for an outer SELECT list, qualified by the
+// fragment alias when the query joins more than one fragment.
+func (o outCol) selectExpr(qualifier string) string {
+	ref := o.name
+	if qualifier != "" {
+		ref = qualifier + "." + o.name
+	}
+	if o.cast == "" {
+		return ref
+	}
+	return fmt.Sprintf("%s::%s AS %s", ref, o.cast, o.name)
 }
 
 // fragment is one GRAPH_TABLE call plus how it attaches to its parent fragment.
@@ -275,7 +355,7 @@ type fragment struct {
 	name    string          // outer-query alias: q0, q1, …
 	match   strings.Builder // the MATCH path
 	columns []string        // COLUMNS entries, e.g. "v0.name AS v0_c0"
-	outs    []string        // columns the outer SELECT exposes (projection-visible)
+	outs    []outCol        // columns the outer SELECT exposes (projection-visible)
 	preds   []string        // WHERE predicates inside this GRAPH_TABLE
 	verts   []vertexPos     // this fragment's vertex positions, for its own guards
 
@@ -296,13 +376,14 @@ type vertexPos struct {
 	key    string
 }
 
-func newBuilder(doc *sdl.Document, vars map[string]any, varDefs map[string]*ast.VariableDefinition, maxDepth int) *builder {
+func newBuilder(doc *sdl.Document, vars map[string]any, varDefs map[string]*ast.VariableDefinition, maxDepth int, shaping Shaping) *builder {
 	spine := &fragment{name: "q0"}
 	return &builder{
 		doc:      doc,
 		vars:     vars,
 		varDefs:  varDefs,
 		maxDepth: maxDepth,
+		shaping:  shaping,
 		frags:    []*fragment{spine},
 		cur:      spine,
 	}
@@ -336,13 +417,18 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 	b.writeVertex(alias, t.Labels)
 	path = append(append([]string{}, path...), responseKey(field))
 
-	sel := &Selection{ResponseKey: responseKey(field), Alias: alias}
+	sel := &Selection{ResponseKey: responseKey(field), Alias: alias, frag: b.cur}
 
 	// Hidden key column: every level projects its id so shape can regroup rows
 	// and deduplicate parents across the fan-out.
 	keyCol := alias + "_k"
-	b.addColumn(alias, "id", keyCol)
+	b.addColumn(alias, "id", keyCol, "")
 	sel.KeyColumn = keyCol
+
+	// Every level's key joins the flat query's ORDER BY, outermost level first,
+	// so the Go-side and SQL-side strategies deliver lists in the same order
+	// (design D4).
+	b.order = append(b.order, orderKey{frag: b.cur, col: keyCol})
 
 	pos := vertexPos{alias: alias, tables: t.Tables, frag: b.cur, key: keyCol}
 	b.addPosition(pos)
@@ -374,12 +460,37 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 			if len(f.Arguments) > 0 {
 				return nil, fmt.Errorf("compiler: arguments on scalar field %s.%s are not supported", t.TypeName, f.Name)
 			}
+			kind := classifyScalar(def.TypeName, def.ColumnType)
+			// A scalar with no canonical response form is refused under SQL-side
+			// shaping and accepted under Go-side, which makes no cross-strategy
+			// promise about it (design D5).
+			if kind == ScalarUnknown && b.shaping == SQLSide {
+				return nil, &UnshapeableScalarError{
+					TypeName:    t.TypeName,
+					Field:       f.Name,
+					GraphQLType: def.TypeName,
+					ColumnType:  def.ColumnType,
+				}
+			}
 			col := fmt.Sprintf("%s_c%d", alias, len(sel.Fields))
+			// An embedded JSON document is projected ::text so the driver never
+			// runs its own JSON decode over it — that decode is lossy, and it
+			// would run on the Go-side path only (design D5).
+			cast := ""
+			if kind == ScalarJSON {
+				cast = "text"
+			}
 			// The graph exposes the *column*, which @column(name:) may have
 			// renamed away from the GraphQL field name (SPEC.md §7 → M6).
-			b.addColumn(alias, def.ColumnName(), col)
+			b.addColumn(alias, def.ColumnName(), col, cast)
 			sel.Fields = append(sel.Fields, ProjectedField{
-				ResponseKey: responseKey(f), Property: def.ColumnName(), Column: col,
+				ResponseKey: responseKey(f),
+				Property:    def.ColumnName(),
+				Column:      col,
+				GraphQLType: def.TypeName,
+				ColumnType:  def.ColumnType,
+				List:        def.List,
+				Scalar:      kind,
 			})
 		case def.Rel != nil:
 			rels = append(rels, relSelection{field: f, def: def})
@@ -567,10 +678,12 @@ func (b *builder) writeEdge(rel *sdl.Relationship) {
 }
 
 // addColumn records one projected column on the current fragment: its COLUMNS
-// entry and the name the outer SELECT exposes it under.
-func (b *builder) addColumn(alias, property, out string) {
+// entry and the name the outer SELECT exposes it under. cast, when non-empty,
+// is applied outside the GRAPH_TABLE call rather than inside COLUMNS, which
+// takes plain property references.
+func (b *builder) addColumn(alias, property, out, cast string) {
 	b.cur.columns = append(b.cur.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(property), out))
-	b.cur.outs = append(b.cur.outs, out)
+	b.cur.outs = append(b.cur.outs, outCol{name: out, cast: cast})
 }
 
 // isomorphismGuards returns the `vi.id <> vj.id` predicates that exclude a
@@ -607,21 +720,25 @@ func overlaps(a, c []string) bool {
 	return false
 }
 
-// render assembles the final statement. A single fragment renders as the bare
-// GRAPH_TABLE query M1–M4 always emitted; several render as the spine LEFT
-// JOINed with each branch on the projected ids (SPEC.md §6.2 → multi-pattern
-// workaround).
+// render assembles the final flat statement — the Go-side strategy's SQL. A
+// single fragment renders as the bare GRAPH_TABLE query M1–M4 always emitted;
+// several render as the spine LEFT JOINed with each branch on the projected ids
+// (SPEC.md §6.2 → multi-pattern workaround).
+//
+// Both forms close with an ORDER BY over every level's key column, outermost
+// level first. The order is arbitrary — the keys are uuids — but it is a *total*
+// one, and it is the same order the SQL-side strategy's json_agg carries, which
+// is what byte-identity needs (design D4).
 func (b *builder) render(graphName string) string {
 	if len(b.frags) == 1 {
 		f := b.frags[0]
-		return fmt.Sprintf("SELECT %s\nFROM %s", strings.Join(f.outs, ", "), f.graphTable(graphName, ""))
+		return fmt.Sprintf("SELECT %s\nFROM %s%s",
+			strings.Join(selectList(f.outs, ""), ", "), f.graphTable(graphName, ""), b.orderBy(false))
 	}
 
 	var outs []string
 	for _, f := range b.frags {
-		for _, o := range f.outs {
-			outs = append(outs, f.name+"."+o)
-		}
+		outs = append(outs, selectList(f.outs, f.name)...)
 	}
 
 	var sb strings.Builder
@@ -632,7 +749,36 @@ func (b *builder) render(graphName string) string {
 		fmt.Fprintf(&sb, "\nLEFT JOIN %s AS %s ON %s",
 			f.graphTable(graphName, "  "), f.name, strings.Join(on, " AND "))
 	}
+	sb.WriteString(b.orderBy(true))
 	return sb.String()
+}
+
+// orderBy renders the flat query's ORDER BY clause over every level's key
+// column. qualified selects the multi-fragment form, where a column has to name
+// the fragment it came from.
+func (b *builder) orderBy(qualified bool) string {
+	if len(b.order) == 0 {
+		return ""
+	}
+	cols := make([]string, len(b.order))
+	for i, k := range b.order {
+		if qualified {
+			cols[i] = k.frag.name + "." + k.col
+		} else {
+			cols[i] = k.col
+		}
+	}
+	return "\nORDER BY " + strings.Join(cols, ", ")
+}
+
+// selectList renders a fragment's exposed columns for an outer SELECT list,
+// qualified by the fragment alias when the query joins more than one.
+func selectList(outs []outCol, qualifier string) []string {
+	list := make([]string, len(outs))
+	for i, o := range outs {
+		list[i] = o.selectExpr(qualifier)
+	}
+	return list
 }
 
 // graphTable renders one fragment as a GRAPH_TABLE call. Argument predicates come

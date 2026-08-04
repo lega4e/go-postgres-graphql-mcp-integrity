@@ -307,8 +307,8 @@ func (st *scenarioState) compileAndExecute(ctx context.Context, query string, va
 	if err != nil {
 		return err
 	}
-	st.response = shape.Rows(cq.Projection, flat)
-	return nil
+	st.response, err = shape.Rows(cq.Projection, flat)
+	return err
 }
 
 // executeSQL runs a hand-written statement and keeps its rows for assertion.
@@ -398,7 +398,10 @@ func (st *scenarioState) assertMatchesHandWritten(ctx context.Context, stmt *god
 	if err != nil {
 		return err
 	}
-	want := shape.Rows(st.lastProj, flat)
+	want, err := shape.Rows(st.lastProj, flat)
+	if err != nil {
+		return err
+	}
 
 	gotBytes, err := json.Marshal(st.response)
 	if err != nil {

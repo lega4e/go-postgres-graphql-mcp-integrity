@@ -511,8 +511,8 @@ func (st *scenarioState) compileWithVar(ctx context.Context, query, name, value 
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	st.response = shape.Rows(cq.Projection, flat)
-	return nil
+	st.response, err = shape.Rows(cq.Projection, flat)
+	return err
 }
 
 // assertProjects checks the compiler read the *column*, which @column(name:)
