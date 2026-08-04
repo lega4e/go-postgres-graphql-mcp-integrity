@@ -34,7 +34,7 @@
 
     <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
-    <script type="module" crossorigin src="./assets/index-C7ZROl2-.js"></script>
+    <script type="module" crossorigin src="./assets/index-BhcgsZ2D.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-B76SP_Sy.css">
   </head>
   <body class="ga-theme">
@@ -63,7 +63,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"shaping","label":"Shaping"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -455,6 +455,75 @@
                 An illustrative conformance report — a fixture, not a live check
               </label>
               <ga-code id="f-report"></ga-code>
+            </div>
+          </div>
+        </div>
+        <!-- Shaping: the same query compiled under both result-shaping
+             strategies. It shows the SQL each one emits, and says plainly that
+             it shows SQL and not results — there is no database in a browser
+             (SPEC.md §7 → M8, design D8). -->
+        <div slot="shaping">
+          <p class="panel-hint">
+            gopgql has two ways to turn a match into a nested GraphQL response.
+            <strong>Go-side</strong> projects one flat column per selected field
+            and regroups the rows in Go. <strong>SQL-side</strong> asks
+            PostgreSQL to assemble the response with
+            <code>json_build_object</code> and <code>json_agg</code>, and
+            returns it as a single <code>response</code> column. The strategy is
+            a compiler option (<code>compiler.WithShaping</code>), not an
+            execution-time switch, because the two emit different SQL.
+          </p>
+          <p class="panel-hint">
+            The <code>MATCH</code> pattern, its predicates and its bind
+            parameters are identical under both — only the projection around
+            them changes, which is why which rows match is not part of what the
+            two strategies have to be proven to agree about. Where the query
+            branches, the flat statement <code>LEFT JOIN</code>s the branches
+            and a parent with <em>m</em> and <em>n</em> children yields
+            <em>m×n</em> rows; the SQL-side statement aggregates each branch to
+            an array before the join, so that cross-product never forms.
+          </p>
+          <ga-note>
+            This panel shows <strong>generated SQL, not results</strong>. It
+            reports no response, no row count and no timing: the playground
+            compiles real Go to WebAssembly but has no database to run either
+            statement against. Executing SQL here is gopgql#31, which is blocked
+            on postgres-pglite#28. The two responses are proven byte-identical
+            against a real <code>postgres:19beta2</code> by the
+            <code>test/parity</code> suite, and measured against each other by
+            <code>test/bench</code>.
+          </ga-note>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="s-sdl">GraphQL SDL — schema</label>
+              <textarea id="s-sdl" class="code-input" data-lang="graphql" rows="9" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="s-query">GraphQL query</label>
+              <textarea id="s-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="s-vars">Variables (JSON)</label>
+              <textarea id="s-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <label for="s-strategy">Shaping strategy</label>
+              <ga-radio-group
+                id="s-strategy"
+                value="go-side"
+                items='[{"id":"go-side","label":"Go-side"},{"id":"sql-side","label":"SQL-side"}]'
+              ></ga-radio-group>
+              <ga-button class="run" data-scenario="shaping" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="s-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Result set the statement asks for</label>
+              <ga-code id="s-shape"></ga-code>
+              <label>Database query</label>
+              <ga-code id="s-sql" data-lang="sql"></ga-code>
+              <label>Ordered bind parameters — the same under both strategies</label>
+              <ga-code id="s-params"></ga-code>
             </div>
           </div>
         </div>
