@@ -13,9 +13,19 @@
 //
 // The protocol is three messages:
 //
-//   in   { type: 'run', id, ddl, data, sql, args }
-//   out  { type: 'result', id, version, steps: { schema, data, query } }
+//   in   { type: 'run', id, ddl, data, queries: [{ key, sql, args }] }
+//   out  { type: 'result', id, version, steps: { schema, data, queries } }
 //   out  { type: 'error', id, message }
+//
+// `queries` is a list rather than one statement because the Shaping tab runs
+// two: the same GraphQL query compiled under each shaping strategy, which have
+// to see the *same* rows for their responses to be comparable. Every run starts
+// from a fresh database, so two separate runs would build the data twice — and
+// then a difference between the responses could always be blamed on the data
+// rather than on the strategies. One run, one database, both statements.
+//
+// `steps.queries` is keyed by the caller's `key`, so the page names the outcome
+// it wants rather than counting positions.
 //
 // `data` is the reader's own SQL: the seed INSERTs the page starts them with,
 // and whatever they changed them to. It is applied between the generated schema
@@ -145,7 +155,8 @@ async function runQuery(sql, args) {
 }
 
 /**
- * One run: a fresh database, the generated schema, the data SQL, then the query.
+ * One run: a fresh database, the generated schema, the data SQL, then every
+ * query the request asked for, in order, against that one database.
  *
  * A data failure does **not** abort the run. That SQL is the reader's to edit —
  * a mistyped UPDATE, or the starting seed left in place against a schema they
@@ -155,17 +166,23 @@ async function runQuery(sql, args) {
  *
  * A schema failure does abort: every later step would fail with "relation does
  * not exist", which buries the one error that actually explains the run.
+ *
+ * A query that fails does not abort the ones after it either. Two statements
+ * that are meant to agree are most interesting when one of them is refused, and
+ * a run that stopped at the first would not say which.
  */
-async function run({ ddl, data, sql, args }) {
+async function run({ ddl, data, queries }) {
   await freshDatabase()
 
-  const steps = { schema: null, data: null, query: null }
+  const steps = { schema: null, data: null, queries: {} }
 
   steps.schema = await applyDocument(ddl)
   if (!steps.schema.ok) return { steps }
 
   steps.data = await applyDocument(data)
-  steps.query = await runQuery(sql, args)
+  for (const q of queries ?? []) {
+    steps.queries[q.key] = await runQuery(q.sql, q.args)
+  }
   return { steps }
 }
 

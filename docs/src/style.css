@@ -263,6 +263,15 @@ a {
   color: var(--ga-yellow, #f5a623);
 }
 
+/* The Shaping tab's verdict. It is the one note on the page that reports a
+   proof rather than an event, so it is weighted like a heading — a reader
+   should be able to tell what happened without reading the two responses
+   under it. */
+.result-note.ok {
+  color: var(--ga-green, #45a45d);
+  font-weight: 600;
+}
+
 /* The server version line under a result: provenance, not commentary. */
 .result-note.provenance {
   margin-top: var(--ga-space-2, 8px);

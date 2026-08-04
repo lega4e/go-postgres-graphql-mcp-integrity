@@ -10,7 +10,7 @@ import '../vendor/ui-kit/src/tokens/tokens.css'
 // an old module — which would silently ignore arguments this page passes rather
 // than failing. Checking the version turns that into a message that says what to
 // do about it.
-const REQUIRED_API_VERSION = 7
+const REQUIRED_API_VERSION = 8
 
 const el = (id) => document.getElementById(id)
 
@@ -216,6 +216,60 @@ function renderInterfaces() {
   setRunnable('interfaces', ok, cmp)
 }
 
+// strategy reads the shaping toggle: true selects the SQL-side strategy.
+function strategyIsSQLSide() {
+  return el('s-strategy')?.value === 'sql-side'
+}
+
+// shapingCompiled holds the last generation's two compilations, keyed by
+// strategy. Both are always compiled, whichever one the toggle is showing: Run
+// executes both, and re-compiling at Run time could not be the compilation the
+// reader is looking at.
+let shapingCompiled = null
+
+// renderShaping compiles the query under *both* strategies and shows the SQL of
+// the selected one.
+//
+// The toggle chooses which statement is on screen; it does not choose what is
+// compiled. That is the honest arrangement for a panel whose claim is that the
+// two agree — a reader can flip between them and see that the MATCH pattern and
+// the bind parameters do not move, and Run then executes both without
+// recompiling anything.
+//
+// The result-shape line is derived from the projection with no database
+// consulted: it is the difference between the two strategies stated in one line,
+// before either has been run.
+function renderShaping() {
+  const sdl = valueOf('s-sdl')
+  const query = valueOf('s-query')
+  const vars = valueOf('s-vars')
+
+  const goSide = globalThis.gopgqlCompileShaped(sdl, query, vars, false)
+  const sqlSide = globalThis.gopgqlCompileShaped(sdl, query, vars, true)
+  const shown = strategyIsSQLSide() ? sqlSide : goSide
+  // Either strategy failing makes the panel not runnable: Run needs both
+  // statements, and a comparison with one leg missing is not a comparison.
+  const ok = !goSide.error && !sqlSide.error
+
+  const schema = globalThis.gopgqlSchema(sdl)
+  setCode('s-schema', schema.error || schema.schema)
+
+  if (shown.error) {
+    setCode('s-sql', shown.error)
+    setCode('s-shape', '')
+    setCode('s-params', '')
+  } else {
+    setCode('s-shape', shown.resultShape)
+    setCode('s-sql', shown.sql)
+    setCode('s-params', shown.params)
+  }
+
+  const generated = ok && !schema.error
+  shapingCompiled = generated ? { goSide, sqlSide } : null
+  setStatus('s-status', generated, generated ? `${shown.strategy} — generated` : 'see errors')
+  setRunnable('shaping', generated, shown)
+}
+
 function renderMigration() {
   const mig = globalThis.gopgqlMigration(valueOf('m-sdl'))
   setCode('m-init', mig.error || mig.migration)
@@ -288,6 +342,16 @@ const executions = {
     schema: 'i-schema', sql: 'i-sql', panel: 'i-result', status: 'i-exec-status',
     data: 'i-data', sdl: 'i-sdl', query: 'i-query',
   },
+  // Shaping is the one scenario that runs two statements, so it carries
+  // `parity` and takes a different path below. `sql` is still the pane the
+  // reader is looking at — the *selected* strategy's statement — and it is
+  // still what runs; the other strategy's statement comes from the same
+  // generation, which is the only way the two can be about one compile.
+  shaping: {
+    schema: 's-schema', sql: 's-sql', panel: 's-result', status: 's-exec-status',
+    data: 's-data', sdl: 's-sdl', query: 's-query', vars: 's-vars',
+    parity: true,
+  },
 }
 
 // dataSeeds maps each runnable scenario's data pane to the seed the module
@@ -306,6 +370,10 @@ const dataSeeds = {
   'c-data': () => globalThis.gopgqlExampleDirectivesSeed,
   'k-data': () => globalThis.gopgqlExampleConstraintsSeed,
   'i-data': () => globalThis.gopgqlExampleInterfaceSeed,
+  // Shaping reads the Traversal schema but not the Traversal seed: that one is
+  // a chain, deliberately, and a chain gives the shaping query a 1×1 fan-out —
+  // which is the one case where the two strategies' result sets look alike.
+  's-data': () => globalThis.gopgqlExampleShapingSeed,
 }
 
 // runState is per scenario: whether the last generation produced something
@@ -547,13 +615,14 @@ function renderRun(spec, outcome) {
     panel.appendChild(pre)
   }
 
-  if (!steps.query?.ok) {
-    appendDatabaseError(panel, 'Executing the query', steps.query?.error ?? 'unknown error')
+  const query = steps.queries?.query
+  if (!query?.ok) {
+    appendDatabaseError(panel, 'Executing the query', query?.error ?? 'unknown error')
     setStatus(spec.status, false, 'query rejected')
     return
   }
 
-  const { columns, rows } = steps.query
+  const { columns, rows } = query
 
   // Shaped even when there are none: a query that matched nothing still has a
   // response, and an empty list is what it honestly is.
@@ -598,6 +667,149 @@ function renderRun(spec, outcome) {
  * goose-annotated across two files and would need a migration tool's annotation
  * parser to apply.
  */
+/**
+ * renderParityRun writes the Shaping tab's outcome: the two responses, and the
+ * verdict on whether they are the same one.
+ *
+ * The verdict leads, because it is the milestone's claim and the reason the tab
+ * runs anything at all. What it asserts is what design D3 defines: the two
+ * shape.Encode outputs are equal bytes. It is not a claim about PostgreSQL's own
+ * serialisation, and the line under it says so rather than leaving a reader to
+ * infer the stronger thing.
+ *
+ * The row counts stay visible underneath, because the two responses being equal
+ * is only interesting alongside the fact that the result sets behind them were
+ * not.
+ */
+function renderParityRun(spec, outcome) {
+  const panel = resetPanel(spec.panel)
+  const { steps, version } = outcome
+
+  if (!steps.schema?.ok) {
+    appendDatabaseError(panel, 'Applying the generated schema', steps.schema?.error ?? 'unknown error')
+    setStatus(spec.status, false, 'schema rejected')
+    return
+  }
+  if (steps.data && !steps.data.ok) {
+    appendNote(panel,
+      'The data SQL did not apply to this schema. It starts as the seed for ' +
+      'the example schema, so an edit to either can leave the two disagreeing. ' +
+      'The queries below still ran.',
+      'warn')
+    const pre = document.createElement('pre')
+    pre.className = 'result-error'
+    pre.textContent = steps.data.error
+    panel.appendChild(pre)
+  }
+
+  // Either statement being refused is reported as itself. A strategy that
+  // cannot execute is a far more interesting outcome than a mismatch, and
+  // collapsing the two would hide it.
+  const legs = [['Go-side', steps.queries?.goSide], ['SQL-side', steps.queries?.sqlSide]]
+  const refused = legs.filter(([, leg]) => !leg?.ok)
+  if (refused.length > 0) {
+    for (const [label, leg] of refused) {
+      appendDatabaseError(panel, `Executing the ${label} statement`, leg?.error ?? 'unknown error')
+    }
+    setStatus(spec.status, false,
+      refused.length === legs.length ? 'both statements rejected' : `${refused[0][0]} rejected`)
+    return
+  }
+
+  const goSide = steps.queries.goSide
+  const sqlSide = steps.queries.sqlSide
+  const parity = globalThis.gopgqlShapeParity(
+    valueOf(spec.sdl), valueOf(spec.query), valueOf(spec.vars),
+    JSON.stringify({ columns: goSide.columns, rows: goSide.rows }),
+    JSON.stringify({ columns: sqlSide.columns, rows: sqlSide.rows }))
+
+  if (parity.error) {
+    appendNote(panel, `gopgql could not shape these results into responses: ${parity.error}`, 'error')
+    setStatus(spec.status, false, 'shaping failed')
+    return
+  }
+
+  appendNote(panel,
+    parity.identical
+      ? `The two strategies produced the same response — ${parity.bytes} identical bytes.`
+      : 'The two strategies produced different responses.',
+    parity.identical ? 'ok' : 'error')
+  appendNote(panel,
+    'Compared as shape.Encode of each response, which is what byte-identity ' +
+    'is defined as. PostgreSQL\'s own JSON bytes are not what is being ' +
+    'compared: its output is decoded into the same Go value the Go-side path ' +
+    'builds, and one encoder writes both.',
+    'provenance')
+
+  appendLabel(panel, `Go-side — shaped in Go from ${goSide.rows.length === 1 ? '1 flat row' : `${goSide.rows.length} flat rows`}`)
+  appendJSON(panel, parity.goJSON)
+  appendLabel(panel, `SQL-side — decoded from ${sqlSide.rows.length === 1 ? '1 row' : `${sqlSide.rows.length} rows`} of one response column`)
+  appendJSON(panel, parity.sqlJSON)
+
+  // The evidence behind the verdict: the two result sets, which are the thing
+  // that genuinely differs.
+  for (const [label, leg] of legs) {
+    const details = document.createElement('details')
+    details.className = 'result-rows'
+    const summary = document.createElement('summary')
+    summary.textContent =
+      `${label}: ${leg.rows.length === 1 ? '1 row' : `${leg.rows.length} rows`}` +
+      ` × ${leg.columns.length === 1 ? '1 column' : `${leg.columns.length} columns`} from PostgreSQL`
+    details.appendChild(summary)
+    appendTable(details, leg.columns, leg.rows)
+    panel.appendChild(details)
+  }
+
+  globalThis.gopgqlLastParity = {
+    identical: parity.identical,
+    bytes: parity.bytes,
+    goRows: goSide.rows.length,
+    sqlRows: sqlSide.rows.length,
+  }
+
+  if (version) appendNote(panel, version, 'provenance')
+  appendNote(panel, __PGLITE_BUILD__, 'provenance')
+
+  setStatus(spec.status, parity.identical,
+    parity.identical ? 'responses identical' : 'responses differ')
+}
+
+/**
+ * executeShaping runs both strategies' statements against one database.
+ *
+ * One run, not two: every run starts from a fresh database, so two runs would
+ * build the data twice and a difference between the responses could always be
+ * blamed on that rather than on the strategies.
+ *
+ * The selected strategy's statement is read from the pane the reader is looking
+ * at, exactly as every other tab reads its one statement. The other comes from
+ * the same generation, which is what makes the pair a comparison of two
+ * strategies rather than of two moments.
+ */
+async function executeShaping(spec, state) {
+  if (!shapingCompiled) return null
+  const shown = valueOf(spec.sql)
+  const sqlSideSelected = strategyIsSQLSide()
+  const queries = [
+    {
+      key: 'goSide',
+      sql: sqlSideSelected ? shapingCompiled.goSide.sql : shown,
+      args: decodeArgs(shapingCompiled.goSide.args),
+    },
+    {
+      key: 'sqlSide',
+      sql: sqlSideSelected ? shown : shapingCompiled.sqlSide.sql,
+      args: decodeArgs(shapingCompiled.sqlSide.args),
+    },
+  ]
+  const request = { ddl: valueOf(spec.schema), data: valueOf(spec.data), queries }
+  globalThis.gopgqlLastRun = {
+    scenario: 'shaping', ddl: request.ddl, data: request.data,
+    sql: shown, args: state.args, queries,
+  }
+  return postRun(request)
+}
+
 async function execute(name) {
   const spec = executions[name]
   const state = runState.get(name)
@@ -610,18 +822,27 @@ async function execute(name) {
   const panel = resetPanel(spec.panel)
   appendNote(panel, 'Starting PostgreSQL in your browser…')
 
-  const request = {
-    ddl: valueOf(spec.schema),
-    data: valueOf(spec.data),
-    sql: valueOf(spec.sql),
-    args: state.args,
-  }
-  // A debugging affordance, and what the browser suite asserts against to prove
-  // the executed SQL is the SQL on the page.
-  globalThis.gopgqlLastRun = { scenario: name, ...request }
-
   try {
-    renderRun(spec, await postRun(request))
+    if (spec.parity) {
+      const outcome = await executeShaping(spec, state)
+      if (outcome) renderParityRun(spec, outcome)
+    } else {
+      const sql = valueOf(spec.sql)
+      const request = {
+        ddl: valueOf(spec.schema),
+        data: valueOf(spec.data),
+        queries: [{ key: 'query', sql, args: state.args }],
+      }
+      // A debugging affordance, and what the browser suite asserts against to
+      // prove the executed SQL is the SQL on the page. It names the single
+      // statement directly rather than reaching into the request's list,
+      // because that is what "the SQL this tab ran" means for a tab that runs
+      // one.
+      globalThis.gopgqlLastRun = {
+        scenario: name, ddl: request.ddl, data: request.data, sql, args: state.args,
+      }
+      renderRun(spec, await postRun(request))
+    }
   } catch (err) {
     const reason = String(err?.message ?? err)
     const failed = resetPanel(spec.panel)
@@ -641,6 +862,7 @@ async function execute(name) {
 const scenarios = {
   traversal: { render: renderTraversal, inputs: ['t-sdl', 't-query', 't-vars'] },
   multipattern: { render: renderMultiPattern, inputs: ['p-sdl', 'p-query', 'p-vars'] },
+  shaping: { render: renderShaping, inputs: ['s-sdl', 's-query', 's-vars'] },
   directives: { render: renderDirectives, inputs: ['c-sdl', 'c-query', 'c-vars'] },
   constraints: { render: renderConstraints, inputs: ['k-sdl', 'k-query', 'k-vars'] },
   rename: { render: renderRename, inputs: ['k-sdl', 'k-sdl2'] },
@@ -779,6 +1001,10 @@ async function boot() {
     seed('i-sdl', globalThis.gopgqlExampleInterfaceSDL)
     seed('i-query', globalThis.gopgqlExampleInterfaceQuery)
 
+    seed('s-sdl', globalThis.gopgqlExampleSDL)
+    seed('s-query', globalThis.gopgqlExampleShapingQuery)
+    seed('s-vars', globalThis.gopgqlExampleVars)
+
     seed('m-sdl', globalThis.gopgqlExampleSDL)
     seed('m-sdl2', globalThis.gopgqlRevisedExampleSDL)
 
@@ -806,6 +1032,12 @@ for (const name of Object.keys(executions)) {
   const btn = execButton(name)
   if (btn) btn.addEventListener('click', () => execute(name))
 }
+
+// The shaping toggle is not a text input, so it is not one of the scenario's
+// `inputs`: flipping it re-renders the compilation under the other strategy.
+el('s-strategy')?.addEventListener('change', () => {
+  if (globalThis.gopgqlSchema) renderShaping()
+})
 
 for (const [name, scenario] of Object.entries(scenarios)) {
   for (const btn of document.querySelectorAll(`.run[data-scenario="${name}"]`)) {

@@ -438,3 +438,83 @@ test('nothing is persisted', async ({ page }) => {
   expect(stored.indexedDB, 'the database is in memory only').toEqual([])
   expect(stored.opfs, 'no OPFS backing store').toEqual([])
 })
+
+// --- the Shaping tab -------------------------------------------------------
+//
+// Every test above runs one statement. The Shaping tab runs two — the same
+// GraphQL query compiled under each result-shaping strategy — and its claim is
+// that they produce the same response. That claim is proven in Go against a real
+// postgres:19beta2 by test/parity; what can only be proven here is that the page
+// actually runs both and actually compares them, in a browser, against the
+// pinned wasm build.
+
+test('the two shaping strategies agree, live', async ({ page }) => {
+  await boot(page)
+  await activateTab(page, 'shaping')
+
+  // Both statements are compiled by the same generation, whichever one the
+  // toggle is showing. Flipping it changes the SQL on screen and nothing else:
+  // the bind parameters are part of the MATCH, which neither strategy touches.
+  await expect(page.locator('#s-sql')).toContainText('GRAPH_TABLE')
+  const goSideSQL = await page.locator('#s-sql').textContent()
+  const params = await page.locator('#s-params').textContent()
+
+  await runScenario(page, 'shaping', '#s-result')
+
+  await expect(page.locator('#s-result .result-note.ok'))
+    .toHaveText(/produced the same response — \d+ identical bytes\./)
+  await expect(page.locator('#s-exec-status')).toHaveText('responses identical')
+
+  // The two responses are equal, and they are the response the seed describes —
+  // not the same empty document twice, which would satisfy equality and prove
+  // nothing.
+  const responses = await page.locator('#s-result pre.result-json').allTextContents()
+  expect(responses, 'one response per strategy').toHaveLength(2)
+  const [goSide, sqlSide] = responses.map((text) => JSON.parse(text))
+  expect(goSide).toEqual(sqlSide)
+  expect(goSide).toEqual({
+    persons: [{
+      name: 'Alice',
+      follows: [{ name: 'Bob' }, { name: 'Carol' }],
+      followedBy: [{ name: 'Dave' }, { name: 'Erin' }],
+    }],
+  })
+
+  // And the result sets behind them are genuinely different, which is the
+  // reason two strategies exist. A seed that stopped fanning out would leave
+  // the equality above true and the tab meaningless.
+  const outcome = await page.evaluate(() => globalThis.gopgqlLastParity)
+  expect(outcome.identical).toBe(true)
+  expect(outcome.goRows, 'Alice has two follows and two followers, so 2×2').toBe(4)
+  expect(outcome.sqlRows, 'PostgreSQL assembles the whole response into one row').toBe(1)
+
+  // Both statements ran against one database. Two runs would each build a fresh
+  // one, and a difference could then always be blamed on the data.
+  const ran = await page.evaluate(() => globalThis.gopgqlLastRun)
+  expect(ran.queries).toHaveLength(2)
+  expect(ran.queries.map((q) => q.key)).toEqual(['goSide', 'sqlSide'])
+  expect(ran.sql, 'the statement on the page is one of the two that ran').toBe(goSideSQL)
+
+  // Flipping the toggle shows the other strategy's statement — and only that.
+  await page.locator('#s-strategy button[data-id="sql-side"]').click()
+  await expect(page.locator('#s-sql')).toContainText('json_build_object')
+  await expect(page.locator('#s-params')).toHaveText(params)
+})
+
+test('the shaping tab reports a rejected statement rather than a mismatch', async ({ page }) => {
+  await boot(page)
+  await activateTab(page, 'shaping')
+
+  // A schema PostgreSQL refuses. Both statements still compile, so a panel that
+  // only ever reported "identical" or "different" would have to pick one of
+  // them here — and either would blame the strategies for something neither of
+  // them did.
+  await setEditor(page, 's-sdl', BAD_TYPE_SDL)
+  await expect(page.locator('#s-status')).toHaveText(/generated/)
+
+  await runScenario(page, 'shaping', '#s-result')
+
+  await expect(page.locator('#s-result .result-note.error').first())
+    .toHaveText(/Applying the generated schema failed/)
+  await expect(page.locator('#s-exec-status')).toHaveText('schema rejected')
+})

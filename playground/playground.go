@@ -24,6 +24,7 @@
 package playground
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -485,6 +486,10 @@ type Result struct {
 // A row whose length disagrees with Columns is refused rather than padded. It
 // would mean the result set and the column list came from different executions,
 // and a response shaped from that would be wrong in a way no reader could see.
+//
+// shape.Rows normalises every leaf on the way through and can fail doing it —
+// a non-finite Float has no JSON form (design D3, D5) — so that error is
+// returned rather than swallowed.
 func Shape(proj compiler.Projection, res Result) (map[string]any, error) {
 	if proj.Root == nil {
 		return nil, errors.New("playground: no projection to shape the rows with")
@@ -502,7 +507,48 @@ func Shape(proj compiler.Projection, res Result) (map[string]any, error) {
 		}
 		flat = append(flat, obj)
 	}
-	return shape.Rows(proj, flat), nil
+	return shape.Rows(proj, flat)
+}
+
+// ShapeSQLSide reads the response an SQL-side-shaped statement returned.
+//
+// That statement's result is one row of one `response` column, already cast to
+// text by the compiler, holding the whole nested response as JSON. Nothing here
+// re-groups anything: PostgreSQL did the grouping, and this decodes what it
+// produced back into the same Go value the Go-side path builds, so the one
+// encoder writes both (design D3).
+//
+// The strictness is deliberate and mirrors exec.queryShaped. A result with a
+// different column count or row count did not come from an SQL-side statement,
+// and guessing which value in it was the response would be exactly the kind of
+// quiet reinterpretation the milestone rules out.
+func ShapeSQLSide(proj compiler.Projection, res Result) (map[string]any, error) {
+	if proj.Root == nil {
+		return nil, errors.New("playground: no projection to decode the response with")
+	}
+	if len(res.Columns) != 1 {
+		return nil, fmt.Errorf(
+			"playground: an SQL-side shaped query returns one column, got %d", len(res.Columns))
+	}
+	if len(res.Rows) != 1 {
+		return nil, fmt.Errorf(
+			"playground: an SQL-side shaped query returns one row, got %d", len(res.Rows))
+	}
+	if len(res.Rows[0]) != 1 {
+		return nil, fmt.Errorf(
+			"playground: the result row has %d values but the result declares 1 column",
+			len(res.Rows[0]))
+	}
+	// The column is text and is read as text. Decoding it as generic JSON first
+	// would turn 19.90 into float64 19.9 and lose, on this path only, a digit
+	// the Go-side path keeps — the same trap exec.queryShaped names.
+	response, ok := res.Rows[0][0].(string)
+	if !ok {
+		return nil, fmt.Errorf(
+			"playground: the response column is %T, not the text the compiler casts it to",
+			res.Rows[0][0])
+	}
+	return shape.Decode(proj, response)
 }
 
 // ShapeJSON compiles the query and shapes res into the nested GraphQL response,
@@ -529,9 +575,9 @@ func ShapeJSON(sdlSrc, query string, vars map[string]any, maxDepth int, res Resu
 	if err != nil {
 		return "", err
 	}
-	out, err := json.MarshalIndent(shaped, "", "  ")
+	out, err := indent(shaped)
 	if err != nil {
-		return "", fmt.Errorf("playground: render the shaped response as JSON: %w", err)
+		return "", err
 	}
 	return string(out), nil
 }
@@ -539,6 +585,218 @@ func ShapeJSON(sdlSrc, query string, vars map[string]any, maxDepth int, res Resu
 // MaxDepth reports the compiler's default traversal-depth ceiling: what the
 // playground starts at, and what it falls back to when no ceiling is given.
 func MaxDepth() int { return compiler.DefaultMaxDepth }
+
+// Shaped is the output of CompileWithShaping: what one shaping strategy makes
+// of a query (SPEC.md §7 → M8, design D8).
+type Shaped struct {
+	// Strategy names the strategy, as compiler.Shaping renders it.
+	Strategy string
+	// SQL is the statement that strategy emits.
+	SQL string
+	// Args are the ordered bind values the statement's placeholders refer to,
+	// carried through from compiler.Compiled.Args exactly as Compiled.Args is.
+	// They are identical under both strategies, and they are here because the
+	// caller executes the statement: a playground that could only show the SQL
+	// had no use for them.
+	Args []any
+	// Params renders Args for a reader. They are identical under both
+	// strategies — the MATCH pattern and its predicates do not change, only the
+	// projection around them does.
+	Params string
+	// ResultShape describes the result set the statement asks the database for:
+	// k flat columns assembled in Go, or one column assembled in PostgreSQL.
+	// It is derived from the projection, with no database consulted, and it is
+	// the point of the whole milestone made visible.
+	ResultShape string
+	// Projection describes how the statement's result becomes the nested
+	// response. It is the *same* projection under both strategies — that is
+	// what makes the two comparable at all — and it is what shapes the rows
+	// under Go-side shaping and decodes the JSON under SQL-side.
+	Projection compiler.Projection
+}
+
+// CompileWithShaping compiles a query under one shaping strategy and returns
+// the SQL it emits together with the bind values to run it with.
+//
+// It is what the playground's shaping toggle runs, and it is honest work for a
+// browser to do: choosing a strategy changes what the *compiler* emits, and the
+// compiler is pure (SPEC.md §6.1).
+//
+// It used to stop there, because the playground had no database and the panel
+// could only show two SQL texts (design D8, as first written). gopgql#31 has
+// since merged and put a real PostgreSQL in the page, so both statements can be
+// executed and their responses compared — which is what ShapeParity does with
+// what this returns.
+func CompileWithShaping(sdlSrc, query string, vars map[string]any, sqlSide bool) (Shaped, error) {
+	strategy := compiler.GoSide
+	if sqlSide {
+		strategy = compiler.SQLSide
+	}
+
+	doc, err := sdl.Parse(sdlSrc)
+	if err != nil {
+		return Shaped{}, err
+	}
+	cq, err := compiler.New(doc, compiler.WithShaping(strategy)).CompileQuery(query, vars)
+	if err != nil {
+		return Shaped{}, err
+	}
+	return Shaped{
+		Strategy:    strategy.String(),
+		SQL:         cq.SQL,
+		Args:        cq.Args,
+		Params:      renderParams(cq.Args),
+		ResultShape: resultShape(cq),
+		Projection:  cq.Projection,
+	}, nil
+}
+
+// resultShape describes the result set a compiled query asks for. Under Go-side
+// shaping that is one column per projected field plus a hidden key column per
+// level, one row per matched path; under SQL-side shaping it is a single
+// `response` column of one row, whatever the fan-out.
+func resultShape(cq *compiler.Compiled) string {
+	if cq.Shaping == compiler.SQLSide {
+		return "1 column (response), 1 row — PostgreSQL assembles the nested response"
+	}
+	cols, levels := countColumns(cq.Projection.Root)
+	return fmt.Sprintf("%d columns across %d level(s), one row per matched path — Go assembles the nested response",
+		cols, levels)
+}
+
+// countColumns totals a projection's output columns and levels. Every level
+// contributes its scalar fields plus the hidden key column shape groups by.
+func countColumns(sel *compiler.Selection) (cols, levels int) {
+	cols, levels = len(sel.Fields)+1, 1
+	for _, child := range sel.Children {
+		c, l := countColumns(child)
+		cols, levels = cols+c, levels+l
+	}
+	return cols, levels
+}
+
+// ExampleShapingQuery is the query the shaping tab compiles under both
+// strategies. It fans out twice at one level, which is where the two strategies
+// differ most visibly: the flat statement LEFT JOINs the branches and a parent
+// with m and n children yields m×n rows, while the SQL-side statement aggregates
+// each branch to an array before the join, so that cross-product never forms.
+const ExampleShapingQuery = `{ persons(name: $n) { name follows { name } followedBy { name } } }`
+
+// ExampleShapingSeed fills ExampleSDL's tables for the shaping tab.
+//
+// It is a separate seed from ExampleSeed on the same schema, because the two
+// scenarios want opposite things from the data. ExampleSeed is a chain, so the
+// traversal queries match exactly one path — Alice has exactly one outgoing
+// edge, deliberately. The shaping tab wants the opposite: ExampleShapingQuery
+// fans out twice at one level, and with one edge on each branch the
+// cross-product the Go-side statement forms is 1×1, which looks like no
+// cross-product at all.
+//
+// So Alice follows two people and is followed by two others, all four distinct
+// from her and from each other — the compiler's isomorphism guard would drop a
+// combination that reused a vertex. Go-side, that is 2×2 = 4 flat rows for one
+// person; SQL-side it is 1 row. Both shape into the same response, which is the
+// entire claim of the milestone and now the thing the panel demonstrates rather
+// than asserts.
+const ExampleShapingSeed = `INSERT INTO persons (id, name, email) VALUES
+  ('e0000000-0000-4000-8000-000000000001', 'Alice', 'alice@example.com'),
+  ('e0000000-0000-4000-8000-000000000002', 'Bob',   'bob@example.com'),
+  ('e0000000-0000-4000-8000-000000000003', 'Carol', 'carol@example.com'),
+  ('e0000000-0000-4000-8000-000000000004', 'Dave',  NULL),
+  ('e0000000-0000-4000-8000-000000000005', 'Erin',  'erin@example.com');
+
+INSERT INTO follows (source_id, target_id) VALUES
+  ('e0000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000002'),
+  ('e0000000-0000-4000-8000-000000000001', 'e0000000-0000-4000-8000-000000000003'),
+  ('e0000000-0000-4000-8000-000000000004', 'e0000000-0000-4000-8000-000000000001'),
+  ('e0000000-0000-4000-8000-000000000005', 'e0000000-0000-4000-8000-000000000001');`
+
+// Parity is the outcome of running one query under both shaping strategies:
+// each response, and whether they are the same one.
+type Parity struct {
+	// GoJSON and SQLJSON are the two responses, indented for display.
+	GoJSON, SQLJSON string
+	// Identical reports whether the two canonical encodings are equal bytes.
+	Identical bool
+	// Bytes is the length of the canonical encoding. It is the Go-side one, but
+	// when Identical it is equally the SQL-side one, and when they differ the
+	// number is not the point.
+	Bytes int
+}
+
+// ShapeParity shapes both strategies' result sets and reports whether they
+// produce the same response.
+//
+// It is test/parity's assertion, executed in the page instead of in CI: the
+// same query, compiled twice, run against one database, shaped by each path,
+// and compared. The comparison is shape.Encode of each — the definition
+// byte-identity rests on (design D3) — not the indented text it also returns,
+// which exists only to be read.
+//
+// What that comparison does *not* claim is that PostgreSQL's own bytes match
+// gopgql's. They do not: json_build_object spaces its colons and emits keys in
+// argument order, which encoding/json does neither of. The SQL-side JSON is
+// decoded into the same Go value the Go-side path builds and re-encoded by the
+// one encoder, and that is why the bytes agree. A caller showing this to a
+// reader has to say so, or it implies a stronger guarantee than the milestone
+// makes.
+//
+// Both legs are shaped from a projection re-derived here, and both re-derive it
+// from the same SDL, query and variables. Compilation is pure, so neither can
+// disagree with the compile that produced the SQL the caller ran.
+func ShapeParity(sdlSrc, query string, vars map[string]any, goRes, sqlRes Result) (Parity, error) {
+	goCompiled, err := CompileWithShaping(sdlSrc, query, vars, false)
+	if err != nil {
+		return Parity{}, err
+	}
+	sqlCompiled, err := CompileWithShaping(sdlSrc, query, vars, true)
+	if err != nil {
+		return Parity{}, err
+	}
+
+	goResp, err := Shape(goCompiled.Projection, goRes)
+	if err != nil {
+		return Parity{}, fmt.Errorf("Go-side: %w", err)
+	}
+	sqlResp, err := ShapeSQLSide(sqlCompiled.Projection, sqlRes)
+	if err != nil {
+		return Parity{}, fmt.Errorf("SQL-side: %w", err)
+	}
+
+	goBytes, err := shape.Encode(goResp)
+	if err != nil {
+		return Parity{}, fmt.Errorf("Go-side: %w", err)
+	}
+	sqlBytes, err := shape.Encode(sqlResp)
+	if err != nil {
+		return Parity{}, fmt.Errorf("SQL-side: %w", err)
+	}
+
+	goJSON, err := indent(goResp)
+	if err != nil {
+		return Parity{}, err
+	}
+	sqlJSON, err := indent(sqlResp)
+	if err != nil {
+		return Parity{}, err
+	}
+	return Parity{
+		GoJSON:    goJSON,
+		SQLJSON:   sqlJSON,
+		Identical: bytes.Equal(goBytes, sqlBytes),
+		Bytes:     len(goBytes),
+	}, nil
+}
+
+// indent renders a response for a reader. It is never what identity is judged
+// on — shape.Encode is — so this is free to be as legible as it likes.
+func indent(resp map[string]any) (string, error) {
+	out, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("playground: render the shaped response as JSON: %w", err)
+	}
+	return string(out), nil
+}
 
 // DepthExceeded classifies a Compile error: it reports whether the compiler
 // refused the query for nesting past its depth ceiling, and what that ceiling

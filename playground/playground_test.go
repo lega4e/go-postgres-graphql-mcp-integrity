@@ -283,3 +283,69 @@ func TestDirectivesExample(t *testing.T) {
 		t.Errorf("the compiled query must not use the GraphQL field name as a column:\n%s", out.SQL)
 	}
 }
+
+// --- M8: the shaping toggle ---
+
+// TestCompileWithShapingEmitsTwoDifferentStatements is task 8.6. The toggle's
+// whole claim is that the two strategies compile the same query to different
+// SQL, so a toggle that silently rendered the same text twice would be a
+// decoration. This fails if that ever becomes true.
+func TestCompileWithShapingEmitsTwoDifferentStatements(t *testing.T) {
+	vars := map[string]any{"n": "Alice"}
+
+	goSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, false)
+	require.NoError(t, err, "the example query must compile under Go-side shaping")
+
+	sqlSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, true)
+	require.NoError(t, err, "the example query must compile under SQL-side shaping")
+
+	assert.Equal(t, "go-side", goSide.Strategy)
+	assert.Equal(t, "sql-side", sqlSide.Strategy)
+	assert.NotEqual(t, goSide.SQL, sqlSide.SQL,
+		"the toggle would be showing the same statement under both labels")
+
+	assert.Contains(t, sqlSide.SQL, "json_agg", "the SQL-side statement aggregates in-database")
+	assert.NotContains(t, goSide.SQL, "json_agg", "the Go-side statement projects flat columns")
+	assert.NotContains(t, sqlSide.SQL, "jsonb_build_object",
+		"jsonb sorts keys by length-then-bytes and drops duplicates; the strategy uses json")
+
+	// The values travel as parameters under both, and the same ones: only the
+	// projection differs between the strategies, never the pattern.
+	assert.Equal(t, goSide.Params, sqlSide.Params)
+	assert.Contains(t, goSide.Params, "$1 = Alice")
+	assert.NotContains(t, sqlSide.SQL, "'Alice'", "a filter value is bound, never interpolated")
+}
+
+// TestShapingResultShapeIsDerived checks the one thing the panel computes rather
+// than shows: the result set each strategy asks the database for. It is the
+// point of the whole milestone in a line, and it is derived from the projection
+// with no database consulted.
+func TestShapingResultShapeIsDerived(t *testing.T) {
+	vars := map[string]any{"n": "Alice"}
+
+	goSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, false)
+	require.NoError(t, err)
+	sqlSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, true)
+	require.NoError(t, err)
+
+	// { persons { name follows { name } followedBy { name } } } is three levels,
+	// each contributing its scalar plus the hidden key column shape groups by.
+	assert.Contains(t, goSide.ResultShape, "6 columns across 3 level(s)")
+	assert.Contains(t, goSide.ResultShape, "one row per matched path")
+	assert.Contains(t, sqlSide.ResultShape, "1 column (response), 1 row")
+}
+
+// TestCompileWithShapingReportsAnError confirms a bad input is reported rather
+// than rendered as an empty panel.
+func TestCompileWithShapingReportsAnError(t *testing.T) {
+	_, err := playground.CompileWithShaping(playground.ExampleSDL, `{ persons { nope } }`, nil, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nope")
+
+	_, err = playground.CompileWithShaping("type Broken {", `{ persons { name } }`, nil, false)
+	require.Error(t, err)
+}
