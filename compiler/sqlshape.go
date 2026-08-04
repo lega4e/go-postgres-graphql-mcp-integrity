@@ -80,10 +80,15 @@ func (f *fragment) cteColumns() []string {
 // that share a child do not pool it.
 //
 // The base relation is SELECT DISTINCT rather than a bare SELECT because a
-// GRAPH_TABLE row is a *path*: two parallel edges between the same pair of
-// vertices produce two rows carrying the same ids, which the Go-side shaper
-// collapses when it buckets by key. Deduplicating here is what makes the SQL
-// side collapse them too.
+// GRAPH_TABLE row is a *path*, not a vertex: a parent with N children appears on
+// N rows. The Go-side shaper collapses those when it buckets rows by each level's
+// key — "no duplicate parents across the one-to-many fan-out", which is what M3
+// established — and this is where the SQL side does the same. Without it a
+// parent would be aggregated once per child.
+//
+// It is not needed for parallel edges: every generated edge table carries
+// PRIMARY KEY (source_id, target_id) (generator.go), so two edges between the
+// same pair cannot exist to produce a duplicate path in the first place.
 func (b *builder) levelRel(sel *Selection, anc []string) string {
 	group := append(append([]string{}, anc...), sel.KeyColumn)
 

@@ -698,3 +698,54 @@ func TestSQLSideAggregatesEachBranchBeforeTheJoin(t *testing.T) {
 	assert.NotContains(t, sql, "q2 LEFT JOIN q1",
 		"the two branches must never be joined to each other; that is the m*n cross-product")
 }
+
+// TestPatternConcernsAreIdenticalUnderBothStrategies is task 3.9. The depth
+// ceiling, the isomorphism guards and the interface positions are concerns of
+// the *pattern*, not of the projection, so selecting a shaping strategy must not
+// move any of them. A depth rejection in particular must still happen before any
+// SQL is emitted, under either strategy.
+func TestPatternConcernsAreIdenticalUnderBothStrategies(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	t.Run("the depth ceiling refuses the same query under both", func(t *testing.T) {
+		const tooDeep = `{ persons { follows { follows { follows { follows { name } } } } } }`
+		for _, s := range []compiler.Shaping{compiler.GoSide, compiler.SQLSide} {
+			sql, _, err := compiler.New(doc, compiler.WithShaping(s)).Compile(tooDeep, nil)
+
+			var depthErr *compiler.DepthExceededError
+			require.ErrorAs(t, err, &depthErr, "under %s", s)
+			assert.Equal(t, compiler.DefaultMaxDepth, depthErr.MaxDepth)
+			assert.Empty(t, sql, "a rejected query emits no SQL, so nothing reaches a database")
+		}
+	})
+
+	t.Run("the isomorphism guards are the same predicates under both", func(t *testing.T) {
+		// Both positions can bind a person, so the pattern needs a guard or a
+		// self-follow would satisfy it.
+		const q = `{ persons { name follows { name } } }`
+		flat, _, err := compiler.New(doc).Compile(q, nil)
+		require.NoError(t, err)
+		shaped, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).Compile(q, nil)
+		require.NoError(t, err)
+
+		const guard = `WHERE v0.id <> v1.id`
+		assert.Contains(t, flat, guard)
+		assert.Contains(t, shaped, guard)
+	})
+
+	t.Run("an interface position matches the same labels under both", func(t *testing.T) {
+		ifaceDoc, err := sdl.Parse(interfaceSDL)
+		require.NoError(t, err)
+
+		flat, _, err := compiler.New(ifaceDoc).Compile(`{ profiles { name } }`, nil)
+		require.NoError(t, err)
+		shaped, _, err := compiler.New(ifaceDoc, compiler.WithShaping(compiler.SQLSide)).
+			Compile(`{ profiles { name } }`, nil)
+		require.NoError(t, err)
+
+		const alternation = `(v0 IS bot|person)`
+		assert.Contains(t, flat, alternation)
+		assert.Contains(t, shaped, alternation)
+	})
+}

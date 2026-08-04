@@ -368,7 +368,7 @@ func matchBlocks(sqlText string) []string {
 // deliberately non-UTC session. Both strategies must still agree, and both must
 // still say Z.
 func TestDateTimeDoesNotDependOnTheSessionTimeZone(t *testing.T) {
-	w := scalarsWorld.build(t)
+	w := tzWorld.build(t)
 	ctx := t.Context()
 
 	cfg, err := pgxpool.ParseConfig(w.dsn)

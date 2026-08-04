@@ -252,6 +252,14 @@ var (
 		},
 	}
 
+	// tzWorld is scalarsWorld under another name.
+	//
+	// A world names the database it is built in, and TestParity has already
+	// built scalarsWorld by the time the time-zone test runs, so reusing it
+	// would try to CREATE DATABASE over one that exists. The seed is shared;
+	// only the name differs.
+	tzWorld = &world{name: "m8_timezone", sdl: scalarsSDL, seed: scalarsSeed}
+
 	// scalarsWorld carries the leaves the two serialisers disagree about.
 	//
 	// `exact` keeps a trailing zero PostgreSQL preserves and Go's float64 would
@@ -263,23 +271,26 @@ var (
 	scalarsWorld = &world{
 		name: "m8_scalars",
 		sdl:  scalarsSDL,
-		seed: []string{
-			`INSERT INTO readings (label, exact, approx, count, ok, note, at) VALUES
+		seed: scalarsSeed,
+	}
+)
+
+// scalarsSeed is shared by scalarsWorld and tzWorld.
+var scalarsSeed = []string{
+	`INSERT INTO readings (label, exact, approx, count, ok, note, at) VALUES
 			 ('root',  89.00,   0.1,          7, true,  NULL,     '2026-07-30T12:00:00+00:00'),
 			 ('tilted', 19.90,  1234.5678,   -3, false, 'kept',   '2026-07-30T14:30:00+02:00'),
 			 ('tiny',   0.10,   1e-7,         0, true,  '',       '2026-01-01T00:00:00Z')`,
-			// A twelve-child fan-out off `root`, named so that insertion order,
-			// alphabetical order and id order are all different.
-			`INSERT INTO readings (label, exact, approx, count, ok, at)
+	// A twelve-child fan-out off `root`, named so that insertion order,
+	// alphabetical order and id order are all different.
+	`INSERT INTO readings (label, exact, approx, count, ok, at)
 			 SELECT 'child-' || n, n + 0.50, n / 3.0, n, n % 2 = 0,
 			        '2026-07-30T12:00:00Z'::timestamptz + (n || ' minutes')::interval
 			 FROM generate_series(1, 12) AS n`,
-			`INSERT INTO sampled (source_id, target_id)
+	`INSERT INTO sampled (source_id, target_id)
 			 SELECT r.id, c.id FROM readings r, readings c
 			 WHERE r.label = 'root' AND c.label LIKE 'child-%'`,
-		},
-	}
-)
+}
 
 // catalogue is every entry the parity suite runs. Each is executed twice — once
 // under each strategy — against the same database state.
