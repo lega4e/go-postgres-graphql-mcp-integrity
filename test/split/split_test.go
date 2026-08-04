@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,8 +101,7 @@ func mustModel(t *testing.T, src string) *schema.Schema {
 func freshDB(t *testing.T, suffix string) (*pgxpool.Pool, string) {
 	t.Helper()
 	ctx := context.Background()
-	name := "db_" + strings.ToLower(strings.NewReplacer(
-		"/", "", "-", "", " ", "", ".", "").Replace(t.Name()+"_"+suffix))
+	name := dbName(t.Name() + "_" + suffix)
 	admin, err := pgxpool.New(ctx, connString)
 	require.NoError(t, err, "admin pool")
 	defer admin.Close()
@@ -114,6 +114,34 @@ func freshDB(t *testing.T, suffix string) (*pgxpool.Pool, string) {
 	require.NoError(t, err, "pool")
 	t.Cleanup(pool.Close)
 	return pool, dsn
+}
+
+// dbName reduces a test name to a legal, unique PostgreSQL database name.
+//
+// Both halves matter and both were learned the hard way. Anything that is not a
+// letter, a digit or an underscore is dropped rather than kept, because a subtest
+// name is prose — a `=` in one lands unquoted in `CREATE DATABASE` as a syntax
+// error. And the name is truncated *with a hash of the whole of it*, because
+// PostgreSQL truncates identifiers at 63 bytes silently: two subtests agreeing in
+// their first 60 characters would otherwise share one database, and the second
+// would fail to drop the first's out from under a pool still using it.
+func dbName(s string) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r + ('a' - 'A')
+		default:
+			return -1
+		}
+	}, s)
+	sum := fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(s)))
+	// "db_" + safe + "_" + sum, within PostgreSQL's 63-byte identifier limit.
+	if limit := 63 - len("db_") - 1 - len(sum); len(safe) > limit {
+		safe = safe[:limit]
+	}
+	return "db_" + safe + "_" + sum
 }
 
 // applyDir applies every pending migration in dir, in version order.
