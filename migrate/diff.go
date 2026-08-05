@@ -31,18 +31,25 @@ import (
 // suppression of the drop+add pair (task 4.4) rather than something layered over
 // it (see rename.go).
 func Delta(from, to *schema.Schema) (up, down string, changed bool) {
+	// The two halves see different schemas, and they have to. The graph half
+	// sees every element including the unmanaged ones — a @readonly type is in
+	// the property graph, that is the whole of what it is. The table half sees
+	// only what gopgql owns, so nothing it emits can touch a table it must not.
+	graphFrom, graphTo := from, to
+	from, to = withoutUnmanaged(from, to)
+
 	plan := planRenames(from, to)
 	prior, stale := applyRenames(from, plan)
 
 	d := diffSchemas(prior, to)
 	d.renames = plan
-	d.priorGraph = from
+	d.priorGraph = graphFrom
 	d.droppedConstraints = append(staleAsConstraints(stale), d.droppedConstraints...)
 
-	upStmts := d.upStatements(prior, to)
-	downStmts := d.downStatements(prior, to)
+	upStmts := d.upStatements(graphFrom, graphTo, to)
+	downStmts := d.downStatements(graphTo, prior)
 
-	graphChanged := generator.GraphDDL(from) != generator.GraphDDL(to)
+	graphChanged := generator.GraphDDL(graphFrom) != generator.GraphDDL(graphTo)
 	if !d.structural() && !graphChanged {
 		return "", "", false
 	}
@@ -66,6 +73,7 @@ func Delta(from, to *schema.Schema) (up, down string, changed bool) {
 // prevent. The Down section is rendered against the *renamed* prior state,
 // because every statement in it runs before the renames are undone.
 func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
+	from, to = withoutUnmanaged(from, to)
 	classified := classifyLike(from, to)
 	plan := planRenames(classified, to)
 	prior, stale := applyRenames(classified, plan)
@@ -78,6 +86,57 @@ func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
 		return "", "", false
 	}
 	return joinStmts(d.upStructural(to)), joinStmts(d.downStructural(prior)), true
+}
+
+// withoutUnmanaged removes every table gopgql does not own from both sides of a
+// table diff, so nothing the differ can produce mentions one (SPEC.md §7 → M12).
+//
+// Which tables those are is read from the **desired** schema, and only from
+// there. A folded prior state cannot say: the DDL for an unmanaged table is
+// exactly what is never written, so ownership leaves no trace in a migration to
+// fold back. What the fold *does* leave is a vertex table with a name, no
+// columns and no constraints — reconstructed from the property graph, which does
+// name it. Diffed against a desired table that has columns, that would emit an
+// ADD COLUMN for every one of them, against a table gopgql must not touch. It is
+// the removal from the *prior* side, not the desired side, that prevents it.
+//
+// A type's management therefore cannot change without the SDL saying so, which
+// is why it is checked separately (see Generate): dropping @readonly leaves the
+// fold still holding no columns for the table, so the next generation would emit
+// a CREATE TABLE for a table that already exists — a migration that reads
+// correctly and fails at apply.
+func withoutUnmanaged(from, to *schema.Schema) (*schema.Schema, *schema.Schema) {
+	unmanaged := map[string]bool{}
+	for _, vt := range to.VertexTables {
+		if vt.Unmanaged {
+			unmanaged[vt.Key()] = true
+		}
+	}
+	if len(unmanaged) == 0 {
+		return from, to
+	}
+	return stripTables(from, unmanaged), stripTables(to, unmanaged)
+}
+
+// stripTables returns a copy of m without the named vertex tables or anything
+// attached to them. Edge tables are untouched: an edge over an unmanaged
+// endpoint is refused in the SDL, so none can exist.
+func stripTables(m *schema.Schema, drop map[string]bool) *schema.Schema {
+	if m == nil {
+		return nil
+	}
+	out := &schema.Schema{GraphName: m.GraphName, EdgeTables: m.EdgeTables}
+	for _, vt := range m.VertexTables {
+		if !drop[vt.Key()] {
+			out.VertexTables = append(out.VertexTables, vt)
+		}
+	}
+	for _, idx := range m.Indexes {
+		if !drop[schema.QualifiedKey(idx.Schema, idx.Table)] {
+			out.Indexes = append(out.Indexes, idx)
+		}
+	}
+	return out
 }
 
 // classifyLike splits prior's tables into vertex and edge tables the way `like`
@@ -414,13 +473,16 @@ func staleAsConstraints(stale []staleConstraint) []constraintChange {
 // upStatements renders the forward migration: prior → desired, with the
 // property graph dropped first and recreated last so table changes are never
 // blocked by a graph depending on them.
-func (d *schemaDiff) upStatements(from, to *schema.Schema) []string {
+//
+// graphFrom/graphTo carry every element; tablesTo carries only the tables gopgql
+// owns, and is what the structural statements are rendered from.
+func (d *schemaDiff) upStatements(graphFrom, graphTo, tablesTo *schema.Schema) []string {
 	var s []string
-	if from.GraphName != "" {
-		s = append(s, dropGraphStmt(from.GraphName))
+	if graphFrom.GraphName != "" {
+		s = append(s, dropGraphStmt(graphFrom.GraphName))
 	}
-	s = append(s, d.upStructural(to)...)
-	s = append(s, generator.GraphDDL(to))
+	s = append(s, d.upStructural(tablesTo)...)
+	s = append(s, generator.GraphDDL(graphTo))
 	return s
 }
 
@@ -483,16 +545,16 @@ func (d *schemaDiff) upStructural(to *schema.Schema) []string {
 // downStatements renders the reverse migration: desired → prior. It is the
 // mirror of upStatements — every add becomes a drop and every drop is recreated
 // from the prior schema.
-func (d *schemaDiff) downStatements(from, to *schema.Schema) []string {
+func (d *schemaDiff) downStatements(graphTo, tablesFrom *schema.Schema) []string {
 	var s []string
-	if to.GraphName != "" {
-		s = append(s, dropGraphStmt(to.GraphName))
+	if graphTo.GraphName != "" {
+		s = append(s, dropGraphStmt(graphTo.GraphName))
 	}
-	s = append(s, d.downStructural(from)...)
+	s = append(s, d.downStructural(tablesFrom)...)
 	// The prior schema under its *original* names: the Down section has just
 	// reversed the renames, so the graph it recreates is the one those names
 	// describe.
-	s = append(s, generator.GraphDDL(d.graphOf(from)))
+	s = append(s, generator.GraphDDL(d.graphOf(tablesFrom)))
 	return s
 }
 

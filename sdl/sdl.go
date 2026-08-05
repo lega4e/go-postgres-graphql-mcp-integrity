@@ -69,6 +69,10 @@ type Relationship struct {
 	// Table is the explicit edge table name (@relationship(table:)); empty
 	// means "derive from Type".
 	Table string
+	// Schema is the PostgreSQL schema qualifying Table (@relationship(schema:));
+	// empty means the identifier resolves through search_path, exactly as every
+	// gopgql identifier did before schema qualification existed.
+	Schema string
 	// HasInverse names the paired field when @hasInverse is present.
 	HasInverse string
 }
@@ -195,6 +199,20 @@ type Node struct {
 	// Table is the physical table name (@node(table:)), defaulting to the
 	// pluralized label.
 	Table string
+	// Schema is the PostgreSQL schema qualifying Table (@node(schema:)); empty
+	// means the identifier resolves through search_path, which is what every
+	// gopgql identifier did before schema qualification existed and is still
+	// what an SDL that declares none gets.
+	Schema string
+	// ReadOnly is true when the type carries @readonly: gopgql surfaces the
+	// table in the property graph and the read model, and emits no DDL and no
+	// migration for it, ever. Somebody else creates and migrates that table
+	// (SPEC.md §7 → M12).
+	//
+	// It constrains *DDL emission*, not query access — a @readonly type is as
+	// queryable as any other. The word is the consumer's; it reads as though it
+	// meant the other thing.
+	ReadOnly bool
 	// Fields are the type's fields in declaration order.
 	Fields []*Field
 	// Checks are the table-level constraint expressions from @check(expr:) on
@@ -259,10 +277,16 @@ type Document struct {
 	// Interfaces are the interfaces implemented by @node types, in a stable
 	// (type-name) order.
 	Interfaces []*Interface
+	// Mutations are the Mutation type's fields, in declaration order — one per
+	// PL/pgSQL function the SDL names with @function (SPEC.md §7 → M11). Nil
+	// when the SDL declares no Mutation type, which is every schema written
+	// before M11 and every schema that only reads.
+	Mutations []*Mutation
 
-	byType  map[string]*Node
-	byTable map[string]*Node
-	byIface map[string]*Interface
+	byType     map[string]*Node
+	byTable    map[string]*Node
+	byIface    map[string]*Interface
+	byMutation map[string]*Mutation
 	// targets and roots resolve a GraphQL type name and a query root-field name
 	// respectively to the vertex position they select.
 	targets map[string]*Target
@@ -281,6 +305,20 @@ func (d *Document) NodeByTable(name string) *Node { return d.byTable[name] }
 
 // InterfaceByType returns the interface for a GraphQL type name, or nil.
 func (d *Document) InterfaceByType(name string) *Interface { return d.byIface[name] }
+
+// MutationByField returns the mutation for a Mutation root-field name, or nil.
+func (d *Document) MutationByField(name string) *Mutation { return d.byMutation[name] }
+
+// MutationFields lists every mutation root-field name, sorted. Like
+// [Document.RootFields] it exists so a compile error can say what *is* callable.
+func (d *Document) MutationFields() []string {
+	out := make([]string, 0, len(d.byMutation))
+	for name := range d.byMutation {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
 
 // RootTarget resolves a query root-field name to the vertex position it
 // selects, or nil when no @node table and no interface answers to that name.
@@ -303,18 +341,21 @@ func (d *Document) RootFields() []string {
 
 // prelude declares the gopgql directive vocabulary and custom scalars so
 // gqlparser recognises and validates them. It is SPEC.md §5 through M7.
-const prelude = `directive @node(label: String!, table: String) on OBJECT | INTERFACE
-directive @relationship(type: String!, direction: RelDirection, table: String) on FIELD_DEFINITION
+const prelude = `directive @node(label: String!, table: String, schema: String) on OBJECT | INTERFACE
+directive @relationship(type: String!, direction: RelDirection, table: String, schema: String) on FIELD_DEFINITION
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @ignore on FIELD_DEFINITION
-directive @column(name: String, type: String) on FIELD_DEFINITION
+directive @column(name: String, type: String) on FIELD_DEFINITION | ARGUMENT_DEFINITION
 directive @index(name: String, using: String) on FIELD_DEFINITION | OBJECT
 directive @unique on FIELD_DEFINITION
 directive @default(value: String!) on FIELD_DEFINITION
 directive @check(expr: String!) on FIELD_DEFINITION | OBJECT
 directive @key(fields: [String!]!) on OBJECT
 directive @renamedFrom(name: String!) on OBJECT | FIELD_DEFINITION
+directive @readonly on OBJECT
+directive @function(schema: String!, name: String!, returns: FunctionReturn = SCALAR) on FIELD_DEFINITION
 enum RelDirection { OUT IN }
+enum FunctionReturn { SCALAR VOID }
 scalar DateTime
 scalar JSON
 `
@@ -334,12 +375,13 @@ func Parse(src string) (*Document, error) {
 	}
 
 	doc := &Document{
-		byType:  map[string]*Node{},
-		byTable: map[string]*Node{},
-		byIface: map[string]*Interface{},
-		targets: map[string]*Target{},
-		roots:   map[string]*Target{},
-		Raw:     schema,
+		byType:     map[string]*Node{},
+		byTable:    map[string]*Node{},
+		byIface:    map[string]*Interface{},
+		byMutation: map[string]*Mutation{},
+		targets:    map[string]*Target{},
+		roots:      map[string]*Target{},
+		Raw:        schema,
 	}
 
 	var ifaceDefs []*ast.Definition
@@ -361,7 +403,14 @@ func Parse(src string) (*Document, error) {
 		}
 	}
 
-	if len(doc.Nodes) == 0 {
+	if err := doc.buildMutations(schema); err != nil {
+		return nil, err
+	}
+
+	// A schema has to describe *something*. Before M11 that could only be a
+	// graph, so the check named @node alone; a document that declares nothing but
+	// a callable command surface is now equally complete.
+	if len(doc.Nodes) == 0 && len(doc.Mutations) == 0 {
 		return nil, fmt.Errorf("sdl: no `type ... @node(...)` definitions found; at least one is required")
 	}
 
@@ -489,7 +538,12 @@ func buildNode(def *ast.Definition, nodeDir *ast.Directive) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{TypeName: def.Name, Label: label, Table: table, Fields: fields}
+	n := &Node{
+		TypeName: def.Name, Label: label, Table: table,
+		Schema:   argString(nodeDir, "schema"),
+		ReadOnly: def.Directives.ForName("readonly") != nil,
+		Fields:   fields,
+	}
 
 	// A type may carry several @check directives — one constraint per
 	// expression, each named separately in the DDL so a later delta can drop it
@@ -576,6 +630,7 @@ func buildFields(def *ast.Definition) ([]*Field, error) {
 				Type:      argString(relDir, "type"),
 				Direction: Out,
 				Table:     argString(relDir, "table"),
+				Schema:    argString(relDir, "schema"),
 			}
 			if d := argString(relDir, "direction"); d == string(In) {
 				rel.Direction = In
@@ -646,6 +701,9 @@ func (d *Document) validate() error {
 			return err
 		}
 		if err := d.validateRenameHints(n); err != nil {
+			return err
+		}
+		if err := d.validateUnmanaged(n); err != nil {
 			return err
 		}
 	}

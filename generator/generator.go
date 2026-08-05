@@ -48,7 +48,12 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 			return nil, err
 		}
 		m.VertexTables = append(m.VertexTables, vt)
-		m.Indexes = append(m.Indexes, fieldIndexes(n)...)
+		// An unmanaged table gets no index, because a CREATE INDEX on it is DDL
+		// against a table gopgql does not own. Whether it is indexed is the
+		// schema owner's business (SPEC.md §7 → M12).
+		if !vt.Unmanaged {
+			m.Indexes = append(m.Indexes, fieldIndexes(n)...)
+		}
 	}
 
 	if err := attachInterfaceLabels(m, doc); err != nil {
@@ -58,11 +63,12 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 	edges := collectEdges(doc)
 	for _, e := range edges {
 		m.EdgeTables = append(m.EdgeTables, e)
-		// SPEC.md §5.3 invariant 2: every edge table has an index on its
-		// destination key column.
+		// SPEC.md §5.3 invariant 2: every edge table gopgql *generates* has an
+		// index on its destination key column.
 		m.Indexes = append(m.Indexes, schema.Index{
 			Name:    e.Name + "_target_idx",
 			Table:   e.Name,
+			Schema:  e.Schema,
 			Columns: []string{e.DestKey},
 		})
 	}
@@ -74,7 +80,10 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 }
 
 func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
-	vt := schema.VertexTable{Name: n.Table, Label: n.Label, RenamedFrom: n.PriorTableNames()}
+	vt := schema.VertexTable{
+		Name: n.Table, Schema: n.Schema, Unmanaged: n.ReadOnly,
+		Label: n.Label, RenamedFrom: n.PriorTableNames(),
+	}
 	for _, expr := range n.Checks {
 		vt.Checks = append(vt.Checks, schema.NormalizeExpr(expr))
 	}
@@ -166,7 +175,7 @@ func fieldIndexes(n *sdl.Node) []schema.Index {
 			name = n.Table + "_" + col + "_idx"
 		}
 		out = append(out, schema.Index{
-			Name: name, Table: n.Table, Columns: []string{col}, Method: f.Index.Using,
+			Name: name, Table: n.Table, Schema: n.Schema, Columns: []string{col}, Method: f.Index.Using,
 		})
 	}
 	return out
@@ -185,7 +194,7 @@ func fieldIndexes(n *sdl.Node) []schema.Index {
 func attachInterfaceLabels(m *schema.Schema, doc *sdl.Document) error {
 	byTable := map[string]*schema.VertexTable{}
 	for i := range m.VertexTables {
-		byTable[m.VertexTables[i].Name] = &m.VertexTables[i]
+		byTable[m.VertexTables[i].Key()] = &m.VertexTables[i]
 	}
 
 	for _, iface := range doc.Interfaces {
@@ -203,7 +212,7 @@ func attachInterfaceLabels(m *schema.Schema, doc *sdl.Document) error {
 				"a shared label needs at least the key property", iface.TypeName)
 		}
 		for _, impl := range iface.Implementors {
-			vt, ok := byTable[impl.Table]
+			vt, ok := byTable[schema.QualifiedKey(impl.Schema, impl.Table)]
 			if !ok {
 				return fmt.Errorf("generator: interface %s is implemented by %s, whose table %q has no vertex table",
 					iface.TypeName, impl.TypeName, impl.Table)
@@ -244,23 +253,28 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 		}
 		seen[table] = true
 
-		srcTable, dstTable := n.Table, target.Table
+		src, dst := n, target
 		if f.Rel.Direction == sdl.In {
 			// IN reverses orientation: the declaring type is the destination.
-			srcTable, dstTable = target.Table, n.Table
+			src, dst = target, n
 		}
 		edges = append(edges, schema.EdgeTable{
-			Name:        table,
-			Label:       f.Rel.Type,
-			SourceKey:   "source_id",
-			SourceTable: srcTable,
-			SourceRef:   "id",
-			DestKey:     "target_id",
-			DestTable:   dstTable,
-			DestRef:     "id",
+			Name:         table,
+			Schema:       f.Rel.Schema,
+			Label:        f.Rel.Type,
+			SourceKey:    "source_id",
+			SourceSchema: src.Schema,
+			SourceTable:  src.Table,
+			SourceRef:    "id",
+			DestKey:      "target_id",
+			DestSchema:   dst.Schema,
+			DestTable:    dst.Table,
+			DestRef:      "id",
 			Columns: []schema.Column{
-				{Name: "source_id", Type: "uuid", NotNull: true, References: &schema.Reference{Table: srcTable, Column: "id"}},
-				{Name: "target_id", Type: "uuid", NotNull: true, References: &schema.Reference{Table: dstTable, Column: "id"}},
+				{Name: "source_id", Type: "uuid", NotNull: true,
+					References: &schema.Reference{Schema: src.Schema, Table: src.Table, Column: "id"}},
+				{Name: "target_id", Type: "uuid", NotNull: true,
+					References: &schema.Reference{Schema: dst.Schema, Table: dst.Table, Column: "id"}},
 			},
 			Properties: []string{"source_id", "target_id"},
 		})
@@ -288,15 +302,23 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 // This is what the `_tables` migration of a generation carries. It is separate
 // from GraphDDL because no migration mixes the two, and because a project whose
 // tables are managed elsewhere generates only the graph half (gopgql#38).
+//
+// An unmanaged (@readonly) vertex table contributes nothing here — not its
+// CREATE TABLE, not its constraints, not its indexes. It is still a full member
+// of the property graph GraphDDL renders; the two halves disagree about it on
+// purpose, because that disagreement is exactly "surfaced but not owned".
 func TablesDDL(m *schema.Schema) string {
 	var blocks []string
 	for i := range m.VertexTables {
 		vt := &m.VertexTables[i]
-		blocks = append(blocks, withIndexes(m, vt.Name, VertexTableDDL(vt)))
+		if vt.Unmanaged {
+			continue
+		}
+		blocks = append(blocks, withIndexes(m, vt.Key(), VertexTableDDL(vt)))
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		blocks = append(blocks, withIndexes(m, e.Name, EdgeTableDDL(e)))
+		blocks = append(blocks, withIndexes(m, e.Key(), EdgeTableDDL(e)))
 	}
 	return strings.Join(blocks, "\n\n")
 }
@@ -315,9 +337,9 @@ func DDL(m *schema.Schema) string {
 // withIndexes appends a table's CREATE INDEX statements to its CREATE TABLE
 // block: the mandatory destination-key index on every edge table (SPEC.md §5.3
 // invariant 2) and any index a field asked for with @index (SPEC.md §7 → M6).
-func withIndexes(m *schema.Schema, table, block string) string {
+func withIndexes(m *schema.Schema, tableKey, block string) string {
 	for _, idx := range m.Indexes {
-		if idx.Table == table {
+		if schema.QualifiedKey(idx.Schema, idx.Table) == tableKey {
 			block += "\n" + IndexDDL(idx)
 		}
 	}
@@ -329,7 +351,7 @@ func withIndexes(m *schema.Schema, table, block string) string {
 // migration (SPEC.md §7 → M2).
 func VertexTableDDL(vt *schema.VertexTable) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", pgident.Quote(vt.Name))
+	fmt.Fprintf(&b, "CREATE TABLE %s (\n", vt.QualifiedName())
 	lines := make([]string, 0, len(vt.Columns))
 	for _, c := range vt.Columns {
 		lines = append(lines, "    "+ColumnDDL(c))
@@ -429,7 +451,7 @@ func ColumnDDL(c schema.Column) string {
 	}
 	if c.References != nil {
 		parts = append(parts, fmt.Sprintf("REFERENCES %s (%s)",
-			pgident.Quote(c.References.Table), pgident.Quote(c.References.Column)))
+			c.References.QualifiedTable(), pgident.Quote(c.References.Column)))
 	}
 	return strings.Join(parts, " ")
 }
@@ -439,7 +461,7 @@ func ColumnDDL(c schema.Column) string {
 // delta migrations (SPEC.md §7 → M2).
 func EdgeTableDDL(e *schema.EdgeTable) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", pgident.Quote(e.Name))
+	fmt.Fprintf(&b, "CREATE TABLE %s (\n", e.QualifiedName())
 	for _, c := range e.Columns {
 		fmt.Fprintf(&b, "    %s,\n", ColumnDDL(c))
 	}
@@ -460,7 +482,7 @@ func IndexDDL(idx schema.Index) string {
 		using = " USING " + idx.Method
 	}
 	return fmt.Sprintf("CREATE INDEX %s ON %s%s (%s);",
-		pgident.Quote(idx.Name), pgident.Quote(idx.Table), using, strings.Join(cols, ", "))
+		pgident.Quote(idx.Name), idx.QualifiedTable(), using, strings.Join(cols, ", "))
 }
 
 // GraphDDL renders the CREATE PROPERTY GRAPH statement for a schema. Exported
@@ -483,7 +505,7 @@ func GraphDDL(m *schema.Schema) string {
 			key = fmt.Sprintf(" KEY (%s)", quoteList(vt.NaturalKey.Columns))
 		}
 		fmt.Fprintf(&vb, "    %s%s LABEL %s PROPERTIES (%s)",
-			pgident.Quote(vt.Name), key, pgident.Quote(vt.Label), quoteList(vt.Properties))
+			vt.QualifiedName(), key, pgident.Quote(vt.Label), quoteList(vt.Properties))
 		// A shared label — one interface, several tables — is a further LABEL
 		// clause on the same table (SPEC.md §7 → M4).
 		for _, extra := range vt.ExtraLabels {
@@ -501,10 +523,10 @@ func GraphDDL(m *schema.Schema) string {
 		for i, e := range m.EdgeTables {
 			var eb strings.Builder
 			fmt.Fprintf(&eb, "    %s SOURCE KEY (%s) REFERENCES %s (%s)\n",
-				pgident.Quote(e.Name), pgident.Quote(e.SourceKey),
-				pgident.Quote(e.SourceTable), pgident.Quote(e.SourceRef))
+				e.QualifiedName(), pgident.Quote(e.SourceKey),
+				e.QualifiedSource(), pgident.Quote(e.SourceRef))
 			fmt.Fprintf(&eb, "            DESTINATION KEY (%s) REFERENCES %s (%s)\n",
-				pgident.Quote(e.DestKey), pgident.Quote(e.DestTable), pgident.Quote(e.DestRef))
+				pgident.Quote(e.DestKey), e.QualifiedDest(), pgident.Quote(e.DestRef))
 			fmt.Fprintf(&eb, "            LABEL %s PROPERTIES (%s)",
 				pgident.Quote(e.Label), quoteList(e.Properties))
 			elines[i] = eb.String()
@@ -555,19 +577,21 @@ func validateInvariants(m *schema.Schema) error {
 			return fmt.Errorf("generator: edge %q has no index on destination key %q (invariant 2)", e.Name, e.DestKey)
 		}
 	}
-	// 4. Table names (aliases) are unique within the graph.
+	// 4. Table names (aliases) are unique within the graph. A schema qualifier is
+	// part of the name here, because it is part of the identifier PostgreSQL
+	// resolves: two tables of one name in two schemas are two tables.
 	tables := map[string]bool{}
 	for _, vt := range m.VertexTables {
-		if tables[vt.Name] {
-			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", vt.Name)
+		if tables[vt.Key()] {
+			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", vt.Key())
 		}
-		tables[vt.Name] = true
+		tables[vt.Key()] = true
 	}
 	for _, e := range m.EdgeTables {
-		if tables[e.Name] {
-			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", e.Name)
+		if tables[e.Key()] {
+			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", e.Key())
 		}
-		tables[e.Name] = true
+		tables[e.Key()] = true
 	}
 
 	// 5. A label may span several tables, but every table carrying it must
@@ -603,13 +627,13 @@ func validateLabelAlignment(m *schema.Schema) error {
 
 	for _, vt := range m.VertexTables {
 		types := columnTypes(vt.Columns)
-		add(vt.Label, labelUse{table: vt.Name, props: vt.Properties, types: types})
+		add(vt.Label, labelUse{table: vt.Key(), props: vt.Properties, types: types})
 		for _, extra := range vt.ExtraLabels {
-			add(extra.Label, labelUse{table: vt.Name, props: extra.Properties, types: types})
+			add(extra.Label, labelUse{table: vt.Key(), props: extra.Properties, types: types})
 		}
 	}
 	for _, e := range m.EdgeTables {
-		add(e.Label, labelUse{table: e.Name, props: e.Properties, types: columnTypes(e.Columns)})
+		add(e.Label, labelUse{table: e.Key(), props: e.Properties, types: columnTypes(e.Columns)})
 	}
 
 	// Per-label alignment: same count, same names in order, same types.
@@ -671,7 +695,8 @@ func columnTypes(cols []schema.Column) map[string]string {
 
 func hasDestIndex(m *schema.Schema, e schema.EdgeTable) bool {
 	for _, idx := range m.Indexes {
-		if idx.Table == e.Name && len(idx.Columns) == 1 && idx.Columns[0] == e.DestKey {
+		if schema.QualifiedKey(idx.Schema, idx.Table) == e.Key() &&
+			len(idx.Columns) == 1 && idx.Columns[0] == e.DestKey {
 			return true
 		}
 	}

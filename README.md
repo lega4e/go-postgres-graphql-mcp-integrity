@@ -37,10 +37,15 @@ until the button is pressed, and nothing is sent anywhere
 
 Each of those tabs carries an editable **Data** pane, pre-filled with the
 `INSERT`s its schema needs and applied just before the query, so you can
-`INSERT`, `UPDATE` or `DELETE` and watch the response change. Writes are plain
-SQL rather than GraphQL mutations because a SQL/PGQ property graph is a
-read-only view: gopgql compiles queries against it and never writes through it,
-and `CompileQuery` refuses any operation that is not a `query`.
+`INSERT`, `UPDATE` or `DELETE` and watch the response change. Writes there are
+plain SQL rather than GraphQL mutations because a SQL/PGQ property graph is a
+read-only view — nothing gopgql compiles writes *through the graph*, and
+`CompileQuery` emits `GRAPH_TABLE` and nothing else.
+
+gopgql does have a write path, and it is a different one: a mutation field
+carrying [`@function`](#calling-a-function) compiles to a plain call to a
+PL/pgSQL function the database already owns, over ordinary tables. It runs only
+through a connection you hand in.
 
 ## What it looks like
 
@@ -261,10 +266,96 @@ Two tools:
 | `introspect` | Standard GraphQL introspection over the loaded schema. No arguments gives the overview; `type: "Person"` drills into one type; `full: true` returns the complete result; `format: "sdl"` returns the document. |
 | `query` | Compiles a GraphQL query, executes it, and returns the nested response. `variables` are bound as SQL parameters, never interpolated. `format: "markdown"` renders a table instead of JSON. |
 
-The server never migrates and never writes: the compiler emits nothing but a
-`SELECT`, there is no mutation tool, and the pool opens with
-`default_transaction_read_only=on`, so a write is refused by the database
-itself.
+The server never migrates and never writes. It exposes no mutation tool and its
+introspection reports a null `mutationType` — deliberately, and not because
+mutations cannot exist: the server holds a pool it opened itself, with
+`default_transaction_read_only=on`, and no handle from a caller. A `@function`
+call needs a connection somebody else is responsible for, and an agent able to
+enqueue work is a different authorization question from an agent able to read.
+
+## Calling a function
+
+A `Mutation` field carrying `@function` maps to a PL/pgSQL function the database
+already owns. gopgql derives no writes of its own — there is no generated
+`createPerson` and no inferred input type — it calls what the SDL names.
+
+```graphql
+type Mutation {
+  startAgentRun(
+    agentDigest: String! @column(name: "agent_digest")
+    userId: String!      @column(name: "user_id")
+    queue: String = "agent"
+    priority: Int
+  ): String! @function(schema: "dbos", name: "enqueue_workflow")
+
+  sendMessage(destination: String!): Boolean!
+    @function(schema: "dbos", name: "send_message", returns: VOID)
+}
+```
+
+```
+SELECT dbos.enqueue_workflow(agent_digest => $1, user_id => $2, queue => $3)
+```
+
+Arguments map to parameters **by name**, so writing them in another order
+compiles to the same call. An argument your operation does not pass is left out
+of the call, so the function's own `DEFAULT` applies — passing it as `null` is a
+different thing, and sends `NULL`. `returns: VOID` is declared rather than
+guessed, because `Boolean!` cannot tell a function that returned `false` from
+one that returned nothing.
+
+An error the function raises arrives as an `*exec.FunctionError` carrying its
+SQLSTATE:
+
+```go
+var fnErr *exec.FunctionError
+if errors.As(err, &fnErr) && fnErr.SQLSTATE == "P0001" { … }
+```
+
+## Tables you do not own
+
+`@readonly` marks a type gopgql **surfaces but does not own**: it appears in the
+property graph and is queryable like any other, and gopgql emits no `CREATE
+TABLE`, no `ALTER`, no `DROP` and no index for it, ever. `@node(schema:)` names
+the PostgreSQL schema it lives in.
+
+```graphql
+type Stream @node(label: "stream", table: "streams", schema: "dbos") @readonly {
+  id: ID!
+  topic: String!
+  seq: Int! @column(name: "offset")   # quoted correctly; `offset` is reserved
+}
+```
+
+It is the per-type grain of `--no-tables`, and the two compose. Whether gopgql
+owns a table cannot change in a delta — both directions are refused at generate
+time, because neither has a migration that could be written for it.
+
+## A typed Go client
+
+`gopgql generate client` reads the SDL and a directory of **named** GraphQL
+operation documents, compiles every operation there and then, and writes a Go
+package.
+
+```
+gopgql generate client --sdl schema.graphql --operations ops/ --out internal/gen
+```
+
+```go
+func (c *Client) AppendEvent(ctx context.Context, h exec.Handle, in AppendEventInput) error
+func (c *Client) ListPeople(ctx context.Context, h exec.Handle, in ListPeopleInput) ([]ListPeoplePerson, error)
+```
+
+The handle is the second parameter of every method, and the client opens no
+connection and holds no pool — so an operation runs in whatever transaction you
+are already in, and commits with it. `*pgxpool.Pool`, `*pgx.Conn` and `pgx.Tx`
+all satisfy `exec.Handle`.
+
+The SQL is a `const` and results are assigned field by field by generated code;
+nothing is compiled, parsed or reflected over at run time. A query that cannot
+compile — an unknown root field, a selection past the depth ceiling — fails the
+generate command, never a request. Generation is deterministic and needs no
+database, so `go generate ./... && git diff --exit-code` is a usable CI gate.
 
 ## Choose how the response is shaped
 

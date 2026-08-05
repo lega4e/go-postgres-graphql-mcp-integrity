@@ -146,6 +146,9 @@ type CreatePropertyGraphStmt struct {
 // Label and Properties are the first clause; ExtraLabels holds the rest.
 type VertexTableDef struct {
 	Table string
+	// Schema qualifies Table, or is "" when the entry names a bare table that
+	// resolves through search_path.
+	Schema string
 	// Key is the "KEY ( <columns> )" clause a vertex table carries when its type
 	// declares a natural key (design D1), or nil. The same columns also appear as
 	// a named UNIQUE constraint on the table, which is what the fold reconstructs
@@ -169,15 +172,20 @@ type LabelDef struct {
 // EdgeTableDef is one entry in EDGE TABLES, carrying both key references and the
 // label/properties.
 type EdgeTableDef struct {
-	Table       string
-	Label       string
-	SourceKey   string
-	SourceTable string
-	SourceRef   string
-	DestKey     string
-	DestTable   string
-	DestRef     string
-	Properties  []string
+	Table string
+	// Schema, SourceSchema and DestSchema qualify Table, SourceTable and
+	// DestTable respectively, each "" for an unqualified name.
+	Schema       string
+	Label        string
+	SourceKey    string
+	SourceSchema string
+	SourceTable  string
+	SourceRef    string
+	DestKey      string
+	DestSchema   string
+	DestTable    string
+	DestRef      string
+	Properties   []string
 }
 
 // DropPropertyGraphStmt is "DROP PROPERTY GRAPH [IF EXISTS] <name>".

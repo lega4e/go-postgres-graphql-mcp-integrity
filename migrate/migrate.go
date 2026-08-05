@@ -204,6 +204,9 @@ func Generate(dir string, desired *schema.Schema, slug string, halves Halves) ([
 			return nil, err
 		}
 	}
+	if err := checkManagement(owned, prior, desired); err != nil {
+		return nil, err
+	}
 
 	next := 1
 	if n := len(files); n > 0 {
@@ -226,6 +229,61 @@ func Generate(dir string, desired *schema.Schema, slug string, halves Halves) ([
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+// ErrManagementChanged reports that a type's SDL stopped or started declaring
+// @readonly, which no delta can express (SPEC.md §7 → M12).
+var ErrManagementChanged = errors.New(
+	"whether gopgql owns a table cannot change in a delta")
+
+// checkManagement refuses a generation in which a table changed hands.
+//
+// Neither direction has a migration that could be written for it, and both fail
+// *after* review rather than at generate time, which is what makes refusing here
+// worth the check:
+//
+//   - **Dropping @readonly** (adoption). Nothing in the history creates the
+//     table, so the fold holds it with no columns and the differ reads it as a
+//     table that does not exist. The generation would carry a CREATE TABLE for a
+//     table that is already there — a migration that reads perfectly and fails
+//     at apply. Adopting a table means telling gopgql what is already in it,
+//     which is a different change with its own SDL.
+//
+//   - **Adding @readonly** (disowning). The table's history stays in the
+//     directory; gopgql simply stops emitting anything about it. Nothing marks
+//     the handover, so a later reader cannot tell an abandoned table from one
+//     nobody ever owned, and the next schema edit silently stops migrating a
+//     table the database still has. Moving the graph half to a fresh --dir is
+//     the deliberate way to do it.
+//
+// The evidence is a folded table's columns, and it is only readable when the
+// directory manages tables at all: a --no-tables history folds *every* table
+// without columns, so there the absence says nothing.
+func checkManagement(owned Ownership, prior, desired *schema.Schema) error {
+	if prior == nil || !owned.Tables {
+		return nil
+	}
+	folded := map[string]bool{} // key → the history creates its table
+	for _, vt := range prior.VertexTables {
+		folded[vt.Key()] = len(vt.Columns) > 0
+	}
+	for _, vt := range desired.VertexTables {
+		created, known := folded[vt.Key()]
+		if !known {
+			continue // a new table; either kind is fine
+		}
+		switch {
+		case vt.Unmanaged && created:
+			return fmt.Errorf("%s is now @readonly, but this directory's migrations created it: %w; "+
+				"generate the graph half into a fresh --dir instead, so the history that owns the table stays "+
+				"with the table", vt.QualifiedName(), ErrManagementChanged)
+		case !vt.Unmanaged && !created:
+			return fmt.Errorf("%s is no longer @readonly, but nothing in this directory creates it: %w; "+
+				"a delta would emit CREATE TABLE for a table that already exists", vt.QualifiedName(),
+				ErrManagementChanged)
+		}
+	}
+	return nil
 }
 
 // GraphTeardown renders the graph-teardown migration for the graph a history
@@ -313,10 +371,16 @@ func sanitizeName(name string) string {
 func downTablesDDL(m *schema.Schema) string {
 	var stmts []string
 	for i := len(m.EdgeTables) - 1; i >= 0; i-- {
-		stmts = append(stmts, fmt.Sprintf("DROP TABLE IF EXISTS %s;", quote(m.EdgeTables[i].Name)))
+		stmts = append(stmts, fmt.Sprintf("DROP TABLE IF EXISTS %s;", m.EdgeTables[i].QualifiedName()))
 	}
 	for i := len(m.VertexTables) - 1; i >= 0; i-- {
-		stmts = append(stmts, fmt.Sprintf("DROP TABLE IF EXISTS %s;", quote(m.VertexTables[i].Name)))
+		// An unmanaged table is not dropped, for the same reason it is not
+		// created: gopgql does not own it. The Down section of a generation
+		// undoes what its Up section did, and its Up section did nothing here.
+		if m.VertexTables[i].Unmanaged {
+			continue
+		}
+		stmts = append(stmts, fmt.Sprintf("DROP TABLE IF EXISTS %s;", m.VertexTables[i].QualifiedName()))
 	}
 	return strings.Join(stmts, "\n") + "\n"
 }

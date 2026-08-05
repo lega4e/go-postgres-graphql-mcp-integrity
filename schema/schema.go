@@ -14,7 +14,38 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/lega4e/gopgql/internal/pgident"
 )
+
+// QualifiedName renders a table identifier for DDL: schema.table, each part
+// quoted only where it has to be, or the bare table when no schema is declared.
+//
+// An unqualified name is what every gopgql identifier was before schema
+// qualification existed, and it stays exactly that — it resolves through
+// search_path. Emitting a qualification nobody asked for would rewrite every
+// existing migration's text for no gain.
+func QualifiedName(schemaName, table string) string {
+	if schemaName == "" {
+		return pgident.Quote(table)
+	}
+	return pgident.Quote(schemaName) + "." + pgident.Quote(table)
+}
+
+// QualifiedKey is the unquoted form of the same identifier, used as the key
+// under which the differ and the fold hold a table.
+//
+// The two are separate because a *key* must be exactly what the parser reads
+// back out of a statement, quotes already removed, while the DDL form has to
+// carry the quotes. Keying by the bare name instead would let two tables of the
+// same name in different schemas silently share one entry, and the differ would
+// then propose columns from one onto the other.
+func QualifiedKey(schemaName, table string) string {
+	if schemaName == "" {
+		return table
+	}
+	return schemaName + "." + table
+}
 
 // Column is a single column of a vertex or edge table.
 type Column struct {
@@ -63,19 +94,36 @@ type Column struct {
 
 // Reference is a single-column foreign-key target.
 type Reference struct {
+	// Schema qualifies Table, or is empty (search_path).
+	Schema string
 	Table  string
 	Column string
 }
 
+// QualifiedTable renders the referenced table for DDL.
+func (r Reference) QualifiedTable() string { return QualifiedName(r.Schema, r.Table) }
+
 // Index is a secondary index on a table.
 type Index struct {
-	Name    string
-	Table   string
+	Name  string
+	Table string
+	// Schema qualifies Table, and the index itself: PostgreSQL puts an index in
+	// the schema of the table it is on, so a DROP has to name it there too.
+	Schema  string
 	Columns []string
 	// Method is the access method (`USING btree`, `hash`, `gin`, …) from
 	// @index(using:); empty means the database default (SPEC.md §7 → M6).
 	Method string
 }
+
+// QualifiedTable and QualifiedName render the index's table and the index
+// itself for DDL.
+func (i Index) QualifiedTable() string { return QualifiedName(i.Schema, i.Table) }
+func (i Index) QualifiedName() string  { return QualifiedName(i.Schema, i.Name) }
+
+// Key is the key an index is held under while diffing. Two indexes of one name
+// in two schemas are two indexes.
+func (i Index) Key() string { return QualifiedKey(i.Schema, i.Name) }
 
 // NaturalKey is a named uniqueness constraint over a vertex table's own scalar
 // columns: the @key(fields:) natural key.
@@ -205,6 +253,22 @@ type LabelProperties struct {
 type VertexTable struct {
 	// Name is the physical table name.
 	Name string
+	// Schema is the PostgreSQL schema qualifying Name, or "" (search_path).
+	Schema string
+	// Unmanaged marks a table gopgql surfaces but does not own: it appears in
+	// the property graph and in the read model, and no DDL and no migration is
+	// ever emitted for it — not a CREATE, not an ALTER, not a DROP, not an index
+	// (SPEC.md §7 → M12). It is @readonly's whole effect.
+	//
+	// It is the per-type grain of the per-directory --no-tables: that flag says
+	// "this directory owns no tables at all", this field says "this one table is
+	// somebody else's". The two compose and neither replaces the other.
+	//
+	// A folded schema never carries it, for the same reason Column.RenamedFrom
+	// never does: nothing in the DDL says who owns a table, because the DDL for
+	// an unmanaged table is precisely what is never written. It is an
+	// instruction from the SDL to the differ.
+	Unmanaged bool
 	// Label is the table's own graph vertex label.
 	Label string
 	// Columns are the table's columns in declaration order.
@@ -230,28 +294,48 @@ type VertexTable struct {
 	RenamedFrom []string
 }
 
+// QualifiedName renders the vertex table's identifier for DDL; Key is the key it
+// is held under while diffing and folding.
+func (v VertexTable) QualifiedName() string { return QualifiedName(v.Schema, v.Name) }
+func (v VertexTable) Key() string           { return QualifiedKey(v.Schema, v.Name) }
+
 // EdgeTable is a table mapped as a graph edge.
 type EdgeTable struct {
 	// Name is the physical table name.
 	Name string
+	// Schema qualifies Name, or is empty (search_path).
+	Schema string
 	// Label is the graph edge label.
 	Label string
 	// Columns are the table's columns in declaration order.
 	Columns []Column
 	// SourceKey is the source-key column (e.g. "source_id").
 	SourceKey string
-	// SourceTable / SourceRef are the referenced vertex table and column.
-	SourceTable string
-	SourceRef   string
+	// SourceTable / SourceRef are the referenced vertex table and column;
+	// SourceSchema qualifies SourceTable.
+	SourceSchema string
+	SourceTable  string
+	SourceRef    string
 	// DestKey is the destination-key column (e.g. "target_id").
 	DestKey string
-	// DestTable / DestRef are the referenced vertex table and column.
-	DestTable string
-	DestRef   string
+	// DestTable / DestRef are the referenced vertex table and column;
+	// DestSchema qualifies DestTable.
+	DestSchema string
+	DestTable  string
+	DestRef    string
 	// Properties are the graph-exposed property names, including the key
 	// columns (SPEC.md §5.3 invariant 1).
 	Properties []string
 }
+
+// QualifiedName renders the edge table's identifier for DDL; Key is the key it
+// is held under while diffing.
+func (e EdgeTable) QualifiedName() string { return QualifiedName(e.Schema, e.Name) }
+func (e EdgeTable) Key() string           { return QualifiedKey(e.Schema, e.Name) }
+
+// QualifiedSource / QualifiedDest render the vertex tables an edge references.
+func (e EdgeTable) QualifiedSource() string { return QualifiedName(e.SourceSchema, e.SourceTable) }
+func (e EdgeTable) QualifiedDest() string   { return QualifiedName(e.DestSchema, e.DestTable) }
 
 // Schema is the complete physical model: the tables, their indexes, and the
 // property graph mapping them.

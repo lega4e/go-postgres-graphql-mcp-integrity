@@ -168,6 +168,11 @@ type ProjectedField struct {
 	ColumnType string
 	// List is true when the field is a list type, e.g. [Int!]!.
 	List bool
+	// NonNull is true when the field's GraphQL type is non-null. Nothing in the
+	// query path reads it: it is here for a consumer that has to name a *static*
+	// Go type for this position, where a nullable column has to become a pointer
+	// so a NULL stays distinguishable from a zero value (SPEC.md §7 → M14).
+	NonNull bool
 	// Scalar is the canonical response form this field's value takes. shape
 	// normalises a leaf through it so a pgx-scanned value and a value decoded
 	// out of the database's own JSON reach the same Go representation
@@ -183,6 +188,9 @@ type Selection struct {
 	// response key at the top, or a relationship field's response key when
 	// nested.
 	ResponseKey string
+	// TypeName is the GraphQL type bound at this level — a @node type or an
+	// interface. Carried for the same reason as ProjectedField.TypeName.
+	TypeName string
 	// Alias is the vertex's SQL alias in the MATCH pattern (v0, v1, …).
 	Alias string
 	// KeyColumn is the SQL output-column name under which this level's identifying
@@ -246,8 +254,16 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		return nil, fmt.Errorf("compiler: exactly one operation is supported, got %d", len(doc.Operations))
 	}
 	operation := doc.Operations[0]
+	if operation.Operation == ast.Mutation {
+		// The reason this used to give — "SQL/PGQ graphs are read-only" — is
+		// still true of the *graph* and is no longer the reason: a mutation is
+		// compiled, just not here, because it is a function call rather than a
+		// pattern (SPEC.md §7 → M11).
+		return nil, fmt.Errorf("compiler: CompileQuery compiles query operations; " +
+			"compile a mutation with CompileMutation")
+	}
 	if operation.Operation != ast.Query {
-		return nil, fmt.Errorf("compiler: only query operations are supported (SQL/PGQ graphs are read-only)")
+		return nil, fmt.Errorf("compiler: only query operations are supported, got %s", operation.Operation)
 	}
 
 	roots := fieldSelections(operation.SelectionSet)
@@ -417,7 +433,7 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 	b.writeVertex(alias, t.Labels)
 	path = append(append([]string{}, path...), responseKey(field))
 
-	sel := &Selection{ResponseKey: responseKey(field), Alias: alias, frag: b.cur}
+	sel := &Selection{ResponseKey: responseKey(field), TypeName: t.TypeName, Alias: alias, frag: b.cur}
 
 	// Hidden key column: every level projects its id so shape can regroup rows
 	// and deduplicate parents across the fan-out.
@@ -490,6 +506,7 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 				GraphQLType: def.TypeName,
 				ColumnType:  def.ColumnType,
 				List:        def.List,
+				NonNull:     def.NonNull,
 				Scalar:      kind,
 			})
 		case def.Rel != nil:
@@ -623,8 +640,20 @@ func (b *builder) value(v *ast.Value) (any, error) {
 		if val, ok := b.vars[v.Raw]; ok {
 			return val, nil
 		}
-		if def := b.varDefs[v.Raw]; def != nil && def.DefaultValue != nil {
+		def := b.varDefs[v.Raw]
+		if def != nil && def.DefaultValue != nil {
 			return b.value(def.DefaultValue)
+		}
+		// An unset variable declared nullable binds NULL, which is what GraphQL
+		// says an omitted nullable variable means. Failing instead — as this did
+		// before M11 — makes every optional argument unusable: there would be no
+		// way to write an operation whose argument the caller may leave out.
+		//
+		// NULL is a *value*, and it is not the same thing as leaving the
+		// argument out of the operation document, which is what reaches a
+		// function's SQL DEFAULT (see callArgs).
+		if def != nil && !def.Type.NonNull {
+			return nil, nil
 		}
 		return nil, fmt.Errorf("compiler: no value supplied for variable $%s", v.Raw)
 	case ast.IntValue:

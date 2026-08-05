@@ -112,6 +112,59 @@ func (p *parser) ident(what string) (string, error) {
 	return t.Value, nil
 }
 
+// qualifiedIdent consumes a table identifier that may be schema-qualified —
+// "streams", "dbos.streams", `dbos."offset"`, `"dbos".streams` or
+// `"dbos"."offset"` — and returns the two parts, schema empty when there is none.
+//
+// It reads the dot out of the *tokens* rather than asking the lexer for one,
+// because the lexer deliberately treats '.' as an ordinary word character: a
+// DEFAULT expression and a @column(type:) override both carry raw SQL where a
+// dot means something else entirely (0.5, numeric(10,2)), and giving '.' its own
+// token would have to be undone at every one of those sites. Here there are
+// exactly four shapes to cover, decided by which side of the dot was quoted.
+func (p *parser) qualifiedIdent(what string) (schemaName, name string, err error) {
+	t := p.peek()
+	if !t.IsIdent() {
+		return "", "", p.errorf("expected %s, got %q", what, t.Value)
+	}
+	p.advance()
+
+	// A bare word swallows an unquoted dot, so "dbos.streams" arrives whole.
+	if t.Type == TokenWord {
+		before, after, found := strings.Cut(t.Value, ".")
+		if !found {
+			return "", t.Value, nil
+		}
+		if after != "" {
+			return before, after, nil
+		}
+		// `dbos."offset"`: the word ended at the dot and the name is quoted.
+		q := p.peek()
+		if q.Type != TokenQuotedIdent {
+			return "", "", p.errorf("expected %s after %q, got %q", what, t.Value, q.Value)
+		}
+		p.advance()
+		return before, q.Value, nil
+	}
+
+	// A quoted first part: a following word beginning with a dot, and starting
+	// exactly where this token ended, continues the same identifier.
+	n := p.peek()
+	if n.Type != TokenWord || !strings.HasPrefix(n.Value, ".") || n.Pos != t.End {
+		return "", t.Value, nil
+	}
+	p.advance()
+	if rest := n.Value[1:]; rest != "" {
+		return t.Value, rest, nil
+	}
+	q := p.peek()
+	if q.Type != TokenQuotedIdent {
+		return "", "", p.errorf("expected %s after %q, got %q", what, t.Value+n.Value, q.Value)
+	}
+	p.advance()
+	return t.Value, q.Value, nil
+}
+
 func (p *parser) errorf(format string, args ...any) error {
 	return fmt.Errorf("ddl: "+format+" at offset %d", append(args, p.peek().Pos)...)
 }
@@ -566,7 +619,7 @@ func (p *parser) createPropertyGraph() (Statement, error) {
 func (p *parser) vertexTableDef() (VertexTableDef, error) {
 	var v VertexTableDef
 	var err error
-	if v.Table, err = p.ident("vertex table"); err != nil {
+	if v.Schema, v.Table, err = p.qualifiedIdent("vertex table"); err != nil {
 		return v, err
 	}
 	if p.acceptKeyword("KEY") {
@@ -609,13 +662,13 @@ func (p *parser) labelClause(what string) (LabelDef, error) {
 func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 	var e EdgeTableDef
 	var err error
-	if e.Table, err = p.ident("edge table"); err != nil {
+	if e.Schema, e.Table, err = p.qualifiedIdent("edge table"); err != nil {
 		return e, err
 	}
-	if e.SourceKey, e.SourceTable, e.SourceRef, err = p.keyReference("SOURCE"); err != nil {
+	if e.SourceKey, e.SourceSchema, e.SourceTable, e.SourceRef, err = p.keyReference("SOURCE"); err != nil {
 		return e, err
 	}
-	if e.DestKey, e.DestTable, e.DestRef, err = p.keyReference("DESTINATION"); err != nil {
+	if e.DestKey, e.DestSchema, e.DestTable, e.DestRef, err = p.keyReference("DESTINATION"); err != nil {
 		return e, err
 	}
 	label, err := p.labelClause("edge label")
@@ -627,7 +680,7 @@ func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 }
 
 // keyReference parses "<which> KEY (<key>) REFERENCES <table> (<ref>)".
-func (p *parser) keyReference(which string) (key, table, ref string, err error) {
+func (p *parser) keyReference(which string) (key, schemaName, table, ref string, err error) {
 	if err = p.expectKeyword(which, "KEY"); err != nil {
 		return
 	}
@@ -643,7 +696,7 @@ func (p *parser) keyReference(which string) (key, table, ref string, err error) 
 	if err = p.expectKeyword("REFERENCES"); err != nil {
 		return
 	}
-	if table, err = p.ident("referenced table"); err != nil {
+	if schemaName, table, err = p.qualifiedIdent("referenced table"); err != nil {
 		return
 	}
 	if err = p.expectPunct(TokenLParen, "("); err != nil {

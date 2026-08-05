@@ -583,13 +583,18 @@ func (f *folder) build() (*schema.Schema, error) {
 		// compares the graph statement, which is self-describing, and the SDL
 		// is a description of the slice being surfaced, not an inventory of the
 		// database.
-		cols := f.cols[v.Table]
+		// The columns come from the CREATE TABLE statements, which are never
+		// schema-qualified (gopgql qualifies only tables it does not create), so
+		// a qualified graph entry finds none — correctly: a table gopgql does
+		// not own has no CREATE TABLE in this history to find them in.
+		cols := f.cols[schema.QualifiedKey(v.Schema, v.Table)]
 		var extra []schema.LabelProperties
 		for _, l := range v.ExtraLabels {
 			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
 		}
 		vt := schema.VertexTable{
 			Name:        v.Table,
+			Schema:      v.Schema,
 			Label:       v.Label,
 			Columns:     cols,
 			Properties:  v.Properties,
@@ -601,18 +606,21 @@ func (f *folder) build() (*schema.Schema, error) {
 		m.VertexTables = append(m.VertexTables, vt)
 	}
 	for _, e := range f.graph.Edges {
-		cols := f.cols[e.Table]
+		cols := f.cols[schema.QualifiedKey(e.Schema, e.Table)]
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
-			Name:        e.Table,
-			Label:       e.Label,
-			Columns:     cols,
-			SourceKey:   e.SourceKey,
-			SourceTable: e.SourceTable,
-			SourceRef:   e.SourceRef,
-			DestKey:     e.DestKey,
-			DestTable:   e.DestTable,
-			DestRef:     e.DestRef,
-			Properties:  e.Properties,
+			Name:         e.Table,
+			Schema:       e.Schema,
+			Label:        e.Label,
+			Columns:      cols,
+			SourceKey:    e.SourceKey,
+			SourceSchema: e.SourceSchema,
+			SourceTable:  e.SourceTable,
+			SourceRef:    e.SourceRef,
+			DestKey:      e.DestKey,
+			DestSchema:   e.DestSchema,
+			DestTable:    e.DestTable,
+			DestRef:      e.DestRef,
+			Properties:   e.Properties,
 		})
 	}
 	m.Indexes = f.indexList()

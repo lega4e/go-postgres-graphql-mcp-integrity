@@ -182,7 +182,11 @@ func (in *introspector) schemaValue() *introObject {
 			}
 			return list
 		},
-		"queryType":        func(map[string]any) any { return in.typeValue(queryTypeName) },
+		"queryType": func(map[string]any) any { return in.typeValue(queryTypeName) },
+		// Null even for a schema that declares a Mutation type, and deliberately
+		// so: this server holds a read-only pool of its own and no caller
+		// handle, so it could not run one. Advertising a mutation an agent
+		// cannot call would be worse than omitting it.
 		"mutationType":     constant(nil),
 		"subscriptionType": constant(nil),
 		"directives": func(map[string]any) any {

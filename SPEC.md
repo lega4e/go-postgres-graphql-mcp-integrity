@@ -20,7 +20,7 @@ Because one document drives both, the query mapping and the physical schema cann
 ### 1.1 Non-goals
 
 - Not a GraphQL server. No HTTP layer, no subscriptions, no resolver runtime.
-- Not a mutation engine. SQL/PGQ property graphs are read-only views; `gopgql` compiles queries only.
+- Not a mutation engine — in the sense the term has in Neo4j-GraphQL and PostGraphile. `gopgql` **derives** no writes: it generates no `createPerson`/`updatePerson`/`deletePerson` from a `@node` type and infers no input type. What it gained in M11 is the ability to **call** a function the SDL explicitly names and the database already owns (`@function`, §5). That is the same footing as `@default` and `@check` — a deliberate escape hatch, defensible only because whoever writes the SDL owns the schema. §2.2's "no mutation through a property graph" is untouched by it and is a different statement: a `@function` call contains no graph name, no `MATCH` and no `GRAPH_TABLE`.
 - Not a general graph database abstraction. It targets PostgreSQL SQL/PGQ exclusively.
 - Not a migration runner. It emits `goose`-format files; applying them is `goose`’s job.
 
@@ -187,10 +187,11 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`migrate`   |Fold prior goose migrations → model; diff against desired; emit next migration.                        |
 |`compiler`  |GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.                                           |
 |`shape`     |The canonical GraphQL response and its one encoder: flat rows → response (`Rows`, Go-side), database JSON → response (`Decode`, SQL-side), response → bytes (`Encode`). Both strategies' leaves normalise to one form per scalar.|
-|`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool.        |
+|`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool. Also the `Handle` a caller supplies, `Call` for a `@function` mutation, and `*FunctionError` carrying its SQLSTATE.|
 |`conform`   |Reflect the live property graph out of `pg_propgraph_*`; diff it against the generated model; report typed findings.|
 |`mcp`       |Model Context Protocol server: GraphQL introspection over the SDL, plus a query tool over `exec`.      |
-|`cmd/gopgql`|CLI: `generate` (SDL → migration), `migrate` (generate + apply) and `conform` (drift check). `compile` is not implemented yet.|
+|`generator/client`|SDL + named GraphQL operation documents → a typed Go package. Every operation is compiled at generate time; every generated method takes an `exec.Handle` as its second parameter.|
+|`cmd/gopgql`|CLI: `generate` (SDL → migration), `generate client` (SDL + operations → Go client), `migrate` (generate + apply) and `conform` (drift check). `compile` is not implemented yet.|
 |`cmd/gopgql-mcp`|The MCP server binary: one SDL, one DSN, stdio or streamable-HTTP transport.                       |
 
 `sdl`, `schema`, `generator`, `migrate`, `compiler` and `shape` have **no database dependency** and compile to WASM. `exec` imports `pgx`; `conform` reflects a live catalog and so imports it too; `mcp` and `cmd/gopgql-mcp` build on `exec`. None of those four are part of the WASM surface, and nothing on the WASM side may import them — the boundary is what makes the browser playground possible at all.
@@ -237,6 +238,18 @@ directive @default(value: String!) on FIELD_DEFINITION
 directive @check(expr: String!) on FIELD_DEFINITION | OBJECT
 directive @key(fields: [String!]!) on OBJECT     # natural key, alongside id
 directive @renamedFrom(name: String!) on OBJECT | FIELD_DEFINITION  # rename hint
+
+# --- M11/M12: the command surface, and schemas gopgql does not own ---
+directive @function(
+  schema: String!                # the function's PostgreSQL schema
+  name: String!                  # the function's name
+  returns: FunctionReturn = SCALAR
+) on FIELD_DEFINITION            # on a field of the Mutation type, and nowhere else
+enum FunctionReturn { SCALAR VOID }
+directive @readonly on OBJECT    # surfaced, not owned: no DDL, ever
+# and, additively:
+#   @node(schema: String)          qualify a table gopgql does not create
+#   @column on ARGUMENT_DEFINITION name the SQL parameter an argument maps to
 ```
 
 Every directive above is implemented. The four added in M7 carry semantics worth stating precisely, because each is easy to read as something slightly different:
@@ -244,6 +257,16 @@ Every directive above is implemented. The four added in M7 carry semantics worth
 - **`@default(value:)`** and **`@check(expr:)`** are **raw SQL, emitted verbatim** — `@default(value: "now()")` reaches the DDL as `DEFAULT now()`. gopgql never parses them; an invalid expression is PostgreSQL's error when the migration is applied, which is the right place and the right message. They therefore live in the *column* namespace: a check on a field mapped with `@column(name: "left_at")` writes `left_at`, not the GraphQL field name. This is a deliberate escape hatch on the same footing as `graphql-to-sql`'s `@sql` (§2.3), and it is defensible only because whoever writes the SDL already owns the schema. It would be indefensible for user input.
 - **`@check`** may appear once per field (column-level) and any number of times on a type (table-level, for a constraint spanning columns). Every check is emitted **named** — `<table>_<column>_check`, `<table>_check_<n>` — because a later delta drops a constraint by name, and an anonymous one would first have to be looked up in a live database.
 - **`@key(fields:)`** is a **natural key alongside the surrogate `id`, not a replacement for it.** The table keeps `id uuid PRIMARY KEY`, gains `CONSTRAINT <table>_key UNIQUE (…)` over the named columns, and lists those columns in the property graph's `KEY (...)` clause so a `MATCH` can select a vertex by its data. Edge tables continue to reference `id`. The surrogate key is load-bearing in the compiler (three projection sites) and in `shape`'s parent dedup; making a natural key *the* identity is a different, larger change and is recorded in §9 rather than smuggled into M7.
+- **`@function(schema:, name:, returns:)`** maps a mutation field to a PL/pgSQL function call. Arguments map to the function's parameters **by name**, using PostgreSQL's named notation, so the order they are written in has no effect. A field of the `Mutation` type **must** carry it — there is no default target and nothing is inferred — and it is refused anywhere else. `returns: VOID` is **declared, not sniffed**: `Boolean!` cannot tell a function that returned `false` from one that returned nothing, and with no database at compile time there is nowhere else the answer could come from. A set-returning, composite, output-parameter or polymorphic return is refused by the shape of the declaration. An argument's GraphQL name must be a plain lower-case identifier or carry `@column(name:)` naming the parameter, because `"agentDigest" => $1` does not match a parameter called `agent_digest` and the call would fail at run time with `42883` saying nothing about why.
+
+  **`NULL` is not `DEFAULT`, and this is the one trap here no compiler can catch.** Which arguments appear in the call is a property of the **operation document**: an argument the document does not pass, and which declares no GraphQL default, is left out entirely, so the function's own SQL `DEFAULT` applies. Passing it explicitly as `null`, or as an unset nullable variable, sends `NULL` — the parameter is present and its value is `NULL`, and a declared default of anything else is never reached. That the document decides is forced rather than chosen: a generated client bakes each operation's SQL as a `const`, so an argument list varying per request would need one statement per subset of the arguments.
+
+  An error the function raises surfaces as `*exec.FunctionError`, carrying the **SQLSTATE** and wrapping `*pgconn.PgError`, reachable with `errors.As`. gopgql builds no GraphQL error envelope (§1.1); the code is data for the consumer that owns the GraphQL surface to map into its own `extensions`.
+
+- **`@readonly`** marks a type gopgql **surfaces but does not own.** It contributes a vertex element to the property graph and is queryable like any other type, and **no DDL and no migration is ever emitted for it** — no `CREATE TABLE`, no `ALTER`, no `DROP`, no index, in neither the Up nor the Down direction. It constrains *DDL emission*, not query access; the word is the consumer's and reads as though it meant the other thing. It is the per-type grain of the per-directory `--no-tables` (§3.0), and the two compose. Whether gopgql owns a table **cannot change in a delta**, in either direction: adopting one would emit a `CREATE TABLE` for a table that already exists, and disowning one would silently stop migrating a table the database still has, so both are refused at generate time.
+
+- **`@node(schema:)`** qualifies a table's identifier so a table in another PostgreSQL schema can be named at all; without it, every identifier resolves through `search_path` exactly as it did before. gopgql emits no `CREATE SCHEMA`, so it is accepted **only together with `@readonly`** — qualification exists to reach tables that are already there. `@relationship(sourceKey:/destKey:)`, which would let an edge be declared over an existing table, is **not implemented**, so a relationship touching a `@readonly` type is refused rather than mis-generated.
+
 - **`@renamedFrom(name:)`** is a **hint, never an inference.** A differ that sees one name disappear and another appear cannot tell a rename from a drop-and-add, and guessing wrong destroys the rows one way or loses them the other — so nothing is inferred, and without the hint the old drop-and-add behaviour stands. Its value is the previous **GraphQL** name (a type name on `OBJECT`, a field name on `FIELD_DEFINITION`); the generator derives candidate *physical* names from it, and the differ accepts one only when the folded prior state actually holds it. A hint naming something the prior state does not have emits nothing — which is what lets the same SDL, hint included, keep generating cleanly after its rename has landed. A hint naming something the SDL *still declares* is an error: that is two objects, not one moved one.
 
 ### 5.1 Default scalar mapping
@@ -309,9 +332,9 @@ Note `@hasInverse` pairs the two fields onto **one** physical edge table.
 The generator must guarantee, and the test suite must assert:
 
 1. Every `KEY` / `SOURCE KEY` / `DESTINATION KEY` column also appears in that element’s `PROPERTIES` list.
-1. Every edge table has an index on its destination key column.
+1. Every edge table **gopgql generates** has an index on its destination key column. gopgql emits no `CREATE INDEX` on a table it does not own, so an unmanaged edge's destination index belongs to the schema's owner.
 1. Labels and identifiers colliding with SQL keywords are double-quoted.
-1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias.
+1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias. A schema qualifier is part of the name for this purpose: two tables of one name in two schemas are two tables.
 1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed. (Reached in M4; interface fields carry identical names and types across implementors by GraphQL's own rules, so no rename is needed for that case.)
 
 -----
@@ -610,7 +633,7 @@ The playground does not only generate. Each tab that compiles a query — Traver
 
 What is rendered is the response *payload* — the root field and its objects — which is what `exec.Query` returns to a Go caller. It is deliberately **not** wrapped in a GraphQL `{"data": …}` envelope: gopgql is a library that compiles and shapes, not a server that answers requests, and an envelope it does not produce would be the one fabricated panel on a page whose entire claim is that nothing is.
 
-**Changing the data is plain SQL, by design.** Every runnable tab carries an editable **Data** pane, pre-filled with the `INSERT`s its example schema needs and applied between the generated DDL and the query, so a reader can `INSERT`, `UPDATE` or `DELETE` and watch the next Run answer differently. It is SQL and not a GraphQL mutation because §2 is a hard constraint, not an omission: a SQL/PGQ property graph is a read-only view, `compiler.CompileQuery` refuses any operation that is not a `query`, and the MCP server's introspection reports a null `mutationType`. gopgql has no write path to expose, so the playground exposes the database's. A failed statement in that pane does not abort the run — the query still executes and reports what it honestly found — because the pane is the reader's to break.
+**Changing the data is plain SQL, by design.** Every runnable tab carries an editable **Data** pane, pre-filled with the `INSERT`s its example schema needs and applied between the generated DDL and the query, so a reader can `INSERT`, `UPDATE` or `DELETE` and watch the next Run answer differently. It is SQL and not a GraphQL mutation because §2 is a hard constraint, not an omission: a SQL/PGQ property graph is a read-only view, so **nothing gopgql compiles can write through the graph** — `compiler.CompileQuery` emits `GRAPH_TABLE` and nothing else. gopgql does have a write path since M11, and it is a different one: a `@function` call over ordinary tables, executed through a handle the caller supplies (§5, §7 → M11). It is not what this pane exposes, because a mutation would have to be declared in the example's own SDL and the reader's edit is meant to be arbitrary. The playground therefore exposes the database's write path, and the MCP server's introspection still reports a null `mutationType` — for its own reason, which is that it holds a read-only pool and no caller handle, not that mutations cannot exist. A failed statement in that pane does not abort the run — the query still executes and reports what it honestly found — because the pane is the reader's to break.
 
 **Where the runtime comes from.** `docs/package.json` depends on an npm package tarball published as a **release asset of `lega4e/postgres-pglite`**, by URL:
 

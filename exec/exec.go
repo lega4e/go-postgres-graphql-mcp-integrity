@@ -9,6 +9,20 @@
 // exec is also the seam where a different shaping strategy can be selected: the
 // Go-side shaper is the only one today, and an SQL-side json_agg strategy is
 // benchmarked against it in M8 (SPEC.md §3, decision 4).
+//
+// # Whose connection
+//
+// gopgql opens exactly one kind of pool and it is read-only ([OpenReadOnly]).
+// Everything that could write runs through a [Handle] the *caller* owns and
+// hands in — a pool, a connection, or a transaction it opened itself. That is
+// deliberate and it is what keeps `@function` mutations (SPEC.md §7 → M11) from
+// widening gopgql into something that holds a writable connection: a call is
+// executable only through a handle somebody else is already responsible for.
+//
+// It is also the reason a caller can get exactly-once semantics out of a
+// generated operation. A transaction the caller opened commits its own
+// bookkeeping in the same transaction as the work; an operation that opened a
+// connection of its own could not participate in that commit.
 package exec
 
 import (
@@ -17,17 +31,49 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/shape"
 )
 
-// Querier is the subset of a pgx connection pool exec needs. *pgxpool.Pool,
-// *pgx.Conn and pgx.Tx all satisfy it.
+// Querier is the subset of a pgx connection pool exec needs to read.
+// *pgxpool.Pool, *pgx.Conn and pgx.Tx all satisfy it.
+//
+// It stays the parameter of [Query] and [Rows] even though [Handle] exists: a
+// read needs no Exec, and the smaller interface asks less of a caller who only
+// wants to run a compiled query.
 type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
+
+// Handle is a database handle the caller owns and hands to gopgql for the
+// duration of one operation: it queries *and* it executes.
+//
+// *pgxpool.Pool, *pgx.Conn and pgx.Tx all satisfy it, so a caller inside a
+// transaction of its own passes that transaction straight through and the
+// statement runs in it — the property the caller cannot get from a package that
+// opens its own connection, because a checkpoint committed elsewhere is a
+// checkpoint that can disagree with the work.
+//
+// Exec is here rather than in [Querier] because a `@function` declared
+// `returns: VOID` has no result set to read: [Call] runs it as a statement and
+// reads the command tag (SPEC.md §7 → M11). Without that path Handle would
+// carry a method nothing uses, and it would collapse back into Querier.
+type Handle interface {
+	Querier
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// The three pgx types a caller realistically has in hand all satisfy Handle. The
+// assertions are here so a pgx upgrade that moves one of those signatures fails
+// the build, with the type named, rather than a test somewhere downstream.
+var (
+	_ Handle = (*pgxpool.Pool)(nil)
+	_ Handle = (*pgx.Conn)(nil)
+	_ Handle = (pgx.Tx)(nil)
+)
 
 // Query executes a compiled query and returns the nested GraphQL response.
 //
@@ -110,11 +156,18 @@ type PoolOption func(*pgxpool.Config)
 // OpenReadOnly opens a pool whose every session starts with
 // default_transaction_read_only=on, and pings it.
 //
-// The compiler emits nothing but a SELECT over GRAPH_TABLE, so there is no
-// write path to begin with; this is the second belt (SPEC.md §3, design D4): a
-// statement that somehow tried to write would be refused by the database
-// itself. It is also why a read-only database role is recommended rather than
-// required.
+// This is the second belt (SPEC.md §3, design D4): a statement that tried to
+// write through this pool is refused by the database itself. It is also why a
+// read-only database role is recommended rather than required.
+//
+// The first belt used to be stated as "the compiler emits nothing but a SELECT
+// over GRAPH_TABLE, so there is no write path to begin with". That reason is no
+// longer true: a `@function` mutation compiles to a plain function call, which
+// can write. What is still true — and is what the belt now rests on — is that
+// gopgql never opens a pool that could run it. This is the only pool gopgql
+// opens, and it is this one; a call goes through a [Handle] the caller supplies.
+// A `@function` attempted on a pool from here fails with SQLSTATE 25006, which
+// is the belt doing its job rather than a bug.
 //
 // The ping means an unreachable database is reported when the process starts,
 // not on every call it would otherwise fail.

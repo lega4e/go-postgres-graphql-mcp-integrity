@@ -67,7 +67,11 @@ func (s *Server) Query(ctx context.Context, query string, vars map[string]any, f
 	}
 	op := doc.Operations[0]
 	if op.Operation != ast.Query {
-		return "", fmt.Errorf("gopgql/mcp: only query operations are supported (the mapped graph is read-only)")
+		// Not because a mutation cannot be compiled — it can, since M11 — but
+		// because running one needs a connection the caller owns and this
+		// server has only the read-only pool it opened itself (see the package
+		// doc).
+		return "", fmt.Errorf("gopgql/mcp: only query operations are supported by this server")
 	}
 
 	if isIntrospection(op.SelectionSet, doc.Fragments) {
