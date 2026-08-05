@@ -32,34 +32,38 @@ func QualifiedName(schemaName, table string) string {
 	return pgident.Quote(schemaName) + "." + pgident.Quote(table)
 }
 
-// SplitKey is the inverse of QualifiedKey: it reads a key back into the schema
-// and table it was built from.
+// keySep separates a key's two halves. It is NUL because PostgreSQL permits
+// every other byte inside a quoted identifier — a table really can be called
+// `a.b` — and a separator an identifier could contain would make "a.b"
+// indistinguishable from table "b" in schema "a".
 //
-// It rests on a precondition the SDL enforces — no table or schema name contains
-// a dot (sdl.validateUnmanaged) — because without it "a.b" would be
-// indistinguishable from a table "b" in schema "a". That guard is the price of
-// keying by a string, and it buys a key that is exactly what the DDL reader
-// hands back, quotes already removed.
-func SplitKey(key string) (schemaName, table string) {
-	if before, after, found := strings.Cut(key, "."); found {
-		return before, after
-	}
-	return "", key
-}
+// Using a byte no identifier can hold is what lets gopgql key by a plain string
+// without also inventing a restriction on what a table may be called. A key is
+// therefore never displayed: QualifiedName renders identifiers for DDL, and
+// SplitKey recovers the parts for anything that needs to say them.
+const keySep = "\x00"
 
-// QualifiedKey is the unquoted form of the same identifier, used as the key
-// under which the differ and the fold hold a table.
+// QualifiedKey is the unquoted form of a table's identifier, used as the key
+// under which the differ and the fold hold it.
 //
-// The two are separate because a *key* must be exactly what the parser reads
-// back out of a statement, quotes already removed, while the DDL form has to
-// carry the quotes. Keying by the bare name instead would let two tables of the
-// same name in different schemas silently share one entry, and the differ would
-// then propose columns from one onto the other.
+// It is separate from QualifiedName because a *key* must be exactly what the
+// DDL reader hands back — quotes already removed — while the DDL form has to
+// carry the quotes. Keying by the bare name instead would let two tables of one
+// name in different schemas silently share an entry, and the differ would then
+// propose one table's columns onto the other.
 func QualifiedKey(schemaName, table string) string {
 	if schemaName == "" {
 		return table
 	}
-	return schemaName + "." + table
+	return schemaName + keySep + table
+}
+
+// SplitKey is the inverse of QualifiedKey.
+func SplitKey(key string) (schemaName, table string) {
+	if before, after, found := strings.Cut(key, keySep); found {
+		return before, after
+	}
+	return "", key
 }
 
 // Column is a single column of a vertex or edge table.

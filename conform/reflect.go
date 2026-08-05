@@ -177,7 +177,8 @@ func graphOID(ctx context.Context, db exec.Querier, graphName string) (uint32, e
 // produces a row: a label that lost all of its properties out of band is drift
 // worth reporting, and an INNER JOIN would silently drop the element instead.
 const labelsSQL = `
-SELECT (n.nspname || '.' || c.relname)::text AS table_name,
+SELECT n.nspname::text AS schema_name,
+       c.relname::text AS table_name,
        l.pgllabel::text AS label,
        COALESCE(
            array_agg(p.pgpname::text ORDER BY p.pgpname)
@@ -204,12 +205,16 @@ func reflectLabels(ctx context.Context, db exec.Querier, graphID uint32) (map[st
 
 	out := make(map[string][]schema.LabelProperties)
 	for rows.Next() {
-		var table string
+		var schemaName, table string
 		var lp schema.LabelProperties
-		if err := rows.Scan(&table, &lp.Label, &lp.Properties); err != nil {
+		if err := rows.Scan(&schemaName, &table, &lp.Label, &lp.Properties); err != nil {
 			return nil, fmt.Errorf("conform: read graph labels: %w", err)
 		}
-		out[table] = append(out[table], lp)
+		// The key is built here rather than concatenated in SQL, so it is
+		// exactly what schema.QualifiedKey produces. A key assembled by the
+		// database would have to encode the separator the same way, and the two
+		// would silently stop matching the moment the encoding changed.
+		out[schema.QualifiedKey(schemaName, table)] = append(out[schema.QualifiedKey(schemaName, table)], lp)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("conform: read graph labels: %w", err)

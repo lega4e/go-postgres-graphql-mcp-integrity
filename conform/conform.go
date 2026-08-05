@@ -230,7 +230,7 @@ func align(want, got map[string]elementView) map[string]elementView {
 	out := make(map[string]elementView, len(got))
 	for key, el := range got {
 		if _, qualified := want[key]; !qualified {
-			if _, bare, dotted := strings.Cut(key, "."); dotted {
+			if schemaName, bare := schema.SplitKey(key); schemaName != "" {
 				if _, unqualified := want[bare]; unqualified {
 					key = bare
 				}

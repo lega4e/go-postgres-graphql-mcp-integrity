@@ -184,9 +184,9 @@ type FindPersonPerson struct {
 	Nickname *string
 }
 
-const findPersonSQL = "SELECT v0_k, v0_c0, v0_c1\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person)\n  WHERE v0.name = $1\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1)\n)"
+const findPersonSQL = "SELECT v0_k, v0_c0, v0_c1\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person)\n  WHERE v0.name = $1\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1)\n)\nORDER BY v0_k"
 
-var findPersonProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumn: "v0_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", TypeName: "String", NonNull: true, List: false}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", TypeName: "String", NonNull: false, List: false}}}}
+var findPersonProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumn: "v0_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarString}}}}
 
 // FindPerson runs the FindPerson operation through the handle the caller supplies.
 func (c *Client) FindPerson(ctx context.Context, h exec.Handle, in FindPersonInput) ([]FindPersonPerson, error) {
@@ -268,9 +268,9 @@ type ListPeoplePersonFollows struct {
 	Name string
 }
 
-const listPeopleSQL = "SELECT v0_k, v0_c0, v0_c1, v1_k, v1_c0\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)\n  WHERE v0.id <> v1.id\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1, v1.id AS v1_k, v1.name AS v1_c0)\n)"
+const listPeopleSQL = "SELECT v0_k, v0_c0, v0_c1, v1_k, v1_c0\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)\n  WHERE v0.id <> v1.id\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1, v1.id AS v1_k, v1.name AS v1_c0)\n)\nORDER BY v0_k, v1_k"
 
-var listPeopleProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumn: "v0_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", TypeName: "String", NonNull: true, List: false}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", TypeName: "String", NonNull: false, List: false}}, Children: []*compiler.Selection{&compiler.Selection{ResponseKey: "follows", TypeName: "Person", Alias: "v1", KeyColumn: "v1_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0", TypeName: "String", NonNull: true, List: false}}}}}}
+var listPeopleProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumn: "v0_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarString}}, Children: []*compiler.Selection{&compiler.Selection{ResponseKey: "follows", TypeName: "Person", Alias: "v1", KeyColumn: "v1_k", Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}}}}}}
 
 // ListPeople runs the ListPeople operation through the handle the caller supplies.
 func (c *Client) ListPeople(ctx context.Context, h exec.Handle, in ListPeopleInput) ([]ListPeoplePerson, error) {

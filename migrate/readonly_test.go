@@ -201,7 +201,9 @@ func TestQualifiedNameRoundTripsThroughTheFold(t *testing.T) {
 	}
 	require.NotNil(t, stream, "the graph names the table, so the fold must find it")
 	assert.Equal(t, "dbos", stream.Schema)
-	assert.Equal(t, "dbos.streams", stream.Key())
+	assert.Equal(t, schema.QualifiedKey("dbos", "streams"), stream.Key())
+	assert.Equal(t, "dbos.streams", stream.QualifiedName(),
+		"the key is an internal encoding; the identifier is what gets emitted")
 	assert.Empty(t, stream.Columns,
 		"nothing in this history creates it, so the fold knows no columns for it — which is correct")
 }

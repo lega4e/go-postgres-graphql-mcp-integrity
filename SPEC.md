@@ -554,13 +554,15 @@ Under that definition it holds *by construction*: the SQL-side path decodes the 
 
 **Exit:** a second schema and its tables applied by a hand-written init script; gopgql generates over them; `goose up`; a compiled query returns the seeded rows, including a column named `offset`. **The M12 fixture table carries an `id`** — the compiler still projects `id` at every level until M13, so M12 proves DDL suppression and schema qualification and deliberately does *not* yet demonstrate the `dbos.*` case.
 
+A `@readonly` type over a table with **no `id` column at all** is therefore refused at generate time, naming the type — *"type Step must declare a surrogate key field `id: ID!`"* — and no migration is written. That refusal is deliberate: without M13 the alternative is a `CREATE PROPERTY GRAPH` naming a column that does not exist, which passes generation and fails only when the migration is applied.
+
 ### M13 — Identity without a surrogate key *(not implemented)*
 
 - A declared `@key(fields:)` becomes the vertex identity for an unmanaged type, resolving §9's third open decision **for the read path over tables gopgql does not own** and leaving it open for tables it does.
 - `compiler.Selection.KeyColumn` widens to `KeyColumns` — exported, and consumed by `shape`, `playground` and `cmd/wasm`, so `apiVersion` moves with it. The isomorphism guard becomes a NULL-safe disjunction of `IS DISTINCT FROM`, and `shape`'s parent dedup gains a delimiter-safe tuple encoding.
 - `@relationship(sourceKey:, destKey:)` maps an edge onto an existing table, which is what lets one table serve as both a vertex element and an edge element — narrowing §5.3 invariant 4 — and `EdgeTable`'s key fields widen to lists.
 
-It lands **after gopgql#10 (M8)**, or rebases onto it: #10 rewrites `shape`, and this touches the same grouping code. Until it does, an unmanaged type still needs the surrogate `id: ID!`, and a relationship touching one is refused rather than mis-generated.
+It was sequenced **after gopgql#10 (M8)**, which rewrites `shape` and touches the same grouping code; #10 has since merged, so the ordering constraint is discharged. Until M13 itself lands, an unmanaged type still needs the surrogate `id: ID!` — so a table that has none is refused at generate time (see M12) — and a relationship touching one is refused rather than mis-generated.
 
 **Exit:** a vertex over an externally-owned table with a two-column key and **no `id`** is matched and deduplicated correctly across a fan-out; a NULL in a key column does not silently drop rows; a traversal runs over an edge declared on an existing table; one table serves as both vertex and edge.
 

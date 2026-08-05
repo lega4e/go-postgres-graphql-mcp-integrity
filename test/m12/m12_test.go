@@ -66,10 +66,13 @@ CREATE TABLE dbos.streams (
     payload  jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-INSERT INTO dbos.streams (topic, "offset", payload) VALUES
-    ('orders', 1, '{"kind":"created"}'),
-    ('orders', 2, '{"kind":"paid"}'),
-    ('audit',  7, '{"kind":"login"}');
+-- The ids are explicit and ordered, not gen_random_uuid(): a compiled query
+-- orders by each level's key (SPEC.md §7 → M8), so a random id would make the
+-- expected row order genuinely nondeterministic and the assertion flaky.
+INSERT INTO dbos.streams (id, topic, "offset", payload) VALUES
+    ('00000000-0000-0000-0000-000000000001', 'orders', 1, '{"kind":"created"}'),
+    ('00000000-0000-0000-0000-000000000002', 'orders', 2, '{"kind":"paid"}'),
+    ('00000000-0000-0000-0000-000000000003', 'audit',  7, '{"kind":"login"}');
 `
 
 // TestFeatures is the godog entry point under `go test`. It always runs against

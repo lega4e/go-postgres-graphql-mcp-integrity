@@ -1,9 +1,6 @@
 package sdl
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 // @readonly and schema qualification, and the boundary between what they
 // deliver and what they do not (SPEC.md §7 → M12).
@@ -45,13 +42,6 @@ import (
 
 // validateUnmanaged enforces the boundary above for one type.
 func (d *Document) validateUnmanaged(n *Node) error {
-	if strings.Contains(n.Table, ".") || strings.Contains(n.Schema, ".") {
-		// A dot inside a name would make the qualified identifier ambiguous
-		// everywhere it is read back — a table "a.b" and a table "b" in schema
-		// "a" would be indistinguishable to the fold.
-		return fmt.Errorf("sdl: %s maps to %s, and a table or schema name may not contain a dot: "+
-			"the qualified identifier could not be read back unambiguously", n.TypeName, qualified(n))
-	}
 	for _, f := range n.Fields {
 		if f.Rel == nil {
 			continue
@@ -76,12 +66,4 @@ func (d *Document) validateUnmanaged(n *Node) error {
 		}
 	}
 	return nil
-}
-
-// qualified renders a node's table as it appears in DDL, for an error message.
-func qualified(n *Node) string {
-	if n.Schema == "" {
-		return n.Table
-	}
-	return n.Schema + "." + n.Table
 }
