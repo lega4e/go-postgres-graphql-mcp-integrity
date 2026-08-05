@@ -198,6 +198,13 @@ func collect(sources []Source) ([]operation, error) {
 		if gqlErr != nil {
 			return nil, fmt.Errorf("client: parse %s: %w", src.Path, gqlErr)
 		}
+		// gqlparser counts positions in *runes* (ast.Position.Start is documented
+		// as such and the lexer fills it from its rune counter), so the document
+		// is sliced as runes too. Indexing the string with a rune offset is right
+		// only while every character is one byte, which is why an em dash in a
+		// leading comment shifted every operation two bytes and the compiler was
+		// handed the tail of the comment.
+		runes := []rune(src.Content)
 		for i, op := range doc.Operations {
 			if op.Name == "" {
 				return nil, fmt.Errorf("client: %s declares an anonymous operation; "+
@@ -215,14 +222,14 @@ func collect(sources []Source) ([]operation, error) {
 			// beats re-printing the AST, which would be a second GraphQL
 			// grammar to keep in step with gqlparser's, and it beats counting
 			// braces, which a string argument containing one would defeat.
-			end := len(src.Content)
+			end := len(runes)
 			if i+1 < len(doc.Operations) && doc.Operations[i+1].Position != nil {
 				end = doc.Operations[i+1].Position.Start
 			}
 			out = append(out, operation{
 				Name:   op.Name,
 				Path:   src.Path,
-				Source: slice(src.Content, op, end),
+				Source: slice(runes, op, end),
 				Op:     op,
 			})
 		}
@@ -230,16 +237,16 @@ func collect(sources []Source) ([]operation, error) {
 	return out, nil
 }
 
-// slice returns content[op.start:end], or the whole document when gqlparser
-// recorded no position (which it always does; the guard keeps a nil from
-// becoming a panic).
-func slice(content string, op *ast.OperationDefinition, end int) string {
+// slice returns content[op.start:end] in rune offsets, or the whole document
+// when gqlparser recorded no position (which it always does; the guard keeps a
+// nil from becoming a panic).
+func slice(content []rune, op *ast.OperationDefinition, end int) string {
 	if op.Position == nil {
-		return content
+		return string(content)
 	}
 	start := op.Position.Start
 	if start < 0 || start > len(content) || end < start || end > len(content) {
-		return content
+		return string(content)
 	}
-	return content[start:end]
+	return string(content[start:end])
 }

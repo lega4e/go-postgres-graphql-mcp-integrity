@@ -206,6 +206,54 @@ func TestParsePropertyGraph(t *testing.T) {
 	}
 }
 
+// An edge element whose table name is already taken carries "AS <alias>". The
+// emitter has written it since M13; the reader rejected it with `expected
+// "SOURCE KEY", got "AS"`, which made a second generation into the same
+// directory exit 1. The reader has to take back every clause the emitter
+// writes, so the alias is parsed here and asserted alongside the rest of the
+// entry — an alias read and then dropped would leave the same round trip open.
+func TestParsePropertyGraphEdgeAlias(t *testing.T) {
+	src := `CREATE PROPERTY GRAPH app_graph
+	  VERTEX TABLES (
+	    dbos.operation_outputs KEY (workflow_uuid, function_id)
+	            LABEL step PROPERTIES (workflow_uuid, function_id)
+	  )
+	  EDGE TABLES (
+	    dbos.operation_outputs AS "HAS_STEP" SOURCE KEY (workflow_uuid) REFERENCES workflows (workflow_uuid)
+	            DESTINATION KEY (workflow_uuid, function_id) REFERENCES operation_outputs (workflow_uuid, function_id)
+	            LABEL "HAS_STEP" PROPERTIES (workflow_uuid, function_id),
+	    dbos.operation_outputs AS "SPAWNED" SOURCE KEY (workflow_uuid, function_id) REFERENCES operation_outputs (workflow_uuid, function_id)
+	            DESTINATION KEY (child_workflow_uuid) REFERENCES workflows (workflow_uuid)
+	            LABEL "SPAWNED" PROPERTIES (workflow_uuid, function_id, child_workflow_uuid)
+	  )`
+	g := parseOne(t, src).(*CreatePropertyGraphStmt)
+
+	require.Len(t, g.Edges, 2, "two labels over one table are two edge entries")
+	assert.Equal(t, []EdgeTableDef{{
+		Table: "operation_outputs", Schema: "dbos", Alias: "HAS_STEP", Label: "HAS_STEP",
+		SourceKey: []string{"workflow_uuid"}, SourceTable: "workflows", SourceRef: []string{"workflow_uuid"},
+		DestKey:   []string{"workflow_uuid", "function_id"},
+		DestTable: "operation_outputs", DestRef: []string{"workflow_uuid", "function_id"},
+		Properties: []string{"workflow_uuid", "function_id"},
+	}, {
+		Table: "operation_outputs", Schema: "dbos", Alias: "SPAWNED", Label: "SPAWNED",
+		SourceKey:   []string{"workflow_uuid", "function_id"},
+		SourceTable: "operation_outputs", SourceRef: []string{"workflow_uuid", "function_id"},
+		DestKey:   []string{"child_workflow_uuid"},
+		DestTable: "workflows", DestRef: []string{"workflow_uuid"},
+		Properties: []string{"workflow_uuid", "function_id", "child_workflow_uuid"},
+	}}, g.Edges)
+
+	// An edge with no contested name still parses to an empty alias, so the
+	// clause stays optional.
+	plain := parseOne(t, `CREATE PROPERTY GRAPH g VERTEX TABLES ( t LABEL l PROPERTIES (id) )
+	  EDGE TABLES (
+	    e SOURCE KEY (a) REFERENCES t (id) DESTINATION KEY (b) REFERENCES t (id)
+	      LABEL e PROPERTIES (a, b)
+	  )`).(*CreatePropertyGraphStmt)
+	assert.Empty(t, plain.Edges[0].Alias)
+}
+
 func TestParsePropertyGraphVertexOnly(t *testing.T) {
 	g := parseOne(t, `CREATE PROPERTY GRAPH g VERTEX TABLES ( t LABEL l PROPERTIES (id) )`).(*CreatePropertyGraphStmt)
 	if len(g.Vertices) != 1 || len(g.Edges) != 0 {

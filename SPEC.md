@@ -329,6 +329,16 @@ CREATE PROPERTY GRAPH app_graph
 
 Note `@hasInverse` pairs the two fields onto **one** physical edge table.
 
+The unit gopgql keeps one of is the relationship **label**, not the table. For an
+edge table gopgql creates the two coincide — its name is the label — but an edge
+mapped onto an existing table with `@relationship(table:, sourceKey:, destKey:)`
+is named independently of it, and one such table may carry several labels: a row
+of `dbos.operation_outputs` is the step a workflow `HAS_STEP`, and, when that
+step started a child, the `SPAWNED` edge to it. Each label is its own graph
+element. Two labels asking gopgql to *create* the same table is refused instead —
+one CREATE TABLE per table, so two labels can share one only where it exists
+already.
+
 ### 5.3 Generator invariants
 
 The generator must guarantee, and the test suite must assert:
@@ -336,7 +346,7 @@ The generator must guarantee, and the test suite must assert:
 1. Every `KEY` / `SOURCE KEY` / `DESTINATION KEY` column also appears in that element’s `PROPERTIES` list.
 1. Every edge table **gopgql generates** has an index on its destination key column. gopgql emits no `CREATE INDEX` on a table it does not own, so an unmanaged edge's destination index belongs to the schema's owner.
 1. Labels and identifiers colliding with SQL keywords are double-quoted.
-1. Element **aliases** are unique within a graph, and an alias is an unqualified name. Distinct elements may share a *table* — that is how an externally-owned join table is both a vertex and an edge (M13) — and the edge then carries an explicit `AS` alias. Two tables of one name in two schemas are two tables but collide as elements, which is the same rule seen from the other side.
+1. Element **aliases** are unique within a graph, and an alias is an unqualified name. Distinct elements may share a *table* — that is how an externally-owned join table is both a vertex and an edge, and how one join table carries two relationship labels (M13) — and every edge whose bare table name is contested then carries an explicit `AS` alias, which is its label. Two tables of one name in two schemas are two tables but collide as elements, which is the same rule seen from the other side. Two *vertex* elements over one table stays refused, as does one table two labels ask gopgql to **create**.
 1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed. (Reached in M4; interface fields carry identical names and types across implementors by GraphQL's own rules, so no rename is needed for that case.)
 
 -----
@@ -570,6 +580,8 @@ It was sequenced **after gopgql#10 (M8)**, which rewrites `shape` and touches th
 - Every element alias in a graph must be unique, and an alias is a bare name. A table serving as both a vertex element and an edge element therefore needs an explicit `AS` on the edge, which gopgql emits using the relationship's label.
 
 **Exit:** a vertex over an externally-owned table with a two-column key and **no `id`** is matched and deduplicated correctly across a fan-out; a NULL in a key column does not silently drop rows; a traversal runs over an edge declared on an existing table; one table serves as both vertex and edge.
+
+**Amended after v0.2.0 (gopgql#49).** The exit above was met for **one label per table** and read as if it covered more. Three defects survived it, and the exit criterion now names them: two `@relationship` labels mapped onto **one** existing table both reach `CREATE PROPERTY GRAPH` and both resolve in a `MATCH`; two same-named tables in **two schemas** are two edges; and a second `gopgql generate` into the same directory is a no-op, which requires the migration reader to accept every clause the emitter writes — the edge `AS <alias>`, and the vertex `KEY (…)` of a table that has no `CREATE TABLE` to carry a `UNIQUE` constraint. A silent drop that still exits 0 is not caught by an exit-status check, so these are asserted on the emitted DDL as well as in the catalog.
 
 ### M14 — The generated Go client, and determinism
 

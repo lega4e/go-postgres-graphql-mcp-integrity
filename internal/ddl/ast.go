@@ -193,7 +193,13 @@ type EdgeTableDef struct {
 	Table string
 	// Schema, SourceSchema and DestSchema qualify Table, SourceTable and
 	// DestTable respectively, each "" for an unqualified name.
-	Schema       string
+	Schema string
+	// Alias is the "AS <alias>" clause an edge entry carries when its table name
+	// is already taken by another element, or "" when the table's own name
+	// serves. An element alias is what the graph knows the edge by, so losing it
+	// on the way back in would fold a migration into a model that renders
+	// different DDL from the one that produced it.
+	Alias        string
 	Label        string
 	SourceKey    []string
 	SourceSchema string
