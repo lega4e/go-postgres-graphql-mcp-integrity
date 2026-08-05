@@ -137,6 +137,39 @@ type Person @node(label: "person") {
 	assert.Contains(t, err.Error(), "already exists")
 }
 
+// TestNothingTheSDLDeclaredIsDropped is the class-closing check, asserted by
+// building the model with an element removed behind Build's back.
+//
+// The specific bug — a dedup key that lost a label — is covered above. What this
+// covers is the shape of it: anything gopgql emits that names a graph element
+// the graph does not contain is invisible until PostgreSQL rejects the MATCH in
+// the consumer's process. Build re-derives the element set from the SDL and
+// refuses to return a model that is short one, whatever dropped it.
+func TestNothingTheSDLDeclaredIsDropped(t *testing.T) {
+	doc, err := sdl.Parse(twoLabelsSDL)
+	require.NoError(t, err)
+	m, err := Build(doc, "")
+	require.NoError(t, err)
+	require.Len(t, m.EdgeTables, 2)
+
+	// Drop an edge the way the collapse did — from the model, leaving the SDL
+	// saying it exists — and the check has to name it.
+	short := *m
+	short.EdgeTables = m.EdgeTables[:1]
+	err = validateNothingDropped(&short, doc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `relationship "SPAWNED"`)
+	assert.Contains(t, err.Error(), "dbos.operation_outputs")
+	assert.Contains(t, err.Error(), "fails at query time, not here")
+
+	// The same for a vertex label.
+	noVertex := *m
+	noVertex.VertexTables = m.VertexTables[:1]
+	err = validateNothingDropped(&noVertex, doc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "which reached no vertex element")
+}
+
 // The alias exists to keep element names unique, so an edge only carries one
 // where its bare table name is actually contested. A schema whose edges each
 // have a table to themselves emits exactly what it did before M13.

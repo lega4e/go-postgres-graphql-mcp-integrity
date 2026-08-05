@@ -83,7 +83,60 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 	if err := validateInvariants(m); err != nil {
 		return nil, err
 	}
+	if err := validateNothingDropped(m, doc); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// validateNothingDropped re-counts the graph elements straight off the SDL and
+// requires every one of them to be in the built model.
+//
+// It is a second, independent enumeration of the same thing collectEdges and the
+// vertex loop produce, which is the entire point: it shares no code with them,
+// so a mapping that loses an element for *any* reason is caught here rather than
+// leaving the model quietly short.
+//
+// This closes a class rather than a case. gopgql#49 was one label silently
+// dropped from CREATE PROPERTY GRAPH with exit status 0; the compiler then
+// emitted a MATCH naming it, and the first thing that knew was PostgreSQL, at
+// query time, in the consumer's process — `label "HAS_STEP" does not exist in
+// property graph "app_graph"`. Anything gopgql generates that names a graph
+// element the graph does not contain has that same shape, so the check is on
+// what the SDL declared against what the model holds, not on the specific way
+// the key went wrong.
+func validateNothingDropped(m *schema.Schema, doc *sdl.Document) error {
+	vertices := map[string]bool{}
+	for _, vt := range m.VertexTables {
+		vertices[vt.Label] = true
+	}
+	edges := map[string]bool{}
+	for _, e := range m.EdgeTables {
+		edges[schema.QualifiedKey(e.Schema, e.Name)+"\x00"+e.Label] = true
+	}
+
+	for _, n := range doc.Nodes {
+		if !vertices[n.Label] {
+			return fmt.Errorf("generator: type %s declares the label %q, which reached no vertex element; "+
+				"a label the SDL declares and the graph does not hold fails at query time, not here",
+				n.TypeName, n.Label)
+		}
+		for _, f := range n.Fields {
+			if f.Rel == nil {
+				continue
+			}
+			table := f.Rel.Table
+			if table == "" {
+				table = f.Rel.Type
+			}
+			if !edges[schema.QualifiedKey(f.Rel.Schema, table)+"\x00"+f.Rel.Type] {
+				return fmt.Errorf("generator: %s.%s declares the relationship %q on %s, which reached no edge "+
+					"element; a label the SDL declares and the graph does not hold fails at query time, not here",
+					n.TypeName, f.Name, f.Rel.Type, schema.QualifiedName(f.Rel.Schema, table))
+			}
+		}
+	}
+	return nil
 }
 
 func buildVertex(n *sdl.Node) (schema.VertexTable, error) {

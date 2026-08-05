@@ -375,6 +375,10 @@ package.
 gopgql generate client --sdl schema.graphql --operations ops/ --out internal/gen
 ```
 
+If you generated the migrations with `--graph`, pass the **same** name here —
+the compiled SQL names the graph, and a mismatch is only discovered at query
+time. See the [CLI reference](#cli-reference).
+
 ```go
 func (c *Client) AppendEvent(ctx context.Context, h exec.Handle, in AppendEventInput) error
 func (c *Client) ListPeople(ctx context.Context, h exec.Handle, in ListPeopleInput) ([]ListPeoplePerson, error)
@@ -476,6 +480,8 @@ underneath it do.
 ```
 gopgql generate --sdl <file> --dir <dir> [--name <suffix>] [--graph <name>]
                 [--no-tables] [--no-graph]
+gopgql generate client --sdl <file> --operations <dir> --out <dir>
+                [--package <name>] [--graph <name>]
 gopgql migrate  --dsn <url> [--sdl <file>] [--dir <dir>] [--name <suffix>] [--graph <name>]
                 [--no-tables] [--no-graph]
 gopgql conform  --sdl <file> --dsn <url> [--graph <name>]
@@ -485,6 +491,16 @@ gopgql version
 `--sdl`, `--dsn` and `--dir` fall back to `GOPGQL_SDL`, `GOPGQL_DSN` and
 `GOPGQL_MIGRATIONS`; a flag wins over the environment. `--dir` defaults to
 `migrations`.
+
+**`--graph` has to match across commands.** It names the property graph, and it
+defaults to `app_graph` everywhere it appears. `generate` bakes that name into
+`CREATE PROPERTY GRAPH`; `generate client` bakes it into every `GRAPH_TABLE` it
+compiles. Give it to one and not the other and nothing complains — the client
+compiles cleanly against a graph that does not exist, and the first thing to
+notice is PostgreSQL, at query time, in your process. Neither command can see
+the other's output, so pass the same `--graph` to both (or to neither) and check
+it with `gopgql conform`, which compares the SDL against the graph a live
+database actually holds.
 
 `--no-tables` generates the property graph over tables someone else owns —
 gopgql then never reads, diffs or emits anything about a table, so absence from
