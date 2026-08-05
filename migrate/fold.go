@@ -622,6 +622,17 @@ func (f *folder) build() (*schema.Schema, error) {
 		if err := f.attachConstraints(&vt); err != nil {
 			return nil, err
 		}
+		// A natural key normally comes back off the named UNIQUE constraint in the
+		// table's CREATE TABLE. A table gopgql does not own has none in this
+		// history — it emits no DDL for it at all — so for those the graph's own
+		// KEY (...) clause is the only record of the key, and dropping it folds
+		// the migration into a model that re-proposes the graph it just wrote.
+		if vt.NaturalKey == nil && len(v.Key) > 0 && len(cols) == 0 {
+			vt.NaturalKey = &schema.NaturalKey{
+				Name:    schema.NaturalKeyConstraintName(vt.Name),
+				Columns: append([]string(nil), v.Key...),
+			}
+		}
 		m.VertexTables = append(m.VertexTables, vt)
 	}
 	for _, e := range f.graph.Edges {
@@ -629,6 +640,7 @@ func (f *folder) build() (*schema.Schema, error) {
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
 			Name:         e.Table,
 			Schema:       e.Schema,
+			Alias:        e.Alias,
 			Label:        e.Label,
 			Columns:      cols,
 			SourceKey:    e.SourceKey,

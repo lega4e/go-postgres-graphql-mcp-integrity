@@ -83,7 +83,60 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 	if err := validateInvariants(m); err != nil {
 		return nil, err
 	}
+	if err := validateNothingDropped(m, doc); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// validateNothingDropped re-counts the graph elements straight off the SDL and
+// requires every one of them to be in the built model.
+//
+// It is a second, independent enumeration of the same thing collectEdges and the
+// vertex loop produce, which is the entire point: it shares no code with them,
+// so a mapping that loses an element for *any* reason is caught here rather than
+// leaving the model quietly short.
+//
+// This closes a class rather than a case. gopgql#49 was one label silently
+// dropped from CREATE PROPERTY GRAPH with exit status 0; the compiler then
+// emitted a MATCH naming it, and the first thing that knew was PostgreSQL, at
+// query time, in the consumer's process — `label "HAS_STEP" does not exist in
+// property graph "app_graph"`. Anything gopgql generates that names a graph
+// element the graph does not contain has that same shape, so the check is on
+// what the SDL declared against what the model holds, not on the specific way
+// the key went wrong.
+func validateNothingDropped(m *schema.Schema, doc *sdl.Document) error {
+	vertices := map[string]bool{}
+	for _, vt := range m.VertexTables {
+		vertices[vt.Label] = true
+	}
+	edges := map[string]bool{}
+	for _, e := range m.EdgeTables {
+		edges[schema.QualifiedKey(e.Schema, e.Name)+"\x00"+e.Label] = true
+	}
+
+	for _, n := range doc.Nodes {
+		if !vertices[n.Label] {
+			return fmt.Errorf("generator: type %s declares the label %q, which reached no vertex element; "+
+				"a label the SDL declares and the graph does not hold fails at query time, not here",
+				n.TypeName, n.Label)
+		}
+		for _, f := range n.Fields {
+			if f.Rel == nil {
+				continue
+			}
+			table := f.Rel.Table
+			if table == "" {
+				table = f.Rel.Type
+			}
+			if !edges[schema.QualifiedKey(f.Rel.Schema, table)+"\x00"+f.Rel.Type] {
+				return fmt.Errorf("generator: %s.%s declares the relationship %q on %s, which reached no edge "+
+					"element; a label the SDL declares and the graph does not hold fails at query time, not here",
+					n.TypeName, f.Name, f.Rel.Type, schema.QualifiedName(f.Rel.Schema, table))
+			}
+		}
+	}
+	return nil
 }
 
 func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
@@ -241,26 +294,30 @@ func attachInterfaceLabels(m *schema.Schema, doc *sdl.Document) error {
 	return nil
 }
 
-// collectEdges builds one physical edge table per relationship label. An OUT
-// field and its @hasInverse IN partner map to the same table (SPEC.md §5.2), so
-// OUT fields are processed first and IN fields only contribute a table when no
-// OUT field already produced it.
-// aliasEdges gives an edge element an explicit alias wherever its table is also
-// a vertex element. The alias is the edge's label, which is the name a reader
-// already associates with that traversal; a label that would itself collide is
-// reported by invariant 4 rather than silently suffixed.
+// aliasEdges gives an edge element an explicit alias wherever its bare table
+// name is already claimed — by a vertex element over the same table, or by
+// another edge label over it. The alias is the edge's label, which is the name a
+// reader already associates with that traversal; a label that would itself
+// collide is reported by invariant 4 rather than silently suffixed.
 func aliasEdges(m *schema.Schema) {
-	vertices := map[string]bool{}
+	claims := map[string]int{}
 	for _, vt := range m.VertexTables {
-		vertices[vt.ElementAlias()] = true
+		claims[vt.ElementAlias()]++
+	}
+	for _, e := range m.EdgeTables {
+		claims[e.Name]++
 	}
 	for i := range m.EdgeTables {
-		if vertices[m.EdgeTables[i].ElementAlias()] {
+		if claims[m.EdgeTables[i].Name] > 1 {
 			m.EdgeTables[i].Alias = m.EdgeTables[i].Label
 		}
 	}
 }
 
+// collectEdges builds one graph edge element per relationship label. An OUT
+// field and its @hasInverse IN partner map to the same table under the same
+// label (SPEC.md §5.2), so OUT fields are processed first and IN fields only
+// contribute an element when no OUT field already produced it.
 func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 	seen := map[string]bool{}
 	var edges []schema.EdgeTable
@@ -271,10 +328,21 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 		if table == "" {
 			table = f.Rel.Type
 		}
-		if seen[table] {
+		// One edge per relationship *label* on a table, not one per table. For a
+		// table gopgql creates the two coincide — its name is the label — but an
+		// edge mapped onto an existing table is named independently of it, and
+		// two labels over one join table is the ordinary shape: a row of
+		// dbos.operation_outputs is both the step a workflow HAS_STEP and, when
+		// it starts a child, the SPAWNED edge back out. Keying on the table alone
+		// dropped the second label silently, and which one survived depended on
+		// doc.Nodes order. The schema is part of the key for the same reason it
+		// is part of every other table identity here: two same-named tables in
+		// two schemas are two tables.
+		key := schema.QualifiedKey(f.Rel.Schema, table) + "\x00" + f.Rel.Type
+		if seen[key] {
 			return
 		}
-		seen[table] = true
+		seen[key] = true
 
 		src, dst := n, target
 		if f.Rel.Direction == sdl.In {
@@ -343,7 +411,20 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 			}
 		}
 	}
-	sort.SliceStable(edges, func(i, j int) bool { return edges[i].Name < edges[j].Name })
+	// Name first, so the emitted order is unchanged for every schema whose edges
+	// are one per table; schema and label break the tie a shared table creates,
+	// because leaving it to doc.Nodes order is what made the collapse look like a
+	// coin toss rather than a bug.
+	sort.SliceStable(edges, func(i, j int) bool {
+		a, b := edges[i], edges[j]
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Schema != b.Schema {
+			return a.Schema < b.Schema
+		}
+		return a.Label < b.Label
+	})
 	return edges
 }
 
@@ -655,6 +736,26 @@ func validateInvariants(m *schema.Schema) error {
 	// vertex and an edge needs the edge to carry an explicit alias. Both are
 	// checked here so the failure names the SDL rather than arriving as
 	// "alias used more than once as element table" from the server.
+	//
+	// Two labels over one table is legal only where gopgql does not own it. An
+	// edge table gopgql *creates* is created once, so two labels asking it to
+	// create the same table are two CREATE TABLEs for one name — refused here
+	// rather than at the database, which would report it as an unrelated
+	// duplicate-relation error halfway through a migration.
+	managed := map[string]string{}
+	for _, e := range m.EdgeTables {
+		if e.Unmanaged {
+			continue
+		}
+		if prev, dup := managed[e.Key()]; dup {
+			return fmt.Errorf("generator: the labels %q and %q both create the edge table %s; "+
+				"gopgql creates one table per label, so two labels can share a table only when it "+
+				"already exists — map it with @relationship(table:, sourceKey:, destKey:) (invariant 4)",
+				prev, e.Label, e.QualifiedName())
+		}
+		managed[e.Key()] = e.Label
+	}
+
 	aliases := map[string]string{}
 	claim := func(alias, what string) error {
 		if prev, dup := aliases[alias]; dup {

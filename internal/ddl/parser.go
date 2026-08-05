@@ -674,6 +674,16 @@ func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 	if e.Schema, e.Table, err = p.qualifiedIdent("edge table"); err != nil {
 		return e, err
 	}
+	// "AS <alias>" names the graph element when the table's own name is already
+	// claimed — by a vertex over the same table, or by a second edge label over
+	// it. The emitter writes it (schema.EdgeTable.ElementRef), so the reader has
+	// to take it back: a migration gopgql cannot re-read is a generation that
+	// cannot be run twice.
+	if p.acceptKeyword("AS") {
+		if e.Alias, err = p.ident("edge element alias"); err != nil {
+			return e, err
+		}
+	}
 	if e.SourceKey, e.SourceSchema, e.SourceTable, e.SourceRef, err = p.keyReference("SOURCE"); err != nil {
 		return e, err
 	}

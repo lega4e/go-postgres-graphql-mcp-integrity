@@ -72,9 +72,10 @@ CREATE TABLE dbos.workflows (
 );
 
 CREATE TABLE dbos.operation_outputs (
-    workflow_uuid uuid NOT NULL REFERENCES dbos.workflows (workflow_uuid),
-    function_id   integer NOT NULL,
-    output        text,
+    workflow_uuid       uuid NOT NULL REFERENCES dbos.workflows (workflow_uuid),
+    function_id         integer NOT NULL,
+    output              text,
+    child_workflow_uuid uuid REFERENCES dbos.workflows (workflow_uuid),
     PRIMARY KEY (workflow_uuid, function_id)
 );
 
@@ -90,10 +91,12 @@ INSERT INTO dbos.workflows (workflow_uuid, status) VALUES
     ('00000000-0000-0000-0000-00000000000a', 'done'),
     ('00000000-0000-0000-0000-00000000000b', 'running');
 
-INSERT INTO dbos.operation_outputs (workflow_uuid, function_id, output) VALUES
-    ('00000000-0000-0000-0000-00000000000a', 0, 's0'),
-    ('00000000-0000-0000-0000-00000000000a', 1, 's1'),
-    ('00000000-0000-0000-0000-00000000000b', 0, 't0');
+-- Step (a, 1) starts workflow b: the row is a step of one workflow and the edge
+-- to another at the same time, which is the two-labels-on-one-table shape.
+INSERT INTO dbos.operation_outputs (workflow_uuid, function_id, output, child_workflow_uuid) VALUES
+    ('00000000-0000-0000-0000-00000000000a', 0, 's0', NULL),
+    ('00000000-0000-0000-0000-00000000000a', 1, 's1', '00000000-0000-0000-0000-00000000000b'),
+    ('00000000-0000-0000-0000-00000000000b', 0, 't0', NULL);
 
 INSERT INTO dbos.streams (workflow_uuid, key, "offset", value) VALUES
     ('00000000-0000-0000-0000-00000000000a', 'a', 1, 'a1'),
@@ -192,6 +195,10 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	})
 
 	sc.Step(`^the schema "([^"]*)" already exists with its own tables and rows$`, st.installFixture)
+	sc.Step(`^the schemas "([^"]*)" and "([^"]*)" each already own a "([^"]*)" table$`, st.installTwinSchemas)
+	sc.Step(`^the property graph declares the edge labels "([^"]*)" on "([^"]*)"$`, st.assertEdgeLabels)
+	sc.Step(`^the graph has (\d+) edge elements? on "([^"]*)"$`, st.assertEdgeElementCount)
+	sc.Step(`^generating again writes no migration$`, st.assertGeneratingAgainIsANoOp)
 	sc.Step(`^the SDL:$`, st.theSDL)
 	sc.Step(`^I generate and apply the migrations$`, st.generateAndApply)
 	sc.Step(`^I compile and execute:$`, st.compileAndExecute)
@@ -211,6 +218,38 @@ func (st *scenarioState) installFixture(ctx context.Context, name string) error 
 		return fmt.Errorf("the fixture creates the schema %q, not %q", "dbos", name)
 	}
 	_, err := st.pool.Exec(ctx, fixtureSQL)
+	return err
+}
+
+// twinSchemaSQL is the second fixture: two schemas that independently own a
+// table of the same name. Element aliases are unqualified, so `alpha.links` and
+// `beta.links` are two tables that both want to be called `links` — the case
+// where keying an edge on its bare table name loses one of them.
+const twinSchemaSQL = `
+CREATE SCHEMA alpha;
+CREATE SCHEMA beta;
+
+CREATE TABLE alpha.alpha_nodes (alpha_id uuid PRIMARY KEY);
+CREATE TABLE alpha.links (
+    alpha_src uuid NOT NULL REFERENCES alpha.alpha_nodes (alpha_id),
+    alpha_dst uuid NOT NULL REFERENCES alpha.alpha_nodes (alpha_id),
+    PRIMARY KEY (alpha_src, alpha_dst)
+);
+
+CREATE TABLE beta.beta_nodes (beta_id uuid PRIMARY KEY);
+CREATE TABLE beta.links (
+    beta_src uuid NOT NULL REFERENCES beta.beta_nodes (beta_id),
+    beta_dst uuid NOT NULL REFERENCES beta.beta_nodes (beta_id),
+    PRIMARY KEY (beta_src, beta_dst)
+);
+`
+
+func (st *scenarioState) installTwinSchemas(ctx context.Context, first, second, table string) error {
+	if first != "alpha" || second != "beta" || table != "links" {
+		return fmt.Errorf("the fixture creates %q.%q and %q.%q, not %q.%q and %q.%q",
+			"alpha", "links", "beta", "links", first, table, second, table)
+	}
+	_, err := st.pool.Exec(ctx, twinSchemaSQL)
 	return err
 }
 
@@ -397,6 +436,95 @@ func (st *scenarioState) assertEdgeElement(ctx context.Context, qualified string
 	if !kinds["v"] || !kinds["e"] {
 		return fmt.Errorf("%s carries kinds %v; it must be both a vertex ('v') and an edge ('e')",
 			qualified, kinds)
+	}
+	return nil
+}
+
+// assertEdgeLabels reads the *emitted DDL* rather than the catalog, because the
+// failure this guards against was silent: the second label vanished from
+// CREATE PROPERTY GRAPH and generation still exited 0. A check that only ran
+// after a successful apply would have passed on the broken generator too — the
+// graph it wrote was valid, it was just missing an edge.
+func (st *scenarioState) assertEdgeLabels(want, qualified string) error {
+	graph := ""
+	for _, file := range st.generated {
+		if strings.Contains(file, "CREATE PROPERTY GRAPH") {
+			graph = file
+			break
+		}
+	}
+	if graph == "" {
+		return fmt.Errorf("no generated migration carries a CREATE PROPERTY GRAPH:\n%s",
+			strings.Join(st.generated, "\n"))
+	}
+	for _, label := range strings.Split(want, ", ") {
+		// The element is "<table> AS "<label>" SOURCE KEY …": both halves are
+		// asserted together so an edge on the *wrong* table cannot satisfy this.
+		element := fmt.Sprintf("%s AS %q SOURCE KEY", qualified, label)
+		if !strings.Contains(graph, element) {
+			return fmt.Errorf("the property graph declares no edge %q on %s; it reads:\n%s",
+				label, qualified, graph)
+		}
+		if !strings.Contains(graph, fmt.Sprintf("LABEL %q PROPERTIES", label)) {
+			return fmt.Errorf("the edge element %q on %s carries no LABEL clause:\n%s",
+				label, qualified, graph)
+		}
+	}
+	return nil
+}
+
+// assertEdgeElementCount is the catalog counterpart: PostgreSQL accepted the
+// graph and holds that many *edge* elements over the table. Together with
+// assertEdgeLabels it says the DDL named them and the server kept them.
+func (st *scenarioState) assertEdgeElementCount(ctx context.Context, want int, qualified string) error {
+	schemaName, table, found := strings.Cut(qualified, ".")
+	if !found {
+		return fmt.Errorf("%q is not a schema-qualified table name", qualified)
+	}
+	rows, err := exec.Rows(ctx, st.pool, `
+		SELECT e.pgealias::text AS alias
+		FROM pg_catalog.pg_propgraph_element e
+		JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND e.pgekind = 'e'
+		ORDER BY e.pgealias`, schemaName, table)
+	if err != nil {
+		return err
+	}
+	if len(rows) != want {
+		var aliases []string
+		for _, row := range rows {
+			a, _ := row["alias"].(string)
+			aliases = append(aliases, a)
+		}
+		return fmt.Errorf("%s carries %d edge elements %v, want %d", qualified, len(rows), aliases, want)
+	}
+	return nil
+}
+
+// assertGeneratingAgainIsANoOp is the idempotency gate. `go generate ./... &&
+// git diff --exit-code` is a CI step for every consumer of a generated
+// migration directory, and it cannot pass unless a second generation of an
+// unchanged schema writes nothing at all — which means the folder has to read
+// back every clause the emitter wrote, including the edge alias.
+func (st *scenarioState) assertGeneratingAgainIsANoOp() error {
+	before, err := os.ReadDir(st.dir)
+	if err != nil {
+		return err
+	}
+	paths, err := migrate.Generate(st.dir, st.model, "schema", migrate.Halves{})
+	if err != nil {
+		return fmt.Errorf("a second generation of an unchanged schema failed: %w", err)
+	}
+	if len(paths) > 0 {
+		return fmt.Errorf("a second generation of an unchanged schema wrote %v", paths)
+	}
+	after, err := os.ReadDir(st.dir)
+	if err != nil {
+		return err
+	}
+	if len(before) != len(after) {
+		return fmt.Errorf("the migration directory went from %d files to %d", len(before), len(after))
 	}
 	return nil
 }
