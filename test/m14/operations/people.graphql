@@ -1,0 +1,14 @@
+query ListPeople {
+  persons {
+    name
+    nickname
+    follows { name }
+  }
+}
+
+query FindPerson($name: String!) {
+  persons(name: $name) {
+    name
+    nickname
+  }
+}

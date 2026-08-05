@@ -180,8 +180,8 @@ func TestCheckReportsEdgeDrift(t *testing.T) {
 	edge := func(props ...string) schema.EdgeTable {
 		return schema.EdgeTable{
 			Name: "person_follows", Label: "follows",
-			SourceKey: "source_id", SourceTable: "person", SourceRef: "id",
-			DestKey: "target_id", DestTable: "person", DestRef: "id",
+			SourceKey: []string{"source_id"}, SourceTable: "person", SourceRef: []string{"id"},
+			DestKey: []string{"target_id"}, DestTable: "person", DestRef: []string{"id"},
 			Properties: props,
 		}
 	}

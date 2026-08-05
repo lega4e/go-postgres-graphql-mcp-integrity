@@ -8,10 +8,14 @@
 //   - query — compiles a GraphQL operation, executes it against the connected
 //     database, and returns the nested response.
 //
-// The server is read-only by construction: the compiler emits nothing but a
-// SELECT over GRAPH_TABLE, there is no migration or mutation tool, and the
-// binary opens its pool with default_transaction_read_only=on so even a bug
-// that emitted a write would be refused by the database (design D4).
+// The server is read-only by construction, and since M11 that is a decision
+// rather than a consequence. gopgql can compile a mutation — a @function field
+// maps to a call on a PL/pgSQL function the database owns — but only through a
+// handle the *caller* supplies (SPEC.md §7 → M11). This server has no such
+// handle: it opens its own pool, with default_transaction_read_only=on, and
+// exposes no mutation tool and no migration tool. An agent able to enqueue work
+// is a different authorization question from an agent able to read one, and
+// answering it is not this server's to do quietly (design D4).
 //
 // The compiled SQL is not part of either tool's result: the server connects to
 // Postgres, executes, and returns the data (design D2a).
@@ -119,7 +123,7 @@ The arguments are ranked, so supplying more than one is never ambiguous: ` + "`f
 
 const queryDescription = `Run a GraphQL query against the mapped PostgreSQL database and return the data.
 
-Only query operations are supported; the mapped graph is read-only. Values must travel in ` + "`variables`" + `, which are bound as SQL parameters.
+Only query operations are supported by this tool. Values must travel in ` + "`variables`" + `, which are bound as SQL parameters.
 
 Discovery goes through the same tool: this schema answers the standard GraphQL introspection meta-fields ` + "`__schema`" + `, ` + "`__type(name:)`" + ` and ` + "`__typename`" + `, served from the schema without touching the database. Send this verbatim to see what is queryable:
 

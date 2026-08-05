@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"text/tabwriter"
 
 	// Registers the "pgx" database/sql driver goose runs through.
@@ -42,6 +43,7 @@ import (
 	"github.com/lega4e/gopgql/conform"
 	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/generator"
+	"github.com/lega4e/gopgql/generator/client"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/schema"
 	"github.com/lega4e/gopgql/sdl"
@@ -52,12 +54,21 @@ const usage = `gopgql — generate and apply migrations from a GraphQL SDL schem
 Usage:
   gopgql generate --sdl <file> --dir <dir> [--name <suffix>] [--graph <name>]
                   [--no-tables] [--no-graph]
+  gopgql generate client --sdl <file> --operations <dir> --out <dir>
+                  [--package <name>] [--graph <name>]
   gopgql migrate  --dsn <url> [--sdl <file>] [--dir <dir>] [--name <suffix>] [--graph <name>]
                   [--no-tables] [--no-graph]
   gopgql conform  --sdl <file> --dsn <url> [--graph <name>]
 
 Commands:
   generate   Write the next migration for the schema into --dir.
+  generate client
+             Write a typed Go client for --sdl and the named GraphQL operations
+             in --operations. Every operation is compiled here, so a query that
+             cannot compile fails this command and never a request. Every
+             generated method takes an exec.Handle as its second parameter: the
+             client opens no connection and holds no pool, so an operation runs
+             in whatever transaction the caller is already in.
   migrate    Generate (when --sdl is given) and apply --dir to --dsn.
   conform    Report how the database's property graph differs from the SDL.
   version    Print the version, commit and build date (also --version, -v).
@@ -86,6 +97,11 @@ Flags:
            directory's own history decides which halves it manages, and a flag
            that contradicts it is an error. They scope what is *generated* —
            applying is always the whole directory.
+  --operations  Directory of *.graphql operation documents, for generate
+           client. Not searched recursively. (env GOPGQL_OPERATIONS)
+  --out    Directory the generated package is written to, for generate client.
+           (env GOPGQL_CLIENT_OUT)
+  --package  Package name for the generated code. Default "gopgqlclient".
   --name   Descriptive suffix for a generated delta. Default "schema".
   --graph  Property-graph name. Default is the generator's.
 A flag wins over its environment variable.
@@ -162,6 +178,90 @@ func exitCode(err error) int {
 	return exitFailure
 }
 
+// commonFlags are the flags several subcommands share, registered once so their
+// spellings, their GOPGQL_* fallbacks and their flag-wins-over-env precedence
+// cannot drift apart between subcommands.
+type commonFlags struct {
+	sdlPath  *string
+	dsn      *string
+	dir      *string
+	name     *string
+	graph    *string
+	noTables *bool
+	noGraph  *bool
+}
+
+// newFlagSet builds a flag set for one subcommand and registers the shared flags
+// on it.
+//
+// One set per subcommand, rather than one shared by all of them, for two
+// reasons. Go's flag package stops at the first non-flag argument, so a
+// two-word subcommand parsed against a single shared set would parse *zero*
+// flags — `gopgql generate client --sdl x` silently generating from nothing.
+// And `generate client`'s own flags (--operations, --out, --package) belong to
+// it alone; on a shared set they would be offered to `migrate` and `conform`,
+// which have no use for them.
+func newFlagSet(command string) (*flag.FlagSet, *commonFlags) {
+	fs := flag.NewFlagSet("gopgql "+command, flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	return fs, &commonFlags{
+		sdlPath:  fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)"),
+		dsn:      fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)"),
+		dir:      fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`),
+		name:     fs.String("name", "schema", "descriptive suffix for a generated delta"),
+		graph:    fs.String("graph", "", "property-graph name (default: the generator's)"),
+		noTables: fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)"),
+		noGraph:  fs.Bool("no-graph", false, "skip the property-graph half"),
+	}
+}
+
+// parse parses argv and folds the environment in underneath the flags.
+//
+// It reports flag.ErrHelp as success: -h/--help has already printed the usage
+// text through fs.Usage, and reporting it as a failure would make `gopgql
+// conform --help` exit non-zero — which, for a command whose exit status *is*
+// its result, reads as drift rather than as help.
+func (c *commonFlags) parse(fs *flag.FlagSet, argv []string) error {
+	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelp
+		}
+		return err
+	}
+
+	// A flag wins over the environment.
+	if *c.sdlPath == "" {
+		*c.sdlPath = os.Getenv("GOPGQL_SDL")
+	}
+	if *c.dsn == "" {
+		*c.dsn = os.Getenv("GOPGQL_DSN")
+	}
+	if *c.dir == "" {
+		*c.dir = os.Getenv("GOPGQL_MIGRATIONS")
+	}
+	if *c.dir == "" {
+		*c.dir = "migrations"
+	}
+	if !*c.noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
+		*c.noTables = true
+	}
+	if !*c.noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
+		*c.noGraph = true
+	}
+	if *c.noTables && *c.noGraph {
+		return errors.New("--no-tables and --no-graph together leave nothing to do")
+	}
+	return nil
+}
+
+func (c *commonFlags) halves() migrate.Halves {
+	return migrate.Halves{NoTables: *c.noTables, NoGraph: *c.noGraph}
+}
+
+// errHelp signals that the usage text was printed and the process should exit
+// zero. It never reaches the user: run swallows it.
+var errHelp = errors.New("help requested")
+
 func run(argv []string) error {
 	if len(argv) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -169,81 +269,63 @@ func run(argv []string) error {
 	}
 	command, rest := argv[0], argv[1:]
 
-	fs := flag.NewFlagSet("gopgql "+command, flag.ContinueOnError)
-	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
-	dsn := fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)")
-	dir := fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`)
-	name := fs.String("name", "schema", "descriptive suffix for a generated delta")
-	graph := fs.String("graph", "", "property-graph name (default: the generator's)")
-	noTables := fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)")
-	noGraph := fs.Bool("no-graph", false, "skip the property-graph half")
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	if err := fs.Parse(rest); err != nil {
-		// -h/--help has already printed the usage text through fs.Usage.
-		// Reporting it as a failure would make `gopgql conform --help` exit
-		// non-zero, and for a command whose exit status *is* its result that
-		// reads as drift rather than as help.
-		if errors.Is(err, flag.ErrHelp) {
+	// A second word is read only for `generate`, which is the only subcommand
+	// that has one.
+	if command == "generate" && len(rest) > 0 && rest[0] == "client" {
+		err := generateClient(rest[1:])
+		if errors.Is(err, errHelp) {
 			return nil
 		}
 		return err
 	}
 
-	// A flag wins over the environment.
-	if *sdlPath == "" {
-		*sdlPath = os.Getenv("GOPGQL_SDL")
-	}
-	if *dsn == "" {
-		*dsn = os.Getenv("GOPGQL_DSN")
-	}
-	if *dir == "" {
-		*dir = os.Getenv("GOPGQL_MIGRATIONS")
-	}
-	if *dir == "" {
-		*dir = "migrations"
-	}
-	if !*noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
-		*noTables = true
-	}
-	if !*noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
-		*noGraph = true
-	}
-	if *noTables && *noGraph {
-		return errors.New("--no-tables and --no-graph together leave nothing to do")
-	}
-	halves := migrate.Halves{NoTables: *noTables, NoGraph: *noGraph}
-
 	switch command {
 	case "generate":
-		if *sdlPath == "" {
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
+		if *f.sdlPath == "" {
 			return errors.New("generate needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		return generate(*sdlPath, *dir, *name, *graph, halves)
+		return generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves())
+
 	case "migrate":
-		if *dsn == "" {
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
+		if *f.dsn == "" {
 			return errors.New("migrate needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		if *sdlPath != "" {
-			if err := generate(*sdlPath, *dir, *name, *graph, halves); err != nil {
+		if *f.sdlPath != "" {
+			if err := generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves()); err != nil {
 				return err
 			}
 		}
-		return apply(*dir, *dsn)
+		return apply(*f.dir, *f.dsn)
+
 	case "conform":
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
 		// Both sides are required: the check is a comparison, and with either
 		// half missing there is nothing to compare rather than a default to
 		// fall back on.
-		if *sdlPath == "" {
+		if *f.sdlPath == "" {
 			return errors.New("conform needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		if *dsn == "" {
+		if *f.dsn == "" {
 			return errors.New("conform needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		return conformCheck(context.Background(), *sdlPath, *dsn, *graph)
+		return conformCheck(context.Background(), *f.sdlPath, *f.dsn, *f.graph)
+
 	// --version and -v are accepted alongside the subcommand because that is
 	// what a reader reaches for first, and neither form collides with anything:
-	// the flag set defines no -v, and a flag in this position is the command.
-	// The line goes to stdout — it is the command's output, not a diagnostic.
+	// no subcommand's flag set defines -v, and a flag in this position is the
+	// command. The line goes to stdout — it is the command's output, not a
+	// diagnostic.
 	case "version", "--version", "-v":
 		fmt.Println(versionLine())
 		return nil
@@ -254,6 +336,109 @@ func run(argv []string) error {
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+// skipHelp turns the help sentinel into success, so `gopgql generate --help`
+// exits zero.
+func skipHelp(err error) error {
+	if errors.Is(err, errHelp) {
+		return nil
+	}
+	return err
+}
+
+// generateClient writes the typed Go client for an SDL and a directory of named
+// GraphQL operation documents.
+//
+// Every operation is compiled here, now, through the same pure compiler a
+// request would use — so an unknown root field, a selection past the depth
+// ceiling or a scalar with no mapping fails this command rather than a request.
+// Nothing contacts a database: --dsn is not a flag of this subcommand because
+// there is nothing it could be used for.
+func generateClient(argv []string) error {
+	// This subcommand registers --sdl and --graph itself rather than through
+	// newFlagSet: it takes neither --dir nor --dsn nor the halves flags, and a
+	// flag a subcommand cannot act on is worse than one it does not offer.
+	fs := flag.NewFlagSet("gopgql generate client", flag.ContinueOnError)
+	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
+	opsDir := fs.String("operations", "", "directory of *.graphql operation documents (env GOPGQL_OPERATIONS)")
+	out := fs.String("out", "", "directory to write the generated package into (env GOPGQL_CLIENT_OUT)")
+	pkg := fs.String("package", client.DefaultPackage, "package name for the generated code")
+	graph := fs.String("graph", "", "property-graph name (default: the generator's)")
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelp
+		}
+		return err
+	}
+
+	// A flag wins over the environment, matching every other subcommand.
+	if *sdlPath == "" {
+		*sdlPath = os.Getenv("GOPGQL_SDL")
+	}
+	if *opsDir == "" {
+		*opsDir = os.Getenv("GOPGQL_OPERATIONS")
+	}
+	if *out == "" {
+		*out = os.Getenv("GOPGQL_CLIENT_OUT")
+	}
+	switch {
+	case *sdlPath == "":
+		return errors.New("generate client needs a schema: pass --sdl or set GOPGQL_SDL")
+	case *opsDir == "":
+		return errors.New("generate client needs operations: pass --operations or set GOPGQL_OPERATIONS")
+	case *out == "":
+		return errors.New("generate client needs an output directory: pass --out or set GOPGQL_CLIENT_OUT")
+	}
+
+	// Writing the generated package over its own inputs would destroy them, and
+	// the failure would look like a bad generation rather than a lost file.
+	outAbs, opsAbs, sdlAbs := abs(*out), abs(*opsDir), abs(*sdlPath)
+	if outAbs == opsAbs {
+		return fmt.Errorf("--out and --operations are the same directory (%s); "+
+			"the generated package would be written over the operations it was generated from", *out)
+	}
+	if outAbs == abs(filepath.Dir(sdlAbs)) {
+		return fmt.Errorf("--out is the directory holding --sdl (%s); "+
+			"write the generated package somewhere of its own", *out)
+	}
+
+	source, err := os.ReadFile(*sdlPath)
+	if err != nil {
+		return fmt.Errorf("read schema: %w", err)
+	}
+	doc, err := sdl.Parse(string(source))
+	if err != nil {
+		return err
+	}
+	sources, err := client.Load(*opsDir)
+	if err != nil {
+		return err
+	}
+	files, err := client.Generate(doc, sources, client.Options{Package: *pkg, GraphName: *graph})
+	if err != nil {
+		return err
+	}
+	paths, err := client.Write(*out, files)
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		fmt.Printf("gopgql: wrote %s\n", p)
+	}
+	return nil
+}
+
+// abs resolves a path for comparison, falling back to the path itself when the
+// working directory cannot be read — a comparison that then only ever
+// under-reports, never wrongly refuses.
+func abs(path string) string {
+	p, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return filepath.Clean(p)
 }
 
 // generate writes the generation the SDL calls for into dir.

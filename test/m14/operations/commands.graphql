@@ -1,0 +1,11 @@
+mutation AddPerson($personName: String!) {
+  addPerson(personName: $personName)
+}
+
+mutation Follow($fromName: String!, $toName: String!) {
+  follow(fromName: $fromName, toName: $toName)
+}
+
+mutation Explode($code: String!) {
+  explode(code: $code)
+}

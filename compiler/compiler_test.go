@@ -452,8 +452,8 @@ ORDER BY q0.v0_k, q1.v2_k, q2.v4_k`
 	}
 	// Each branch projects into its own columns, so the two lists cannot collide
 	// when shape regroups the joined rows.
-	if root.Children[0].KeyColumn == root.Children[1].KeyColumn {
-		t.Errorf("both branches share the key column %q", root.Children[0].KeyColumn)
+	if root.Children[0].KeyColumns[0] == root.Children[1].KeyColumns[0] {
+		t.Errorf("both branches share the key column %q", root.Children[0].KeyColumns[0])
 	}
 }
 
@@ -525,10 +525,10 @@ func TestCompileThreeBranchesFanOut(t *testing.T) {
 	}
 	keys := map[string]bool{}
 	for _, child := range cq.Projection.Root.Children {
-		if keys[child.KeyColumn] {
-			t.Errorf("duplicate key column %q across branches", child.KeyColumn)
+		if keys[child.KeyColumns[0]] {
+			t.Errorf("duplicate key column %q across branches", child.KeyColumns[0])
 		}
-		keys[child.KeyColumn] = true
+		keys[child.KeyColumns[0]] = true
 	}
 	if len(keys) != 3 {
 		t.Errorf("got %d distinct branch key columns, want 3", len(keys))

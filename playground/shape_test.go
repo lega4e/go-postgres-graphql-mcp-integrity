@@ -44,8 +44,8 @@ func compileNested(t *testing.T) (compiler.Projection, *compiler.Selection, *com
 // order the rows below supply values.
 func columnsOf(root, child *compiler.Selection) []string {
 	return []string{
-		root.KeyColumn, root.Fields[0].Column,
-		child.KeyColumn, child.Fields[0].Column,
+		root.KeyColumns[0], root.Fields[0].Column,
+		child.KeyColumns[0], child.Fields[0].Column,
 	}
 }
 
@@ -200,7 +200,7 @@ func TestShapeJSONHonoursTheDepthCeiling(t *testing.T) {
 	require.NoError(t, err, "the raised ceiling compiles it")
 
 	out, err := playground.ShapeJSON(playground.ExampleSDL, deep, vars, 4, playground.Result{
-		Columns: []string{compiled.Projection.Root.KeyColumn},
+		Columns: []string{compiled.Projection.Root.KeyColumns[0]},
 		Rows:    [][]any{{"alice-id"}},
 	})
 	require.NoError(t, err, "and shaping at the same ceiling succeeds")

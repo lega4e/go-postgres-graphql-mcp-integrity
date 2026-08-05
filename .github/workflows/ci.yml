@@ -34,7 +34,16 @@ jobs:
       # The godog suites boot a real postgres:19beta2 container via
       # testcontainers-go and run SQL/PGQ GRAPH_TABLE queries against it. The
       # MCP suite (test/mcp) additionally drives a real MCP client against the
-      # server, in-process and over stdio against the built binary.
+      # server, in-process and over stdio against the built binary. test/m10
+      # proves a query runs in a caller's transaction; test/m11 runs
+      # hand-written PL/pgSQL through one; test/m12 generates over a schema an
+      # init script created and gopgql does not own; test/m13 is the DBOS table
+      # shapes themselves — composite keys, no id column, one table as both
+      # vertex and edge; test/m14 regenerates the committed client, fails if a
+      # byte moved, and runs its methods.
+      # test/determinism is the exception and boots nothing: it asserts that
+      # generating twice produces identical bytes and needs no database, which
+      # is the check a consumer runs as `go generate && git diff --exit-code`.
       - name: integration tests (godog + testcontainers)
         run: go test -v -timeout 20m ./...
 

@@ -136,11 +136,11 @@ func TestQueryShapesThroughTheProjection(t *testing.T) {
 	// A parent selected with one nested child: two flat rows, one parent.
 	proj := compiler.Projection{Root: &compiler.Selection{
 		ResponseKey: "Persons",
-		KeyColumn:   "v0_k",
+		KeyColumns:  []string{"v0_k"},
 		Fields:      []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0"}},
 		Children: []*compiler.Selection{{
 			ResponseKey: "follows",
-			KeyColumn:   "v1_k",
+			KeyColumns:  []string{"v1_k"},
 			Fields:      []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0"}},
 		}},
 	}}

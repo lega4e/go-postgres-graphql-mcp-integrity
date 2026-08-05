@@ -90,8 +90,8 @@ func Reflect(ctx context.Context, db exec.Querier, graphName string) (*schema.Sc
 	for _, el := range elements {
 		switch el.kind {
 		case elementKindVertex:
-			vt := schema.VertexTable{Name: el.table}
-			if own := labels[el.table]; len(own) > 0 {
+			vt := schema.VertexTable{Name: el.table, Schema: el.schemaName}
+			if own := labels[el.key()]; len(own) > 0 {
 				vt.Label = own[0].Label
 				vt.Properties = own[0].Properties
 				if len(own) > 1 {
@@ -101,15 +101,18 @@ func Reflect(ctx context.Context, db exec.Querier, graphName string) (*schema.Sc
 			m.VertexTables = append(m.VertexTables, vt)
 		case elementKindEdge:
 			et := schema.EdgeTable{
-				Name:        el.table,
-				SourceTable: el.sourceTable,
-				SourceKey:   firstColumn(el.sourceKey),
-				SourceRef:   firstColumn(el.sourceRef),
-				DestTable:   el.destTable,
-				DestKey:     firstColumn(el.destKey),
-				DestRef:     firstColumn(el.destRef),
+				Name:         el.table,
+				Schema:       el.schemaName,
+				SourceSchema: el.sourceSchema,
+				SourceTable:  el.sourceTable,
+				SourceKey:    el.sourceKey,
+				SourceRef:    el.sourceRef,
+				DestSchema:   el.destSchema,
+				DestTable:    el.destTable,
+				DestKey:      el.destKey,
+				DestRef:      el.destRef,
 			}
-			if own := labels[el.table]; len(own) > 0 {
+			if own := labels[el.key()]; len(own) > 0 {
 				et.Label = own[0].Label
 				et.Properties = own[0].Properties
 			}
@@ -174,7 +177,8 @@ func graphOID(ctx context.Context, db exec.Querier, graphName string) (uint32, e
 // produces a row: a label that lost all of its properties out of band is drift
 // worth reporting, and an INNER JOIN would silently drop the element instead.
 const labelsSQL = `
-SELECT c.relname::text AS table_name,
+SELECT n.nspname::text AS schema_name,
+       c.relname::text AS table_name,
        l.pgllabel::text AS label,
        COALESCE(
            array_agg(p.pgpname::text ORDER BY p.pgpname)
@@ -184,11 +188,12 @@ FROM pg_catalog.pg_propgraph_element_label el
 JOIN pg_catalog.pg_propgraph_label l ON l.oid = el.pgellabelid
 JOIN pg_catalog.pg_propgraph_element e ON e.oid = el.pgelelid
 JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_catalog.pg_propgraph_label_property lp ON lp.plpellabelid = el.oid
 LEFT JOIN pg_catalog.pg_propgraph_property p ON p.oid = lp.plppropid
 WHERE e.pgepgid = $1
-GROUP BY c.relname, l.pgllabel
-ORDER BY c.relname, l.pgllabel`
+GROUP BY n.nspname, c.relname, l.pgllabel
+ORDER BY n.nspname, c.relname, l.pgllabel`
 
 // reflectLabels returns each element table's labels, ordered by label name.
 func reflectLabels(ctx context.Context, db exec.Querier, graphID uint32) (map[string][]schema.LabelProperties, error) {
@@ -200,12 +205,16 @@ func reflectLabels(ctx context.Context, db exec.Querier, graphID uint32) (map[st
 
 	out := make(map[string][]schema.LabelProperties)
 	for rows.Next() {
-		var table string
+		var schemaName, table string
 		var lp schema.LabelProperties
-		if err := rows.Scan(&table, &lp.Label, &lp.Properties); err != nil {
+		if err := rows.Scan(&schemaName, &table, &lp.Label, &lp.Properties); err != nil {
 			return nil, fmt.Errorf("conform: read graph labels: %w", err)
 		}
-		out[table] = append(out[table], lp)
+		// The key is built here rather than concatenated in SQL, so it is
+		// exactly what schema.QualifiedKey produces. A key assembled by the
+		// database would have to encode the separator the same way, and the two
+		// would silently stop matching the moment the encoding changed.
+		out[schema.QualifiedKey(schemaName, table)] = append(out[schema.QualifiedKey(schemaName, table)], lp)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("conform: read graph labels: %w", err)
@@ -221,9 +230,12 @@ func reflectLabels(ctx context.Context, db exec.Querier, graphID uint32) (map[st
 // generates, [schema.Schema] has nowhere to put it, and Check does not compare
 // it.
 const elementsSQL = `
-SELECT c.relname::text                 AS table_name,
+SELECT n.nspname::text                 AS schema_name,
+       c.relname::text                 AS table_name,
        e.pgekind::text                 AS kind,
+       COALESCE(sn.nspname::text, '')  AS source_schema,
        COALESCE(sc.relname::text, '')  AS source_table,
+       COALESCE(dn.nspname::text, '')  AS dest_schema,
        COALESCE(dc.relname::text, '')  AS dest_table,
        COALESCE(sk.cols, '{}'::text[]) AS source_key,
        COALESCE(sr.cols, '{}'::text[]) AS source_ref,
@@ -231,10 +243,13 @@ SELECT c.relname::text                 AS table_name,
        COALESCE(dr.cols, '{}'::text[]) AS dest_ref
 FROM pg_catalog.pg_propgraph_element e
 JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_catalog.pg_propgraph_element sv ON sv.oid = e.pgesrcvertexid
 LEFT JOIN pg_catalog.pg_class sc ON sc.oid = sv.pgerelid
+LEFT JOIN pg_catalog.pg_namespace sn ON sn.oid = sc.relnamespace
 LEFT JOIN pg_catalog.pg_propgraph_element dv ON dv.oid = e.pgedestvertexid
 LEFT JOIN pg_catalog.pg_class dc ON dc.oid = dv.pgerelid
+LEFT JOIN pg_catalog.pg_namespace dn ON dn.oid = dc.relnamespace
 LEFT JOIN LATERAL (
     SELECT array_agg(a.attname::text ORDER BY u.ord) AS cols
     FROM unnest(e.pgesrckey) WITH ORDINALITY AS u(attnum, ord)
@@ -256,19 +271,25 @@ LEFT JOIN LATERAL (
     JOIN pg_catalog.pg_attribute a ON a.attrelid = dv.pgerelid AND a.attnum = u.attnum
 ) dr ON true
 WHERE e.pgepgid = $1
-ORDER BY c.relname`
+ORDER BY n.nspname, c.relname`
 
 // reflectedElement is one row of elementsSQL.
 type reflectedElement struct {
-	table       string
-	kind        string
-	sourceTable string
-	destTable   string
-	sourceKey   []string
-	sourceRef   []string
-	destKey     []string
-	destRef     []string
+	schemaName   string
+	table        string
+	kind         string
+	sourceSchema string
+	sourceTable  string
+	destSchema   string
+	destTable    string
+	sourceKey    []string
+	sourceRef    []string
+	destKey      []string
+	destRef      []string
 }
+
+// key is the qualified name the labels map holds this element under.
+func (e reflectedElement) key() string { return schema.QualifiedKey(e.schemaName, e.table) }
 
 func reflectElements(ctx context.Context, db exec.Querier, graphID uint32) ([]reflectedElement, error) {
 	rows, err := db.Query(ctx, elementsSQL, graphID)
@@ -280,7 +301,8 @@ func reflectElements(ctx context.Context, db exec.Querier, graphID uint32) ([]re
 	var out []reflectedElement
 	for rows.Next() {
 		var el reflectedElement
-		if err := rows.Scan(&el.table, &el.kind, &el.sourceTable, &el.destTable,
+		if err := rows.Scan(&el.schemaName, &el.table, &el.kind,
+			&el.sourceSchema, &el.sourceTable, &el.destSchema, &el.destTable,
 			&el.sourceKey, &el.sourceRef, &el.destKey, &el.destRef); err != nil {
 			return nil, fmt.Errorf("conform: read graph elements: %w", err)
 		}
@@ -290,15 +312,4 @@ func reflectElements(ctx context.Context, db exec.Querier, graphID uint32) ([]re
 		return nil, fmt.Errorf("conform: read graph elements: %w", err)
 	}
 	return out, nil
-}
-
-// firstColumn narrows a key column list to the single column
-// [schema.EdgeTable] can hold. Every edge gopgql generates has a one-column
-// source and destination key (SPEC.md §5.3), so this is lossless for anything
-// gopgql made and is documented on Reflect for anything it did not.
-func firstColumn(cols []string) string {
-	if len(cols) == 0 {
-		return ""
-	}
-	return cols[0]
 }

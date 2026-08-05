@@ -112,6 +112,59 @@ func (p *parser) ident(what string) (string, error) {
 	return t.Value, nil
 }
 
+// qualifiedIdent consumes a table identifier that may be schema-qualified —
+// "streams", "dbos.streams", `dbos."offset"`, `"dbos".streams` or
+// `"dbos"."offset"` — and returns the two parts, schema empty when there is none.
+//
+// It reads the dot out of the *tokens* rather than asking the lexer for one,
+// because the lexer deliberately treats '.' as an ordinary word character: a
+// DEFAULT expression and a @column(type:) override both carry raw SQL where a
+// dot means something else entirely (0.5, numeric(10,2)), and giving '.' its own
+// token would have to be undone at every one of those sites. Here there are
+// exactly four shapes to cover, decided by which side of the dot was quoted.
+func (p *parser) qualifiedIdent(what string) (schemaName, name string, err error) {
+	t := p.peek()
+	if !t.IsIdent() {
+		return "", "", p.errorf("expected %s, got %q", what, t.Value)
+	}
+	p.advance()
+
+	// A bare word swallows an unquoted dot, so "dbos.streams" arrives whole.
+	if t.Type == TokenWord {
+		before, after, found := strings.Cut(t.Value, ".")
+		if !found {
+			return "", t.Value, nil
+		}
+		if after != "" {
+			return before, after, nil
+		}
+		// `dbos."offset"`: the word ended at the dot and the name is quoted.
+		q := p.peek()
+		if q.Type != TokenQuotedIdent {
+			return "", "", p.errorf("expected %s after %q, got %q", what, t.Value, q.Value)
+		}
+		p.advance()
+		return before, q.Value, nil
+	}
+
+	// A quoted first part: a following word beginning with a dot, and starting
+	// exactly where this token ended, continues the same identifier.
+	n := p.peek()
+	if n.Type != TokenWord || !strings.HasPrefix(n.Value, ".") || n.Pos != t.End {
+		return "", t.Value, nil
+	}
+	p.advance()
+	if rest := n.Value[1:]; rest != "" {
+		return t.Value, rest, nil
+	}
+	q := p.peek()
+	if q.Type != TokenQuotedIdent {
+		return "", "", p.errorf("expected %s after %q, got %q", what, t.Value+n.Value, q.Value)
+	}
+	p.advance()
+	return t.Value, q.Value, nil
+}
+
 func (p *parser) errorf(format string, args ...any) error {
 	return fmt.Errorf("ddl: "+format+" at offset %d", append(args, p.peek().Pos)...)
 }
@@ -139,14 +192,14 @@ func (p *parser) statement() (Statement, error) {
 }
 
 func (p *parser) createTable() (Statement, error) {
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
 	if err := p.expectPunct(TokenLParen, "("); err != nil {
 		return nil, err
 	}
-	st := &CreateTableStmt{Name: name}
+	st := &CreateTableStmt{Schema: schemaName, Name: name}
 	for {
 		if p.isTableConstraintStart() {
 			c, err := p.tableConstraint()
@@ -272,7 +325,7 @@ func (p *parser) defaultExpr() string {
 }
 
 func (p *parser) reference() (*Reference, error) {
-	table, err := p.ident("referenced table")
+	schemaName, table, err := p.qualifiedIdent("referenced table")
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +339,7 @@ func (p *parser) reference() (*Reference, error) {
 	if err := p.expectPunct(TokenRParen, ")"); err != nil {
 		return nil, err
 	}
-	return &Reference{Table: table, Column: col}, nil
+	return &Reference{Schema: schemaName, Table: table, Column: col}, nil
 }
 
 // tableConstraintWords begins a table-level constraint item in a column list.
@@ -356,7 +409,7 @@ func (p *parser) createIndex() (Statement, error) {
 	if err := p.expectKeyword("ON"); err != nil {
 		return nil, err
 	}
-	table, err := p.ident("indexed table")
+	tableSchema, table, err := p.qualifiedIdent("indexed table")
 	if err != nil {
 		return nil, err
 	}
@@ -371,11 +424,16 @@ func (p *parser) createIndex() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CreateIndexStmt{Name: name, Table: table, Columns: cols, Method: method}, nil
+	// The index's own name is never qualified in CREATE INDEX — PostgreSQL puts
+	// the index in the schema of the table it is on — so the qualifier read from
+	// the table is the index's schema too.
+	return &CreateIndexStmt{
+		Name: name, Schema: tableSchema, Table: table, Columns: cols, Method: method,
+	}, nil
 }
 
 func (p *parser) alterTable() (Statement, error) {
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
@@ -385,21 +443,21 @@ func (p *parser) alterTable() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &AddColumn{Column: c}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &AddColumn{Column: c}}, nil
 	case p.acceptKeyword("DROP", "COLUMN"):
 		col, err := p.ident("column name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &DropColumn{Name: col}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &DropColumn{Name: col}}, nil
 	case p.acceptKeyword("ADD", "CONSTRAINT"):
-		return p.addConstraint(name)
+		return p.addConstraint(schemaName, name)
 	case p.acceptKeyword("DROP", "CONSTRAINT"):
 		cname, err := p.ident("constraint name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &DropConstraint{Name: cname}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &DropConstraint{Name: cname}}, nil
 	case p.acceptKeyword("RENAME", "COLUMN"):
 		// Ordered before "RENAME TO": both start with RENAME, and only the
 		// following token tells them apart.
@@ -414,15 +472,16 @@ func (p *parser) alterTable() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &RenameColumn{Name: old, NewName: fresh}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name,
+			Action: &RenameColumn{Name: old, NewName: fresh}}, nil
 	case p.acceptKeyword("RENAME", "TO"):
 		fresh, err := p.ident("new table name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &RenameTable{NewName: fresh}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &RenameTable{NewName: fresh}}, nil
 	case p.acceptKeyword("ALTER", "COLUMN"):
-		return p.alterColumn(name)
+		return p.alterColumn(schemaName, name)
 	default:
 		return nil, p.errorf("unsupported ALTER TABLE action at %q", p.peek().Value)
 	}
@@ -432,7 +491,7 @@ func (p *parser) alterTable() (Statement, error) {
 // constraint it emits, so the anonymous form PostgreSQL also allows is not part
 // of this grammar: a constraint whose name the emitter did not choose cannot be
 // dropped by a later delta without asking the database what name it invented.
-func (p *parser) addConstraint(table string) (Statement, error) {
+func (p *parser) addConstraint(schemaName, table string) (Statement, error) {
 	cname, err := p.ident("constraint name")
 	if err != nil {
 		return nil, err
@@ -444,6 +503,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{
+			Schema: schemaName,
 			Name:   table,
 			Action: &AddConstraint{Name: cname, Kind: "UNIQUE", Columns: cols},
 		}, nil
@@ -453,6 +513,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{
+			Schema: schemaName,
 			Name:   table,
 			Action: &AddConstraint{Name: cname, Kind: "CHECK", Expr: expr},
 		}, nil
@@ -465,7 +526,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 // alterable in gopgql's dialect: a type or nullability change is a different
 // migration with different data consequences, and is not something the emitter
 // produces (SPEC.md §7 → M7).
-func (p *parser) alterColumn(table string) (Statement, error) {
+func (p *parser) alterColumn(schemaName, table string) (Statement, error) {
 	col, err := p.ident("column name")
 	if err != nil {
 		return nil, err
@@ -476,9 +537,10 @@ func (p *parser) alterColumn(table string) (Statement, error) {
 		if expr == "" {
 			return nil, p.errorf("expected a default expression, got %q", p.peek().Value)
 		}
-		return &AlterTableStmt{Name: table, Action: &SetDefault{Column: col, Default: expr}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: table,
+			Action: &SetDefault{Column: col, Default: expr}}, nil
 	case p.acceptKeyword("DROP", "DEFAULT"):
-		return &AlterTableStmt{Name: table, Action: &DropDefault{Column: col}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: table, Action: &DropDefault{Column: col}}, nil
 	default:
 		return nil, p.errorf("unsupported ALTER COLUMN action at %q", p.peek().Value)
 	}
@@ -486,20 +548,20 @@ func (p *parser) alterColumn(table string) (Statement, error) {
 
 func (p *parser) dropTable() (Statement, error) {
 	ifExists := p.acceptKeyword("IF", "EXISTS")
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
-	return &DropTableStmt{Name: name, IfExists: ifExists}, nil
+	return &DropTableStmt{Schema: schemaName, Name: name, IfExists: ifExists}, nil
 }
 
 func (p *parser) dropIndex() (Statement, error) {
 	ifExists := p.acceptKeyword("IF", "EXISTS")
-	name, err := p.ident("index name")
+	schemaName, name, err := p.qualifiedIdent("index name")
 	if err != nil {
 		return nil, err
 	}
-	return &DropIndexStmt{Name: name, IfExists: ifExists}, nil
+	return &DropIndexStmt{Schema: schemaName, Name: name, IfExists: ifExists}, nil
 }
 
 func (p *parser) dropPropertyGraph() (Statement, error) {
@@ -566,7 +628,7 @@ func (p *parser) createPropertyGraph() (Statement, error) {
 func (p *parser) vertexTableDef() (VertexTableDef, error) {
 	var v VertexTableDef
 	var err error
-	if v.Table, err = p.ident("vertex table"); err != nil {
+	if v.Schema, v.Table, err = p.qualifiedIdent("vertex table"); err != nil {
 		return v, err
 	}
 	if p.acceptKeyword("KEY") {
@@ -609,13 +671,13 @@ func (p *parser) labelClause(what string) (LabelDef, error) {
 func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 	var e EdgeTableDef
 	var err error
-	if e.Table, err = p.ident("edge table"); err != nil {
+	if e.Schema, e.Table, err = p.qualifiedIdent("edge table"); err != nil {
 		return e, err
 	}
-	if e.SourceKey, e.SourceTable, e.SourceRef, err = p.keyReference("SOURCE"); err != nil {
+	if e.SourceKey, e.SourceSchema, e.SourceTable, e.SourceRef, err = p.keyReference("SOURCE"); err != nil {
 		return e, err
 	}
-	if e.DestKey, e.DestTable, e.DestRef, err = p.keyReference("DESTINATION"); err != nil {
+	if e.DestKey, e.DestSchema, e.DestTable, e.DestRef, err = p.keyReference("DESTINATION"); err != nil {
 		return e, err
 	}
 	label, err := p.labelClause("edge label")
@@ -627,32 +689,22 @@ func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 }
 
 // keyReference parses "<which> KEY (<key>) REFERENCES <table> (<ref>)".
-func (p *parser) keyReference(which string) (key, table, ref string, err error) {
+func (p *parser) keyReference(which string) (key []string, schemaName, table string, ref []string, err error) {
 	if err = p.expectKeyword(which, "KEY"); err != nil {
 		return
 	}
-	if err = p.expectPunct(TokenLParen, "("); err != nil {
-		return
-	}
-	if key, err = p.ident("key column"); err != nil {
-		return
-	}
-	if err = p.expectPunct(TokenRParen, ")"); err != nil {
+	// Both sides are column *lists*: an edge mapped onto an existing table may
+	// reference a vertex identified by more than one column (SPEC.md §7 → M13).
+	if key, err = p.parenIdentList(); err != nil {
 		return
 	}
 	if err = p.expectKeyword("REFERENCES"); err != nil {
 		return
 	}
-	if table, err = p.ident("referenced table"); err != nil {
+	if schemaName, table, err = p.qualifiedIdent("referenced table"); err != nil {
 		return
 	}
-	if err = p.expectPunct(TokenLParen, "("); err != nil {
-		return
-	}
-	if ref, err = p.ident("referenced column"); err != nil {
-		return
-	}
-	err = p.expectPunct(TokenRParen, ")")
+	ref, err = p.parenIdentList()
 	return
 }
 

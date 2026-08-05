@@ -140,7 +140,7 @@ func (r Report) OK() bool { return len(r.Findings) == 0 }
 // drift. A nil schema is treated as one with no elements, so Check(nil, actual)
 // reports every element in the database as unexpected rather than panicking.
 func Check(desired, actual *schema.Schema) Report {
-	want, got := view(desired), view(actual)
+	want, got := view(desired), align(view(desired), view(actual))
 
 	names := make([]string, 0, len(want)+len(got))
 	for name := range want {
@@ -213,7 +213,37 @@ type elementView struct {
 	properties []string
 }
 
-// view reduces a schema to its comparable elements, keyed by table name.
+// align re-keys the reflected side to the names the SDL uses.
+//
+// Reflect always reads a table's namespace, because the catalogs always have
+// one: a table in the default schema comes back as "public.persons". An SDL that
+// declares no schema means "resolve through search_path" and says nothing about
+// which namespace that lands in, so comparing "persons" against "public.persons"
+// would report every element of every pre-M12 schema as missing and unexpected
+// at once.
+//
+// So a reflected element is stripped back to its bare name exactly when the SDL
+// asked for a bare name and nothing else claims it. A qualified declaration is
+// compared as it is written, which is what makes a table that moved schemas show
+// up as drift rather than as a match.
+func align(want, got map[string]elementView) map[string]elementView {
+	out := make(map[string]elementView, len(got))
+	for key, el := range got {
+		if _, qualified := want[key]; !qualified {
+			if schemaName, bare := schema.SplitKey(key); schemaName != "" {
+				if _, unqualified := want[bare]; unqualified {
+					key = bare
+				}
+			}
+		}
+		out[key] = el
+	}
+	return out
+}
+
+// view reduces a schema to its comparable elements, keyed by qualified table
+// name — the same key the differ uses, so two tables of one name in two schemas
+// stay two elements.
 func view(m *schema.Schema) map[string]elementView {
 	out := make(map[string]elementView)
 	if m == nil {
@@ -227,10 +257,10 @@ func view(m *schema.Schema) map[string]elementView {
 			labels = append(labels, extra.Label)
 			props = append(props, extra.Properties...)
 		}
-		out[vt.Name] = elementView{labels: sortedSet(labels), properties: sortedSet(props)}
+		out[vt.Key()] = elementView{labels: sortedSet(labels), properties: sortedSet(props)}
 	}
 	for _, et := range m.EdgeTables {
-		out[et.Name] = elementView{
+		out[et.Key()] = elementView{
 			labels:     sortedSet([]string{et.Label}),
 			properties: sortedSet(et.Properties),
 		}

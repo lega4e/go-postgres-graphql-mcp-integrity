@@ -14,7 +14,57 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/lega4e/gopgql/internal/pgident"
 )
+
+// QualifiedName renders a table identifier for DDL: schema.table, each part
+// quoted only where it has to be, or the bare table when no schema is declared.
+//
+// An unqualified name is what every gopgql identifier was before schema
+// qualification existed, and it stays exactly that — it resolves through
+// search_path. Emitting a qualification nobody asked for would rewrite every
+// existing migration's text for no gain.
+func QualifiedName(schemaName, table string) string {
+	if schemaName == "" {
+		return pgident.Quote(table)
+	}
+	return pgident.Quote(schemaName) + "." + pgident.Quote(table)
+}
+
+// keySep separates a key's two halves. It is NUL because PostgreSQL permits
+// every other byte inside a quoted identifier — a table really can be called
+// `a.b` — and a separator an identifier could contain would make "a.b"
+// indistinguishable from table "b" in schema "a".
+//
+// Using a byte no identifier can hold is what lets gopgql key by a plain string
+// without also inventing a restriction on what a table may be called. A key is
+// therefore never displayed: QualifiedName renders identifiers for DDL, and
+// SplitKey recovers the parts for anything that needs to say them.
+const keySep = "\x00"
+
+// QualifiedKey is the unquoted form of a table's identifier, used as the key
+// under which the differ and the fold hold it.
+//
+// It is separate from QualifiedName because a *key* must be exactly what the
+// DDL reader hands back — quotes already removed — while the DDL form has to
+// carry the quotes. Keying by the bare name instead would let two tables of one
+// name in different schemas silently share an entry, and the differ would then
+// propose one table's columns onto the other.
+func QualifiedKey(schemaName, table string) string {
+	if schemaName == "" {
+		return table
+	}
+	return schemaName + keySep + table
+}
+
+// SplitKey is the inverse of QualifiedKey.
+func SplitKey(key string) (schemaName, table string) {
+	if before, after, found := strings.Cut(key, keySep); found {
+		return before, after
+	}
+	return "", key
+}
 
 // Column is a single column of a vertex or edge table.
 type Column struct {
@@ -63,19 +113,36 @@ type Column struct {
 
 // Reference is a single-column foreign-key target.
 type Reference struct {
+	// Schema qualifies Table, or is empty (search_path).
+	Schema string
 	Table  string
 	Column string
 }
 
+// QualifiedTable renders the referenced table for DDL.
+func (r Reference) QualifiedTable() string { return QualifiedName(r.Schema, r.Table) }
+
 // Index is a secondary index on a table.
 type Index struct {
-	Name    string
-	Table   string
+	Name  string
+	Table string
+	// Schema qualifies Table, and the index itself: PostgreSQL puts an index in
+	// the schema of the table it is on, so a DROP has to name it there too.
+	Schema  string
 	Columns []string
 	// Method is the access method (`USING btree`, `hash`, `gin`, …) from
 	// @index(using:); empty means the database default (SPEC.md §7 → M6).
 	Method string
 }
+
+// QualifiedTable and QualifiedName render the index's table and the index
+// itself for DDL.
+func (i Index) QualifiedTable() string { return QualifiedName(i.Schema, i.Table) }
+func (i Index) QualifiedName() string  { return QualifiedName(i.Schema, i.Name) }
+
+// Key is the key an index is held under while diffing. Two indexes of one name
+// in two schemas are two indexes.
+func (i Index) Key() string { return QualifiedKey(i.Schema, i.Name) }
 
 // NaturalKey is a named uniqueness constraint over a vertex table's own scalar
 // columns: the @key(fields:) natural key.
@@ -205,6 +272,22 @@ type LabelProperties struct {
 type VertexTable struct {
 	// Name is the physical table name.
 	Name string
+	// Schema is the PostgreSQL schema qualifying Name, or "" (search_path).
+	Schema string
+	// Unmanaged marks a table gopgql surfaces but does not own: it appears in
+	// the property graph and in the read model, and no DDL and no migration is
+	// ever emitted for it — not a CREATE, not an ALTER, not a DROP, not an index
+	// (SPEC.md §7 → M12). It is @readonly's whole effect.
+	//
+	// It is the per-type grain of the per-directory --no-tables: that flag says
+	// "this directory owns no tables at all", this field says "this one table is
+	// somebody else's". The two compose and neither replaces the other.
+	//
+	// A folded schema never carries it, for the same reason Column.RenamedFrom
+	// never does: nothing in the DDL says who owns a table, because the DDL for
+	// an unmanaged table is precisely what is never written. It is an
+	// instruction from the SDL to the differ.
+	Unmanaged bool
 	// Label is the table's own graph vertex label.
 	Label string
 	// Columns are the table's columns in declaration order.
@@ -230,28 +313,88 @@ type VertexTable struct {
 	RenamedFrom []string
 }
 
+// QualifiedName renders the vertex table's identifier for DDL; Key is the key it
+// is held under while diffing and folding.
+func (v VertexTable) QualifiedName() string { return QualifiedName(v.Schema, v.Name) }
+func (v VertexTable) Key() string           { return QualifiedKey(v.Schema, v.Name) }
+
+// ElementAlias is the name this element is known by inside the graph — its bare
+// table name. An edge's REFERENCES clause names it, and never carries a schema.
+func (v VertexTable) ElementAlias() string { return v.Name }
+
 // EdgeTable is a table mapped as a graph edge.
 type EdgeTable struct {
 	// Name is the physical table name.
 	Name string
+	// Schema qualifies Name, or is empty (search_path).
+	Schema string
 	// Label is the graph edge label.
 	Label string
 	// Columns are the table's columns in declaration order.
 	Columns []Column
-	// SourceKey is the source-key column (e.g. "source_id").
-	SourceKey string
-	// SourceTable / SourceRef are the referenced vertex table and column.
-	SourceTable string
-	SourceRef   string
-	// DestKey is the destination-key column (e.g. "target_id").
-	DestKey string
-	// DestTable / DestRef are the referenced vertex table and column.
-	DestTable string
-	DestRef   string
+	// Alias is the graph *element* alias, emitted as "<table> AS <alias>", or
+	// empty when the table's own name serves.
+	//
+	// PostgreSQL requires every element alias in a graph to be unique, so a
+	// table appearing as both a vertex element and an edge element — the shape
+	// an externally-owned join table takes — needs one on the edge. It is also
+	// the name an edge's SOURCE/DESTINATION KEY … REFERENCES resolves against:
+	// that clause names a *vertex element*, never a table, and is therefore
+	// always unqualified (verified against postgres:19beta2 — a qualified name
+	// there is a syntax error, and a bare one resolves with the schema off
+	// search_path entirely).
+	Alias string
+	// Unmanaged marks an edge element mapped onto a table gopgql does not own —
+	// a table named by @relationship(table:) together with the key columns to
+	// use. Like VertexTable.Unmanaged it means no DDL of any kind is emitted:
+	// no CREATE TABLE for the edge and no destination-key index, because the
+	// index on a table somebody else owns is theirs (SPEC.md §5.3 invariant 2).
+	Unmanaged bool
+	// SourceKey are the source-key columns of *this* table (e.g. "source_id").
+	SourceKey []string
+	// SourceTable / SourceRef are the referenced vertex table and the columns
+	// of it referenced — its identity; SourceSchema qualifies SourceTable.
+	SourceSchema string
+	SourceTable  string
+	SourceRef    []string
+	// DestKey are the destination-key columns of this table (e.g. "target_id").
+	DestKey []string
+	// DestTable / DestRef are the referenced vertex table and columns;
+	// DestSchema qualifies DestTable.
+	DestSchema string
+	DestTable  string
+	DestRef    []string
 	// Properties are the graph-exposed property names, including the key
 	// columns (SPEC.md §5.3 invariant 1).
 	Properties []string
 }
+
+// QualifiedName renders the edge table's identifier for DDL; Key is the key it
+// is held under while diffing.
+func (e EdgeTable) QualifiedName() string { return QualifiedName(e.Schema, e.Name) }
+func (e EdgeTable) Key() string           { return QualifiedKey(e.Schema, e.Name) }
+
+// ElementAlias is the name this element is known by inside the graph: its
+// explicit alias when it has one, otherwise its bare table name. Element aliases
+// are never schema-qualified.
+func (e EdgeTable) ElementAlias() string {
+	if e.Alias != "" {
+		return e.Alias
+	}
+	return e.Name
+}
+
+// ElementRef renders the element as it appears in the graph's table list.
+func (e EdgeTable) ElementRef() string {
+	if e.Alias == "" {
+		return e.QualifiedName()
+	}
+	return e.QualifiedName() + " AS " + pgident.Quote(e.Alias)
+}
+
+// QualifiedSource / QualifiedDest render the vertex tables an edge references.
+func (e EdgeTable) QualifiedSource() string { return QualifiedName(e.SourceSchema, e.SourceTable) }
+func (e EdgeTable) QualifiedDest() string   { return QualifiedName(e.DestSchema, e.DestTable) }
 
 // Schema is the complete physical model: the tables, their indexes, and the
 // property graph mapping them.

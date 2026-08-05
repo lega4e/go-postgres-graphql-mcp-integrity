@@ -185,13 +185,18 @@ func FoldContent(contents []string) (*schema.Schema, error) {
 
 // folder accumulates the effect of applying migration statements in order.
 type folder struct {
-	// cols maps a table name to its columns in physical (creation/append) order.
+	// cols maps a table's *qualified key* to its columns in physical
+	// (creation/append) order. Keying by the qualified name is what keeps two
+	// tables of one name in two schemas apart, and the key is exactly what the
+	// DDL reader hands back — quotes removed — so emitter and reader cannot
+	// disagree about which table a statement named.
 	cols map[string][]schema.Column
 	// indexes maps an index name to its definition; idxOrder preserves the order
 	// they were created so the folded schema is deterministic.
 	indexes  map[string]schema.Index
 	idxOrder []string
-	// cons maps a table name to its named constraints by constraint name: the
+	// cons maps a table's qualified key to its named constraints by constraint
+	// name: the
 	// natural key's UNIQUE and every CHECK. A single-column UNIQUE is not here —
 	// it folds onto its column's Unique flag, which is where the model keeps it.
 	cons map[string]map[string]foldedConstraint
@@ -255,18 +260,21 @@ func column(c ddl.ColumnDef) schema.Column {
 		Default:    c.Default,
 	}
 	if c.References != nil {
-		col.References = &schema.Reference{Table: c.References.Table, Column: c.References.Column}
+		col.References = &schema.Reference{
+			Schema: c.References.Schema, Table: c.References.Table, Column: c.References.Column,
+		}
 	}
 	return col
 }
 
 func (f *folder) applyCreateTable(s *ddl.CreateTableStmt) error {
+	key := schema.QualifiedKey(s.Schema, s.Name)
 	cols := make([]schema.Column, 0, len(s.Columns))
 	for _, c := range s.Columns {
 		cols = append(cols, column(c))
 	}
-	f.cols[s.Name] = cols
-	delete(f.cons, s.Name)
+	f.cols[key] = cols
+	delete(f.cons, key)
 	// A vertex table arrives with its natural key and its checks written inline,
 	// so the same constraints have to be read out of CREATE TABLE as out of a
 	// later ALTER — otherwise a schema that declared them at birth would fold
@@ -277,7 +285,7 @@ func (f *folder) applyCreateTable(s *ddl.CreateTableStmt) error {
 		if c.Name == "" {
 			continue
 		}
-		if err := f.applyConstraint(s.Name, c.Name, c.Kind, c.Columns, c.Expr, true); err != nil {
+		if err := f.applyConstraint(key, c.Name, c.Kind, c.Columns, c.Expr, true); err != nil {
 			return err
 		}
 	}
@@ -285,27 +293,30 @@ func (f *folder) applyCreateTable(s *ddl.CreateTableStmt) error {
 }
 
 func (f *folder) applyAlterTable(s *ddl.AlterTableStmt) error {
+	key := schema.QualifiedKey(s.Schema, s.Name)
 	switch a := s.Action.(type) {
 	case *ddl.AddColumn:
-		f.cols[s.Name] = append(f.cols[s.Name], column(a.Column))
+		f.cols[key] = append(f.cols[key], column(a.Column))
 		return nil
 	case *ddl.DropColumn:
-		f.cols[s.Name] = removeColumn(f.cols[s.Name], a.Name)
+		f.cols[key] = removeColumn(f.cols[key], a.Name)
 		return nil
 	case *ddl.AddConstraint:
-		return f.applyConstraint(s.Name, a.Name, a.Kind, a.Columns, a.Expr, true)
+		return f.applyConstraint(key, a.Name, a.Kind, a.Columns, a.Expr, true)
 	case *ddl.DropConstraint:
 		// A DROP carries only the name; the kind, columns and body are recovered
 		// from the naming convention the emitter and PostgreSQL share.
-		return f.applyConstraint(s.Name, a.Name, "", nil, "", false)
+		return f.applyConstraint(key, a.Name, "", nil, "", false)
 	case *ddl.RenameTable:
-		return f.renameTable(s.Name, a.NewName)
+		// RENAME TO cannot move a table between schemas, so the target keeps the
+		// schema the statement named the table in.
+		return f.renameTable(key, schema.QualifiedKey(s.Schema, a.NewName))
 	case *ddl.RenameColumn:
-		return f.renameColumn(s.Name, a.Name, a.NewName)
+		return f.renameColumn(key, a.Name, a.NewName)
 	case *ddl.SetDefault:
-		return f.setDefault(s.Name, a.Column, a.Default)
+		return f.setDefault(key, a.Column, a.Default)
 	case *ddl.DropDefault:
-		return f.setDefault(s.Name, a.Column, "")
+		return f.setDefault(key, a.Column, "")
 	default:
 		return fmt.Errorf("ALTER TABLE %s: unsupported action %T", s.Name, s.Action)
 	}
@@ -316,7 +327,7 @@ func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
 		f.idxOrder = append(f.idxOrder, s.Name)
 	}
 	f.indexes[s.Name] = schema.Index{
-		Name: s.Name, Table: s.Table, Columns: s.Columns, Method: s.Method,
+		Name: s.Name, Schema: s.Schema, Table: s.Table, Columns: s.Columns, Method: s.Method,
 	}
 	return nil
 }
@@ -342,33 +353,37 @@ func (f *folder) applyCreateIndex(s *ddl.CreateIndexStmt) error {
 // failure mode of ignoring it is bounded: the differ proposes a constraint the
 // database already has, PostgreSQL refuses the duplicate name, and a migration
 // stops without losing data.
-func (f *folder) applyConstraint(table, name, kind string, cols []string, expr string, present bool) error {
-	tcols := f.cols[table]
+func (f *folder) applyConstraint(key, name, kind string, cols []string, expr string, present bool) error {
+	table := key
+	tcols := f.cols[key]
 	if tcols == nil {
 		return fmt.Errorf("ALTER TABLE %s: constraint %s on an unknown table", table, name)
 	}
-	role, column, _ := schema.ClassifyConstraint(table, name)
+	// A constraint name is derived from the bare table name — PostgreSQL's own
+	// implicit names carry no schema — so it is classified against that.
+	_, bareTable := schema.SplitKey(key)
+	role, column, _ := schema.ClassifyConstraint(bareTable, name)
 	switch role {
 	case schema.RoleColumnUnique:
 		for i := range tcols {
 			if tcols[i].Name == column {
 				tcols[i].Unique = present
-				f.cols[table] = tcols
+				f.cols[key] = tcols
 				return nil
 			}
 		}
 		return fmt.Errorf("ALTER TABLE %s: constraint %s covers unknown column %q", table, name, column)
 	case schema.RoleNaturalKey, schema.RoleColumnCheck, schema.RoleTableCheck:
 		if !present {
-			if m := f.cons[table]; m != nil {
+			if m := f.cons[key]; m != nil {
 				delete(m, name)
 			}
 			return nil
 		}
-		if f.cons[table] == nil {
-			f.cons[table] = map[string]foldedConstraint{}
+		if f.cons[key] == nil {
+			f.cons[key] = map[string]foldedConstraint{}
 		}
-		f.cons[table][name] = foldedConstraint{
+		f.cons[key][name] = foldedConstraint{
 			kind: strings.ToUpper(kind), columns: append([]string(nil), cols...), expr: expr,
 		}
 		return nil
@@ -402,16 +417,17 @@ func (f *folder) renameTable(from, to string) error {
 		delete(f.cons, from)
 		f.cons[to] = c
 	}
+	toSchema, toName := schema.SplitKey(to)
 	for _, tcols := range f.cols {
 		for i := range tcols {
-			if r := tcols[i].References; r != nil && r.Table == from {
-				r.Table = to
+			if r := tcols[i].References; r != nil && schema.QualifiedKey(r.Schema, r.Table) == from {
+				r.Schema, r.Table = toSchema, toName
 			}
 		}
 	}
 	for _, n := range f.idxOrder {
-		if idx := f.indexes[n]; idx.Table == from {
-			idx.Table = to
+		if idx := f.indexes[n]; schema.QualifiedKey(idx.Schema, idx.Table) == from {
+			idx.Schema, idx.Table = toSchema, toName
 			f.indexes[n] = idx
 		}
 	}
@@ -437,14 +453,15 @@ func (f *folder) renameColumn(table, from, to string) error {
 	}
 	for _, tcols := range f.cols {
 		for i := range tcols {
-			if r := tcols[i].References; r != nil && r.Table == table && r.Column == from {
+			if r := tcols[i].References; r != nil &&
+				schema.QualifiedKey(r.Schema, r.Table) == table && r.Column == from {
 				r.Column = to
 			}
 		}
 	}
 	for _, n := range f.idxOrder {
 		idx := f.indexes[n]
-		if idx.Table != table {
+		if schema.QualifiedKey(idx.Schema, idx.Table) != table {
 			continue
 		}
 		renamed := append([]string(nil), idx.Columns...)
@@ -494,11 +511,12 @@ func (f *folder) setDefault(table, column, expr string) error {
 }
 
 func (f *folder) applyDropTable(s *ddl.DropTableStmt) error {
-	delete(f.cols, s.Name)
-	delete(f.cons, s.Name)
+	key := schema.QualifiedKey(s.Schema, s.Name)
+	delete(f.cols, key)
+	delete(f.cons, key)
 	// Indexes on a dropped table go with it.
 	for _, idx := range f.indexList() {
-		if idx.Table == s.Name {
+		if schema.QualifiedKey(idx.Schema, idx.Table) == key {
 			f.removeIndex(idx.Name)
 		}
 	}
@@ -550,8 +568,9 @@ func (f *folder) buildTablesOnly() (*schema.Schema, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	for _, name := range names {
-		vt := schema.VertexTable{Name: name, Columns: f.cols[name]}
+	for _, key := range names {
+		schemaName, name := schema.SplitKey(key)
+		vt := schema.VertexTable{Name: name, Schema: schemaName, Columns: f.cols[key]}
 		if err := f.attachConstraints(&vt); err != nil {
 			return nil, err
 		}
@@ -583,13 +602,18 @@ func (f *folder) build() (*schema.Schema, error) {
 		// compares the graph statement, which is self-describing, and the SDL
 		// is a description of the slice being surfaced, not an inventory of the
 		// database.
-		cols := f.cols[v.Table]
+		// The columns come from the CREATE TABLE statements, which are never
+		// schema-qualified (gopgql qualifies only tables it does not create), so
+		// a qualified graph entry finds none — correctly: a table gopgql does
+		// not own has no CREATE TABLE in this history to find them in.
+		cols := f.cols[schema.QualifiedKey(v.Schema, v.Table)]
 		var extra []schema.LabelProperties
 		for _, l := range v.ExtraLabels {
 			extra = append(extra, schema.LabelProperties{Label: l.Label, Properties: l.Properties})
 		}
 		vt := schema.VertexTable{
 			Name:        v.Table,
+			Schema:      v.Schema,
 			Label:       v.Label,
 			Columns:     cols,
 			Properties:  v.Properties,
@@ -601,18 +625,21 @@ func (f *folder) build() (*schema.Schema, error) {
 		m.VertexTables = append(m.VertexTables, vt)
 	}
 	for _, e := range f.graph.Edges {
-		cols := f.cols[e.Table]
+		cols := f.cols[schema.QualifiedKey(e.Schema, e.Table)]
 		m.EdgeTables = append(m.EdgeTables, schema.EdgeTable{
-			Name:        e.Table,
-			Label:       e.Label,
-			Columns:     cols,
-			SourceKey:   e.SourceKey,
-			SourceTable: e.SourceTable,
-			SourceRef:   e.SourceRef,
-			DestKey:     e.DestKey,
-			DestTable:   e.DestTable,
-			DestRef:     e.DestRef,
-			Properties:  e.Properties,
+			Name:         e.Table,
+			Schema:       e.Schema,
+			Label:        e.Label,
+			Columns:      cols,
+			SourceKey:    e.SourceKey,
+			SourceSchema: e.SourceSchema,
+			SourceTable:  e.SourceTable,
+			SourceRef:    e.SourceRef,
+			DestKey:      e.DestKey,
+			DestSchema:   e.DestSchema,
+			DestTable:    e.DestTable,
+			DestRef:      e.DestRef,
+			Properties:   e.Properties,
 		})
 	}
 	m.Indexes = f.indexList()
@@ -635,7 +662,7 @@ func (f *folder) build() (*schema.Schema, error) {
 // constraint the database already has and PostgreSQL would refuse the duplicate
 // name.
 func (f *folder) attachConstraints(vt *schema.VertexTable) error {
-	byName := f.cons[vt.Name]
+	byName := f.cons[vt.Key()]
 	if len(byName) == 0 {
 		return nil
 	}

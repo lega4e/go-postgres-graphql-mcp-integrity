@@ -197,8 +197,8 @@ func TestParsePropertyGraph(t *testing.T) {
 	}
 	wantE := []EdgeTableDef{{
 		Table: "follows", Label: "follows",
-		SourceKey: "source_id", SourceTable: "persons", SourceRef: "id",
-		DestKey: "target_id", DestTable: "persons", DestRef: "id",
+		SourceKey: []string{"source_id"}, SourceTable: "persons", SourceRef: []string{"id"},
+		DestKey: []string{"target_id"}, DestTable: "persons", DestRef: []string{"id"},
 		Properties: []string{"source_id", "target_id"},
 	}}
 	if !reflect.DeepEqual(g.Edges, wantE) {
