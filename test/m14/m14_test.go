@@ -18,6 +18,10 @@
 //   - A generated query assembles its nested result into the generated structs,
 //     including a nullable column that is genuinely NULL and a one-to-many
 //     fan-out that must deduplicate its parent.
+//   - Every scalar whose canonical response form is not the Go type pgx scanned
+//     it as — Int, Float, a Float stored as numeric, DateTime, an Int list —
+//     survives the trip through shape and back out into a typed field. A schema
+//     with no numeric field at all is what let issue #51 ship in v0.2.0.
 //   - A generated mutation whose function raises still carries the SQLSTATE
 //     through the generated layer, as an *exec.FunctionError.
 package m14_test
@@ -25,6 +29,7 @@ package m14_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,9 +54,9 @@ import (
 	"github.com/lega4e/gopgql/test/m14/gen"
 )
 
-// fixtureSQL is the command surface gopgql does not own: three PL/pgSQL
-// functions over the tables gopgql itself generates. add_person and follow are
-// what the generated mutations call; explode exists to raise.
+// fixtureSQL is the command surface gopgql does not own: four PL/pgSQL
+// functions over the tables gopgql itself generates. add_person, follow and
+// measure are what the generated mutations call; explode exists to raise.
 const fixtureSQL = `
 CREATE SCHEMA app;
 
@@ -69,6 +74,40 @@ BEGIN
     INSERT INTO follows (source_id, target_id)
     SELECT s.id, t.id FROM persons s, persons t
     WHERE s.name = from_name AND t.name = to_name;
+END;
+$$;
+
+-- Fills in every scalar column the generated decoders read, and returns one of
+-- them so the unshaped exec.Call path carries a number too.
+--
+-- marks, tally, ticket, active and notes are derived rather than passed: gopgql
+-- binds no list parameter, and the point of ticket in particular is a literal
+-- the caller could not have sent through a float64 without losing it —
+-- 9007199254740993 is 2^53+1, the smallest integer a float64 rounds away.
+CREATE FUNCTION app.measure(
+    person_name text,
+    person_age integer,
+    person_score double precision,
+    person_rating numeric,
+    person_seen timestamptz
+) RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+    stored integer;
+BEGIN
+    UPDATE persons
+    SET age = person_age,
+        score = person_score,
+        rating = person_rating,
+        seen = person_seen,
+        marks = ARRAY[person_age - 1, person_age, person_age + 1],
+        tally = person_age * 2,
+        ticket = 9007199254740993,
+        active = true,
+        notes = '{"note":"measured","exact":19.90}'::jsonb
+    WHERE name = person_name
+    RETURNING age INTO stored;
+    RETURN stored;
 END;
 $$;
 
@@ -266,6 +305,93 @@ func TestGeneratedWritesAreInvisibleOutsideTheTransaction(t *testing.T) {
 	outside, err := c.FindPerson(ctx, other, gen.FindPersonInput{Name: "Hopper"})
 	require.NoError(t, err)
 	assert.Empty(t, outside, "an uncommitted write must not be visible to anything else")
+}
+
+// Issue #51, end to end and against the database: every scalar the generated
+// decoders handle, read back through the generated structs.
+//
+// This is the case the suite could not previously have: until the schema
+// declared a numeric field, all seven of the client's decode sites were
+// gopgqlAsString, so gopgqlAsInt64, gopgqlAsFloat64 and gopgqlAsTime were
+// emitted and never invoked. Both halves — shape's canonicalisation and the
+// generated decoders — were individually tested, and nothing executed the join.
+//
+// It projects the scalars that were *not* broken as well. The bug was never
+// specific to Int; it was a decoder written against the wrong producer, and the
+// only fixture that can notice the next one is the one that reads them all.
+//
+// The deterministic version of the same assertion, under both shaping
+// strategies, is in gen/join_test.go; this one proves it against real rows a
+// real driver scanned.
+func TestGeneratedClientDecodesTheCanonicalScalarForms(t *testing.T) {
+	withTx(t, func(ctx context.Context, tx pgx.Tx) {
+		c := gen.New()
+		_, err := c.AddPerson(ctx, tx, gen.AddPersonInput{PersonName: "Ada"})
+		require.NoError(t, err)
+
+		// Before anything is measured: the SDL's defaults decode, and the
+		// columns that are genuinely NULL stay nil rather than becoming zero.
+		unmeasured, err := c.FindMeasurements(ctx, tx, gen.FindMeasurementsInput{Name: "Ada"})
+		require.NoError(t, err)
+		require.Len(t, unmeasured, 1)
+		assert.Equal(t, int64(0), unmeasured[0].Age, "@default(value: \"0\") reaches the caller as 0")
+		assert.Nil(t, unmeasured[0].Rating, "a NULL numeric stays nil")
+		assert.Nil(t, unmeasured[0].Seen, "a NULL timestamptz stays nil")
+		assert.Nil(t, unmeasured[0].Marks)
+		assert.Nil(t, unmeasured[0].Tally, "a NULL Int stays nil rather than becoming 0")
+		assert.Nil(t, unmeasured[0].Notes, "a NULL jsonb stays nil")
+		assert.False(t, unmeasured[0].Active, "@default(value: \"false\") reaches the caller as false")
+		assert.Equal(t, int64(0), unmeasured[0].Ticket)
+
+		// The offset is deliberately not UTC: shape converts a DateTime to UTC
+		// so the response cannot depend on a session's TimeZone, and what comes
+		// back is the same instant rather than the same wall clock.
+		seen := time.Date(2020, 1, 2, 3, 4, 5, 0, time.FixedZone("+02:00", 2*60*60))
+		age, err := c.Measure(ctx, tx, gen.MeasureInput{
+			PersonName:   "Ada",
+			PersonAge:    41,
+			PersonScore:  9.5,
+			PersonRating: 12.5,
+			PersonSeen:   seen,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(41), age,
+			"a scalar-returning function's Int is unshaped: exec.Call hands back what pgx scanned")
+
+		people, err := c.FindMeasurements(ctx, tx, gen.FindMeasurementsInput{Name: "Ada"})
+		require.NoError(t, err)
+		require.Len(t, people, 1)
+
+		assert.Equal(t, int64(41), people[0].Age, "an Int reaches the decoder as json.Number")
+		assert.Equal(t, 9.5, people[0].Score, "a Float reaches the decoder as json.Number")
+		require.NotNil(t, people[0].Rating)
+		assert.Equal(t, 12.5, *people[0].Rating, "so does a Float stored as numeric(10,2)")
+		require.NotNil(t, people[0].Seen)
+		assert.True(t, seen.Equal(*people[0].Seen),
+			"a DateTime reaches the decoder as RFC3339Nano text in UTC")
+		assert.Equal(t, []int64{40, 41, 42}, people[0].Marks, "an Int list is canonicalised elementwise")
+
+		require.NotNil(t, people[0].Tally)
+		assert.Equal(t, int64(82), *people[0].Tally, "a nullable Int that has a value decodes like any other")
+
+		// The assertion that a decode routed through float64 cannot pass:
+		// 9007199254740993 is 2^53+1, which a float64 rounds to ...992.
+		assert.Equal(t, int64(9007199254740993), people[0].Ticket,
+			"an Int beyond float64 precision survives, because json.Number.Int64 reads the digits")
+
+		// String, ID, Boolean and JSON: canonicalised to the Go types pgx already
+		// scans, so these are the cases that must keep passing rather than start.
+		assert.Equal(t, "Ada", people[0].Name)
+		assert.NotEmpty(t, people[0].Id, "an ID is canonicalised from pgx's [16]byte to uuid text")
+		assert.True(t, people[0].Active)
+		require.NotNil(t, people[0].Notes)
+		assert.Equal(t, map[string]any{
+			"note": "measured",
+			// shape decodes an embedded document with UseNumber, so the
+			// database's own digits survive inside it too — 19.90, not 19.9.
+			"exact": json.Number("19.90"),
+		}, *people[0].Notes, "a JSON document arrives decoded, and gopgqlAsAny passes it through")
+	})
 }
 
 // Task 5.18: a failing generated mutation surfaces *exec.FunctionError with the

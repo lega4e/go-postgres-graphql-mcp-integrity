@@ -6,6 +6,25 @@ mutation Follow($fromName: String!, $toName: String!) {
   follow(fromName: $fromName, toName: $toName)
 }
 
+# A scalar-returning mutation reads exec.Call's value, which is whatever pgx
+# scanned and has been through no shaping at all. Int! here is what keeps the
+# decoders' pgx arms honest alongside the canonical ones.
+mutation Measure(
+  $personName: String!
+  $personAge: Int!
+  $personScore: Float!
+  $personRating: Float!
+  $personSeen: DateTime!
+) {
+  measure(
+    personName: $personName
+    personAge: $personAge
+    personScore: $personScore
+    personRating: $personRating
+    personSeen: $personSeen
+  )
+}
+
 mutation Explode($code: String!) {
   explode(code: $code)
 }
