@@ -25,15 +25,23 @@ package m11_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/jackc/pgx/v5"
+	// Registers the "pgx" database/sql driver. Nothing in this suite uses
+	// database/sql directly — every other container suite gets this import for
+	// free because it runs goose, and this one does not — but
+	// postgres.WithSQLDriver("pgx") below needs it, and without it the snapshot
+	// restore silently degrades (see requireSQLDriver).
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -47,6 +55,36 @@ var (
 	pgc        *postgres.PostgresContainer
 	connString string
 )
+
+// sqlDriver is the database/sql driver testcontainers uses to snapshot and
+// restore between scenarios.
+const sqlDriver = "pgx"
+
+// requireSQLDriver fails the suite if sqlDriver is not registered.
+//
+// It exists because testcontainers does not fail when the driver it was told to
+// use is missing: it logs "Could not connect to database to restore snapshot,
+// falling back to `docker exec psql`" and carries on. That fallback issues the
+// drop and the create as one psql invocation, and psql does not stop on error —
+// so a DROP DATABASE that fails because a connection is still open is swallowed,
+// the CREATE then fails with `database "gopgql" already exists`, and the error
+// that surfaces is the second one. The first is never reported.
+//
+// The SQL-driver path does not have that problem: it drops WITH (FORCE), which
+// terminates any remaining backend, and it reports the failure that actually
+// happened.
+//
+// A blank import is exactly the kind of line that gets tidied away, and losing
+// it costs a flake in CI that reads like a test-isolation bug rather than a
+// missing import. This turns that into a failure at startup naming the cause.
+func requireSQLDriver(t *testing.T, name string) {
+	t.Helper()
+	if !slices.Contains(sql.Drivers(), name) {
+		t.Fatalf("the %q database/sql driver is not registered, so testcontainers cannot snapshot or "+
+			"restore over it and would silently fall back to `docker exec psql`; "+
+			"import _ \"github.com/jackc/pgx/v5/stdlib\" in this package", name)
+	}
+}
 
 // fixtureSQL is the schema and the functions a `dbos migrate` equivalent would
 // have created: gopgql neither generates nor owns any of it.
@@ -114,7 +152,7 @@ func TestFeatures(t *testing.T) {
 		postgres.WithDatabase("gopgql"),
 		postgres.WithUsername("gopgql"),
 		postgres.WithPassword("gopgql"),
-		postgres.WithSQLDriver("pgx"),
+		postgres.WithSQLDriver(sqlDriver),
 		tc.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -129,6 +167,8 @@ func TestFeatures(t *testing.T) {
 			t.Logf("terminate container: %v", err)
 		}
 	})
+
+	requireSQLDriver(t, sqlDriver)
 
 	if err := pgc.Snapshot(ctx); err != nil {
 		t.Fatalf("snapshot baseline: %v", err)
