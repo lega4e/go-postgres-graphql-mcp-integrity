@@ -1,0 +1,18 @@
+type Person @node(label: "person") {
+  id: ID!
+  name: String!
+  nickname: String
+  follows: [Person!]! @relationship(type: "follows", direction: OUT)
+}
+
+type Mutation {
+  addPerson(personName: String! @column(name: "person_name")): String!
+    @function(schema: "app", name: "add_person")
+
+  follow(
+    fromName: String! @column(name: "from_name")
+    toName: String! @column(name: "to_name")
+  ): Boolean! @function(schema: "app", name: "follow", returns: VOID)
+
+  explode(code: String!): String! @function(schema: "app", name: "explode")
+}

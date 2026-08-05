@@ -20,7 +20,9 @@ Because one document drives both, the query mapping and the physical schema cann
 ### 1.1 Non-goals
 
 - Not a GraphQL server. No HTTP layer, no subscriptions, no resolver runtime.
-- Not a mutation engine — in the sense the term has in Neo4j-GraphQL and PostGraphile. `gopgql` **derives** no writes: it generates no `createPerson`/`updatePerson`/`deletePerson` from a `@node` type and infers no input type. What it gained in M11 is the ability to **call** a function the SDL explicitly names and the database already owns (`@function`, §5). That is the same footing as `@default` and `@check` — a deliberate escape hatch, defensible only because whoever writes the SDL owns the schema. §2.2's "no mutation through a property graph" is untouched by it and is a different statement: a `@function` call contains no graph name, no `MATCH` and no `GRAPH_TABLE`.
+- **Not a mutation engine.** gopgql derives no writes: it generates no create/update/delete field from a `@node` type and infers no input type. A mutation exists only where the SDL declares one and names, with `@function(schema:, name:)`, a function the database already owns. gopgql compiles the call; it does not author the write.
+
+  `@function` is on the same footing as `@default` and `@check`, which §5 already calls a deliberate escape hatch, defensible only because whoever writes the SDL owns the schema. §2.2's "no mutation through a property graph" is a *different* claim — a fact about PostgreSQL rather than a policy of gopgql's — and it is untouched: a `@function` call carries no graph name, no `MATCH` and no `GRAPH_TABLE`.
 - Not a general graph database abstraction. It targets PostgreSQL SQL/PGQ exclusively.
 - Not a migration runner. It emits `goose`-format files; applying them is `goose`’s job.
 
@@ -334,7 +336,7 @@ The generator must guarantee, and the test suite must assert:
 1. Every `KEY` / `SOURCE KEY` / `DESTINATION KEY` column also appears in that element’s `PROPERTIES` list.
 1. Every edge table **gopgql generates** has an index on its destination key column. gopgql emits no `CREATE INDEX` on a table it does not own, so an unmanaged edge's destination index belongs to the schema's owner.
 1. Labels and identifiers colliding with SQL keywords are double-quoted.
-1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias. A schema qualifier is part of the name for this purpose: two tables of one name in two schemas are two tables.
+1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias. A schema qualifier is part of the name for this purpose: two tables of one name in two schemas are two tables. (M13 narrows this further — *distinct* elements may share a table when at most one of them is a vertex element, which is the shape a table serving as both vertex and edge needs. Not yet implemented; the invariant stands as written.)
 1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed. (Reached in M4; interface fields carry identical names and types across implementors by GraphQL's own rules, so no rename is needed for that case.)
 
 -----
@@ -527,6 +529,49 @@ Under that definition it holds *by construction*: the SQL-side path decodes the 
 
 **Exit:** Pages site live from the `gh-pages` branch; a PR preview deploys to its subpath and the playground functions there.
 
+### M10 — A handle the caller owns
+
+- `exec.Handle`: `Query` **and** `Exec`, satisfied by `*pgxpool.Pool`, `*pgx.Conn` and `pgx.Tx`, asserted at compile time so a driver upgrade fails the build rather than a test.
+- `exec.Querier` stays and `exec.Query` keeps taking it: a read needs no `Exec`, and the smaller interface asks less of a caller.
+- `exec.OpenReadOnly` is **behaviourally unchanged** and remains the only pool gopgql opens. Anything that writes runs through a handle the caller supplies, which is what keeps M11 from widening gopgql into something holding a writable connection.
+
+**Exit:** a compiled query executed through a caller's `pgx.Tx` returns rows that transaction inserted and has not committed; the same query through an `OpenReadOnly` pool returns the same rows; a write on that pool fails with SQLSTATE `25006`.
+
+### M11 — `@function` mutations
+
+- `@function(schema:, name:, returns:)` on a field of the `Mutation` type, `@column` widened to `ARGUMENT_DEFINITION`, and `compiler.CompileMutation` returning a `*CompiledCall` — no projection, because a call has nothing to shape.
+- Named notation, omission decided by the operation document, GraphQL argument defaults applied explicitly, and an unset *nullable* variable binding `NULL` (§5).
+- `exec.Call` and `*exec.FunctionError`, which carries the SQLSTATE as data for a consumer to map (§1.1: gopgql builds no GraphQL envelope).
+- The MCP server keeps `mutationType: nil`, for a new reason it now states: it holds an `OpenReadOnly` pool and no caller handle.
+
+**Exit:** against real PL/pgSQL — a scalar function called through a caller's transaction returns its value; a `returns: VOID` function yields `true` and its side effect is visible; an argument absent from the operation document takes the function's own `DEFAULT` while an unset nullable variable arrives as `NULL`; arguments supplied in a different order produce the same result; `RAISE EXCEPTION … USING ERRCODE` surfaces as `*FunctionError` carrying that SQLSTATE.
+
+### M12 — Tables and schemas gopgql does not own
+
+- `@readonly` on a type: the property-graph definition and the read model are generated, and **no DDL and no migration** — no `CREATE`, no `ALTER`, no `DROP`, no index, in either direction.
+- `@node(schema:)` qualifies an element's identifier, so a table outside `search_path` can be named. Unqualified emission is byte-identical to before. gopgql emits no `CREATE SCHEMA`.
+- A type's management cannot change in a delta, in either direction (§3.0's fold has no way to express it).
+
+**Exit:** a second schema and its tables applied by a hand-written init script; gopgql generates over them; `goose up`; a compiled query returns the seeded rows, including a column named `offset`. **The M12 fixture table carries an `id`** — the compiler still projects `id` at every level until M13, so M12 proves DDL suppression and schema qualification and deliberately does *not* yet demonstrate the `dbos.*` case.
+
+### M13 — Identity without a surrogate key *(not implemented)*
+
+- A declared `@key(fields:)` becomes the vertex identity for an unmanaged type, resolving §9's third open decision **for the read path over tables gopgql does not own** and leaving it open for tables it does.
+- `compiler.Selection.KeyColumn` widens to `KeyColumns` — exported, and consumed by `shape`, `playground` and `cmd/wasm`, so `apiVersion` moves with it. The isomorphism guard becomes a NULL-safe disjunction of `IS DISTINCT FROM`, and `shape`'s parent dedup gains a delimiter-safe tuple encoding.
+- `@relationship(sourceKey:, destKey:)` maps an edge onto an existing table, which is what lets one table serve as both a vertex element and an edge element — narrowing §5.3 invariant 4 — and `EdgeTable`'s key fields widen to lists.
+
+It lands **after gopgql#10 (M8)**, or rebases onto it: #10 rewrites `shape`, and this touches the same grouping code. Until it does, an unmanaged type still needs the surrogate `id: ID!`, and a relationship touching one is refused rather than mis-generated.
+
+**Exit:** a vertex over an externally-owned table with a two-column key and **no `id`** is matched and deduplicated correctly across a fan-out; a NULL in a key column does not silently drop rows; a traversal runs over an edge declared on an existing table; one table serves as both vertex and edge.
+
+### M14 — The generated Go client, and determinism
+
+- `gopgql generate client` reads the SDL and a directory of **named** GraphQL operation documents, compiles each **at generate time** through the existing pure compiler, and emits one method per operation with the SQL as a `const` and the projection as a package-level `var`. Results are assigned field by field by generated code, never decoded by reflection.
+- **`exec.Handle` is the second parameter of every generated method**, query and mutation alike; the client opens no connection and holds no pool.
+- Determinism: generating twice produces byte-identical output, no artifact carries a timestamp, hostname, username or absolute path, and both generators succeed with no database reachable.
+
+**Exit:** a generated client compiled and run against a real container through a caller's transaction, returning the same data the hand-written suites assert, with a failing mutation still carrying its SQLSTATE; and the determinism checks running in CI as ordinary tests that boot no container.
+
 -----
 
 ## 8. Deployment
@@ -671,7 +716,7 @@ Carried forward, to be resolved before or during the milestone that needs them:
 
 1. **Module layout** — proposed as a single module with the §4.1 packages; separate modules for `exec` (to keep `pgx` out of WASM consumers’ dependency graph) is an alternative.
 1. **Rename hint ergonomics** — **resolved in M7: `@renamedFrom`.** The hint lives in the SDL rather than in a manifest, so the rename travels with the declaration it describes and cannot be lost from a separate file; it names the previous *GraphQL* name and the differ resolves candidate physical names against the folded prior state (§5). A manifest remains the better answer only if renames ever need to be expressed for objects the SDL does not declare, which has not come up.
-1. **Natural keys as the physical identity** — opened by M7. `@key(fields:)` is currently a uniqueness constraint alongside the surrogate `id`. Making it the identity instead means the compiler's three `id` projection sites, `shape`'s parent dedup, and every edge table's references all become multi-column, and would be a milestone of its own.
+1. **Natural keys as the physical identity** — opened by M7, and **scheduled as M13, which is not yet implemented**. `@key(fields:)` is a uniqueness constraint alongside the surrogate `id`. M13 resolves this **for the read path over tables gopgql does not own** — a `@readonly` type has no surrogate key to fall back on — and leaves it open for tables gopgql creates, whose generated edge tables keep referencing `id`. Until M13 lands, every type needs `id: ID!`, including an unmanaged one.
 1. **Table naming convention** — pluralisation rules for deriving table names from type names, and whether `@node(table:)` is required or optional.
 1. **Goose embedding** — whether `gopgql` embeds `goose` as a library for a `migrate up` convenience command, or only emits files.
 1. **Default `MaxDepth`** — **resolved in M4: 3.** A 3-hop pattern rewrites to a 7-way join, which the M4 suite executes against `postgres:19beta2` well inside the scenario budget. The ceiling is per-`Compiler` configuration (`compiler.WithMaxDepth`), so a deployment can lower it without a code change; 4 hops remains rejected by default.

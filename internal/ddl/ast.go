@@ -8,6 +8,9 @@ type Statement interface{ isStatement() }
 // column definitions and any table-level constraints (gopgql emits a PRIMARY KEY
 // (...) on edge tables).
 type CreateTableStmt struct {
+	// Schema qualifies Name, or is "" when the statement named a bare table that
+	// resolves through search_path.
+	Schema      string
 	Name        string
 	Columns     []ColumnDef
 	Constraints []TableConstraint
@@ -30,6 +33,8 @@ type ColumnDef struct {
 
 // Reference is a single-column foreign-key target: "<table> (<column>)".
 type Reference struct {
+	// Schema qualifies Table, or is "".
+	Schema string
 	Table  string
 	Column string
 }
@@ -52,6 +57,8 @@ type TableConstraint struct {
 
 // AlterTableStmt is "ALTER TABLE <name> <action>".
 type AlterTableStmt struct {
+	// Schema qualifies Name, or is "".
+	Schema string
 	Name   string
 	Action AlterAction
 }
@@ -83,7 +90,10 @@ type AddConstraint struct {
 // deterministically — the name is all a later delta has to go on.
 type DropConstraint struct{ Name string }
 
-// RenameTable is `ALTER TABLE t RENAME TO u`.
+// RenameTable is `ALTER TABLE t RENAME TO u`. NewName is always bare:
+// PostgreSQL forbids a schema qualifier on the target of a RENAME TO, because a
+// rename cannot move a table between schemas (that is ALTER TABLE … SET SCHEMA,
+// which gopgql does not emit).
 //
 // It exists so that renaming preserves data instead of dropping and recreating.
 // The reader has to understand it before the writer emits one: fold reconstructs
@@ -114,7 +124,11 @@ type DropDefault struct{ Column string }
 
 // CreateIndexStmt is "CREATE INDEX <name> ON <table> ( <columns> )".
 type CreateIndexStmt struct {
-	Name    string
+	Name string
+	// Schema qualifies Table — and the index itself, since PostgreSQL creates an
+	// index in the schema of the table it is on. It is never written before the
+	// index's own name in CREATE INDEX, and always is in DROP INDEX.
+	Schema  string
 	Table   string
 	Columns []string
 	// Method is the access method from `USING <method>`, or "" (SPEC.md §7 → M6).
@@ -123,13 +137,17 @@ type CreateIndexStmt struct {
 
 // DropIndexStmt is "DROP INDEX [IF EXISTS] <name>".
 type DropIndexStmt struct {
-	Name     string
+	Name string
+	// Schema qualifies Name, or is "".
+	Schema   string
 	IfExists bool
 }
 
 // DropTableStmt is "DROP TABLE [IF EXISTS] <name>".
 type DropTableStmt struct {
-	Name     string
+	Name string
+	// Schema qualifies Name, or is "".
+	Schema   string
 	IfExists bool
 }
 

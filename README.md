@@ -331,6 +331,14 @@ It is the per-type grain of `--no-tables`, and the two compose. Whether gopgql
 owns a table cannot change in a delta — both directions are refused at generate
 time, because neither has a migration that could be written for it.
 
+`@node(schema:)` applies to any type, owned or not; gopgql emits no `CREATE
+SCHEMA` either way, so the schema has to already exist. What is **not** yet
+supported is a relationship touching a `@readonly` type: an edge is a table
+gopgql would create, and over one it does not own it also has to be told which
+columns are its keys. That is `@relationship(sourceKey:/destKey:)`, and it
+arrives in M13 together with making a declared `@key(fields:)` the vertex
+identity — so until then every type, unowned included, still needs `id: ID!`.
+
 ## A typed Go client
 
 `gopgql generate client` reads the SDL and a directory of **named** GraphQL

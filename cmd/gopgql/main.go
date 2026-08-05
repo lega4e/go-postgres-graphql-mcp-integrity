@@ -178,6 +178,90 @@ func exitCode(err error) int {
 	return exitFailure
 }
 
+// commonFlags are the flags several subcommands share, registered once so their
+// spellings, their GOPGQL_* fallbacks and their flag-wins-over-env precedence
+// cannot drift apart between subcommands.
+type commonFlags struct {
+	sdlPath  *string
+	dsn      *string
+	dir      *string
+	name     *string
+	graph    *string
+	noTables *bool
+	noGraph  *bool
+}
+
+// newFlagSet builds a flag set for one subcommand and registers the shared flags
+// on it.
+//
+// One set per subcommand, rather than one shared by all of them, for two
+// reasons. Go's flag package stops at the first non-flag argument, so a
+// two-word subcommand parsed against a single shared set would parse *zero*
+// flags — `gopgql generate client --sdl x` silently generating from nothing.
+// And `generate client`'s own flags (--operations, --out, --package) belong to
+// it alone; on a shared set they would be offered to `migrate` and `conform`,
+// which have no use for them.
+func newFlagSet(command string) (*flag.FlagSet, *commonFlags) {
+	fs := flag.NewFlagSet("gopgql "+command, flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	return fs, &commonFlags{
+		sdlPath:  fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)"),
+		dsn:      fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)"),
+		dir:      fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`),
+		name:     fs.String("name", "schema", "descriptive suffix for a generated delta"),
+		graph:    fs.String("graph", "", "property-graph name (default: the generator's)"),
+		noTables: fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)"),
+		noGraph:  fs.Bool("no-graph", false, "skip the property-graph half"),
+	}
+}
+
+// parse parses argv and folds the environment in underneath the flags.
+//
+// It reports flag.ErrHelp as success: -h/--help has already printed the usage
+// text through fs.Usage, and reporting it as a failure would make `gopgql
+// conform --help` exit non-zero — which, for a command whose exit status *is*
+// its result, reads as drift rather than as help.
+func (c *commonFlags) parse(fs *flag.FlagSet, argv []string) error {
+	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return errHelp
+		}
+		return err
+	}
+
+	// A flag wins over the environment.
+	if *c.sdlPath == "" {
+		*c.sdlPath = os.Getenv("GOPGQL_SDL")
+	}
+	if *c.dsn == "" {
+		*c.dsn = os.Getenv("GOPGQL_DSN")
+	}
+	if *c.dir == "" {
+		*c.dir = os.Getenv("GOPGQL_MIGRATIONS")
+	}
+	if *c.dir == "" {
+		*c.dir = "migrations"
+	}
+	if !*c.noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
+		*c.noTables = true
+	}
+	if !*c.noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
+		*c.noGraph = true
+	}
+	if *c.noTables && *c.noGraph {
+		return errors.New("--no-tables and --no-graph together leave nothing to do")
+	}
+	return nil
+}
+
+func (c *commonFlags) halves() migrate.Halves {
+	return migrate.Halves{NoTables: *c.noTables, NoGraph: *c.noGraph}
+}
+
+// errHelp signals that the usage text was printed and the process should exit
+// zero. It never reaches the user: run swallows it.
+var errHelp = errors.New("help requested")
+
 func run(argv []string) error {
 	if len(argv) == 0 {
 		fmt.Fprint(os.Stderr, usage)
@@ -185,93 +269,63 @@ func run(argv []string) error {
 	}
 	command, rest := argv[0], argv[1:]
 
-	// `generate client` is parsed on its own, before the shared flag set below.
-	// It has to be: that set is built once for every subcommand and dispatched
-	// with a `switch command`, and Go's flag package stops at the first non-flag
-	// argument — so `gopgql generate client --sdl x` would parse *zero* flags and
-	// silently generate from nothing. Its own flags (--operations, --out,
-	// --package) also exist on no other subcommand, and registering them on the
-	// shared set would offer them to `migrate` and `conform`, which have no use
-	// for them.
+	// A second word is read only for `generate`, which is the only subcommand
+	// that has one.
 	if command == "generate" && len(rest) > 0 && rest[0] == "client" {
-		return generateClient(rest[1:])
-	}
-
-	fs := flag.NewFlagSet("gopgql "+command, flag.ContinueOnError)
-	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
-	dsn := fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)")
-	dir := fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`)
-	name := fs.String("name", "schema", "descriptive suffix for a generated delta")
-	graph := fs.String("graph", "", "property-graph name (default: the generator's)")
-	noTables := fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)")
-	noGraph := fs.Bool("no-graph", false, "skip the property-graph half")
-	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	if err := fs.Parse(rest); err != nil {
-		// -h/--help has already printed the usage text through fs.Usage.
-		// Reporting it as a failure would make `gopgql conform --help` exit
-		// non-zero, and for a command whose exit status *is* its result that
-		// reads as drift rather than as help.
-		if errors.Is(err, flag.ErrHelp) {
+		err := generateClient(rest[1:])
+		if errors.Is(err, errHelp) {
 			return nil
 		}
 		return err
 	}
 
-	// A flag wins over the environment.
-	if *sdlPath == "" {
-		*sdlPath = os.Getenv("GOPGQL_SDL")
-	}
-	if *dsn == "" {
-		*dsn = os.Getenv("GOPGQL_DSN")
-	}
-	if *dir == "" {
-		*dir = os.Getenv("GOPGQL_MIGRATIONS")
-	}
-	if *dir == "" {
-		*dir = "migrations"
-	}
-	if !*noTables && os.Getenv("GOPGQL_NO_TABLES") != "" {
-		*noTables = true
-	}
-	if !*noGraph && os.Getenv("GOPGQL_NO_GRAPH") != "" {
-		*noGraph = true
-	}
-	if *noTables && *noGraph {
-		return errors.New("--no-tables and --no-graph together leave nothing to do")
-	}
-	halves := migrate.Halves{NoTables: *noTables, NoGraph: *noGraph}
-
 	switch command {
 	case "generate":
-		if *sdlPath == "" {
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
+		if *f.sdlPath == "" {
 			return errors.New("generate needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		return generate(*sdlPath, *dir, *name, *graph, halves)
+		return generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves())
+
 	case "migrate":
-		if *dsn == "" {
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
+		if *f.dsn == "" {
 			return errors.New("migrate needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		if *sdlPath != "" {
-			if err := generate(*sdlPath, *dir, *name, *graph, halves); err != nil {
+		if *f.sdlPath != "" {
+			if err := generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves()); err != nil {
 				return err
 			}
 		}
-		return apply(*dir, *dsn)
+		return apply(*f.dir, *f.dsn)
+
 	case "conform":
+		fs, f := newFlagSet(command)
+		if err := f.parse(fs, rest); err != nil {
+			return skipHelp(err)
+		}
 		// Both sides are required: the check is a comparison, and with either
 		// half missing there is nothing to compare rather than a default to
 		// fall back on.
-		if *sdlPath == "" {
+		if *f.sdlPath == "" {
 			return errors.New("conform needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		if *dsn == "" {
+		if *f.dsn == "" {
 			return errors.New("conform needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		return conformCheck(context.Background(), *sdlPath, *dsn, *graph)
+		return conformCheck(context.Background(), *f.sdlPath, *f.dsn, *f.graph)
+
 	// --version and -v are accepted alongside the subcommand because that is
 	// what a reader reaches for first, and neither form collides with anything:
-	// the flag set defines no -v, and a flag in this position is the command.
-	// The line goes to stdout — it is the command's output, not a diagnostic.
+	// no subcommand's flag set defines -v, and a flag in this position is the
+	// command. The line goes to stdout — it is the command's output, not a
+	// diagnostic.
 	case "version", "--version", "-v":
 		fmt.Println(versionLine())
 		return nil
@@ -284,6 +338,15 @@ func run(argv []string) error {
 	}
 }
 
+// skipHelp turns the help sentinel into success, so `gopgql generate --help`
+// exits zero.
+func skipHelp(err error) error {
+	if errors.Is(err, errHelp) {
+		return nil
+	}
+	return err
+}
+
 // generateClient writes the typed Go client for an SDL and a directory of named
 // GraphQL operation documents.
 //
@@ -293,6 +356,9 @@ func run(argv []string) error {
 // Nothing contacts a database: --dsn is not a flag of this subcommand because
 // there is nothing it could be used for.
 func generateClient(argv []string) error {
+	// This subcommand registers --sdl and --graph itself rather than through
+	// newFlagSet: it takes neither --dir nor --dsn nor the halves flags, and a
+	// flag a subcommand cannot act on is worse than one it does not offer.
 	fs := flag.NewFlagSet("gopgql generate client", flag.ContinueOnError)
 	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
 	opsDir := fs.String("operations", "", "directory of *.graphql operation documents (env GOPGQL_OPERATIONS)")
@@ -302,7 +368,7 @@ func generateClient(argv []string) error {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return nil
+			return errHelp
 		}
 		return err
 	}

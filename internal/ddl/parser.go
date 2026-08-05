@@ -192,14 +192,14 @@ func (p *parser) statement() (Statement, error) {
 }
 
 func (p *parser) createTable() (Statement, error) {
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
 	if err := p.expectPunct(TokenLParen, "("); err != nil {
 		return nil, err
 	}
-	st := &CreateTableStmt{Name: name}
+	st := &CreateTableStmt{Schema: schemaName, Name: name}
 	for {
 		if p.isTableConstraintStart() {
 			c, err := p.tableConstraint()
@@ -325,7 +325,7 @@ func (p *parser) defaultExpr() string {
 }
 
 func (p *parser) reference() (*Reference, error) {
-	table, err := p.ident("referenced table")
+	schemaName, table, err := p.qualifiedIdent("referenced table")
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +339,7 @@ func (p *parser) reference() (*Reference, error) {
 	if err := p.expectPunct(TokenRParen, ")"); err != nil {
 		return nil, err
 	}
-	return &Reference{Table: table, Column: col}, nil
+	return &Reference{Schema: schemaName, Table: table, Column: col}, nil
 }
 
 // tableConstraintWords begins a table-level constraint item in a column list.
@@ -409,7 +409,7 @@ func (p *parser) createIndex() (Statement, error) {
 	if err := p.expectKeyword("ON"); err != nil {
 		return nil, err
 	}
-	table, err := p.ident("indexed table")
+	tableSchema, table, err := p.qualifiedIdent("indexed table")
 	if err != nil {
 		return nil, err
 	}
@@ -424,11 +424,16 @@ func (p *parser) createIndex() (Statement, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CreateIndexStmt{Name: name, Table: table, Columns: cols, Method: method}, nil
+	// The index's own name is never qualified in CREATE INDEX — PostgreSQL puts
+	// the index in the schema of the table it is on — so the qualifier read from
+	// the table is the index's schema too.
+	return &CreateIndexStmt{
+		Name: name, Schema: tableSchema, Table: table, Columns: cols, Method: method,
+	}, nil
 }
 
 func (p *parser) alterTable() (Statement, error) {
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
@@ -438,21 +443,21 @@ func (p *parser) alterTable() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &AddColumn{Column: c}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &AddColumn{Column: c}}, nil
 	case p.acceptKeyword("DROP", "COLUMN"):
 		col, err := p.ident("column name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &DropColumn{Name: col}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &DropColumn{Name: col}}, nil
 	case p.acceptKeyword("ADD", "CONSTRAINT"):
-		return p.addConstraint(name)
+		return p.addConstraint(schemaName, name)
 	case p.acceptKeyword("DROP", "CONSTRAINT"):
 		cname, err := p.ident("constraint name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &DropConstraint{Name: cname}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &DropConstraint{Name: cname}}, nil
 	case p.acceptKeyword("RENAME", "COLUMN"):
 		// Ordered before "RENAME TO": both start with RENAME, and only the
 		// following token tells them apart.
@@ -467,15 +472,16 @@ func (p *parser) alterTable() (Statement, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &RenameColumn{Name: old, NewName: fresh}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name,
+			Action: &RenameColumn{Name: old, NewName: fresh}}, nil
 	case p.acceptKeyword("RENAME", "TO"):
 		fresh, err := p.ident("new table name")
 		if err != nil {
 			return nil, err
 		}
-		return &AlterTableStmt{Name: name, Action: &RenameTable{NewName: fresh}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: name, Action: &RenameTable{NewName: fresh}}, nil
 	case p.acceptKeyword("ALTER", "COLUMN"):
-		return p.alterColumn(name)
+		return p.alterColumn(schemaName, name)
 	default:
 		return nil, p.errorf("unsupported ALTER TABLE action at %q", p.peek().Value)
 	}
@@ -485,7 +491,7 @@ func (p *parser) alterTable() (Statement, error) {
 // constraint it emits, so the anonymous form PostgreSQL also allows is not part
 // of this grammar: a constraint whose name the emitter did not choose cannot be
 // dropped by a later delta without asking the database what name it invented.
-func (p *parser) addConstraint(table string) (Statement, error) {
+func (p *parser) addConstraint(schemaName, table string) (Statement, error) {
 	cname, err := p.ident("constraint name")
 	if err != nil {
 		return nil, err
@@ -497,6 +503,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{
+			Schema: schemaName,
 			Name:   table,
 			Action: &AddConstraint{Name: cname, Kind: "UNIQUE", Columns: cols},
 		}, nil
@@ -506,6 +513,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 			return nil, err
 		}
 		return &AlterTableStmt{
+			Schema: schemaName,
 			Name:   table,
 			Action: &AddConstraint{Name: cname, Kind: "CHECK", Expr: expr},
 		}, nil
@@ -518,7 +526,7 @@ func (p *parser) addConstraint(table string) (Statement, error) {
 // alterable in gopgql's dialect: a type or nullability change is a different
 // migration with different data consequences, and is not something the emitter
 // produces (SPEC.md §7 → M7).
-func (p *parser) alterColumn(table string) (Statement, error) {
+func (p *parser) alterColumn(schemaName, table string) (Statement, error) {
 	col, err := p.ident("column name")
 	if err != nil {
 		return nil, err
@@ -529,9 +537,10 @@ func (p *parser) alterColumn(table string) (Statement, error) {
 		if expr == "" {
 			return nil, p.errorf("expected a default expression, got %q", p.peek().Value)
 		}
-		return &AlterTableStmt{Name: table, Action: &SetDefault{Column: col, Default: expr}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: table,
+			Action: &SetDefault{Column: col, Default: expr}}, nil
 	case p.acceptKeyword("DROP", "DEFAULT"):
-		return &AlterTableStmt{Name: table, Action: &DropDefault{Column: col}}, nil
+		return &AlterTableStmt{Schema: schemaName, Name: table, Action: &DropDefault{Column: col}}, nil
 	default:
 		return nil, p.errorf("unsupported ALTER COLUMN action at %q", p.peek().Value)
 	}
@@ -539,20 +548,20 @@ func (p *parser) alterColumn(table string) (Statement, error) {
 
 func (p *parser) dropTable() (Statement, error) {
 	ifExists := p.acceptKeyword("IF", "EXISTS")
-	name, err := p.ident("table name")
+	schemaName, name, err := p.qualifiedIdent("table name")
 	if err != nil {
 		return nil, err
 	}
-	return &DropTableStmt{Name: name, IfExists: ifExists}, nil
+	return &DropTableStmt{Schema: schemaName, Name: name, IfExists: ifExists}, nil
 }
 
 func (p *parser) dropIndex() (Statement, error) {
 	ifExists := p.acceptKeyword("IF", "EXISTS")
-	name, err := p.ident("index name")
+	schemaName, name, err := p.qualifiedIdent("index name")
 	if err != nil {
 		return nil, err
 	}
-	return &DropIndexStmt{Name: name, IfExists: ifExists}, nil
+	return &DropIndexStmt{Schema: schemaName, Name: name, IfExists: ifExists}, nil
 }
 
 func (p *parser) dropPropertyGraph() (Statement, error) {

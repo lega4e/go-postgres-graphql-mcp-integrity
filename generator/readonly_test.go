@@ -121,3 +121,51 @@ type Person @node(label: "person") {
 	assert.False(t, strings.Contains(ddl, "public."),
 		"nothing is qualified unless the SDL asked for it")
 }
+
+// Two schemas meeting in one graph makes label alignment much easier to
+// violate, and PostgreSQL's rule is graph-wide: one type per property name,
+// across every element. The AgentIQ SDL that motivated this change walks
+// straight into it — `workflow_uuid` declared `String` on one type and `ID!` on
+// another is `text` versus `uuid` for one property name in one graph.
+//
+// The check is not new; what is new is that a qualified schema puts two
+// independently-written type sets in the same graph, where nothing else would
+// have brought them together. Asserting it here keeps a generate-time error from
+// silently becoming an apply-time one.
+func TestLabelAlignmentIsGraphWideAcrossSchemas(t *testing.T) {
+	doc, err := sdl.Parse(`
+type Workflow @node(label: "workflow", table: "workflows", schema: "dbos") @readonly {
+  id: ID!
+  workflowUuid: ID! @column(name: "workflow_uuid")
+}
+type Event @node(label: "event", table: "events", schema: "dbos") @readonly {
+  id: ID!
+  workflowUuid: String! @column(name: "workflow_uuid")
+}`)
+	require.NoError(t, err, "the SDL itself is well-formed; the clash is physical")
+
+	_, err = Build(doc, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `property "workflow_uuid"`)
+	assert.Contains(t, err.Error(), "one type across the whole graph")
+}
+
+// The same property name at one type across two schemas is fine — it is the
+// *type* that has to agree, not the schema.
+func TestOnePropertyTypeAcrossSchemasIsAccepted(t *testing.T) {
+	doc, err := sdl.Parse(`
+type Workflow @node(label: "workflow", table: "workflows", schema: "dbos") @readonly {
+  id: ID!
+  workflowUuid: ID! @column(name: "workflow_uuid")
+}
+type Local @node(label: "local", table: "locals") {
+  id: ID!
+  workflowUuid: ID! @column(name: "workflow_uuid")
+}`)
+	require.NoError(t, err)
+
+	m, err := Build(doc, "")
+	require.NoError(t, err)
+	assert.Contains(t, GraphDDL(m), "dbos.workflows LABEL workflow")
+	assert.Contains(t, GraphDDL(m), "locals LABEL local")
+}

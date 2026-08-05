@@ -32,6 +32,21 @@ func QualifiedName(schemaName, table string) string {
 	return pgident.Quote(schemaName) + "." + pgident.Quote(table)
 }
 
+// SplitKey is the inverse of QualifiedKey: it reads a key back into the schema
+// and table it was built from.
+//
+// It rests on a precondition the SDL enforces — no table or schema name contains
+// a dot (sdl.validateUnmanaged) — because without it "a.b" would be
+// indistinguishable from a table "b" in schema "a". That guard is the price of
+// keying by a string, and it buys a key that is exactly what the DDL reader
+// hands back, quotes already removed.
+func SplitKey(key string) (schemaName, table string) {
+	if before, after, found := strings.Cut(key, "."); found {
+		return before, after
+	}
+	return "", key
+}
+
 // QualifiedKey is the unquoted form of the same identifier, used as the key
 // under which the differ and the fold hold a table.
 //

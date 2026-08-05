@@ -102,7 +102,8 @@ func TestFullIntrospectionQueryIsWellFormed(t *testing.T) {
 
 	schema := data["__schema"].(map[string]any)
 	if schema["mutationType"] != nil || schema["subscriptionType"] != nil {
-		t.Error("the mapped graph is read-only; there is no mutation or subscription root")
+		t.Error("this server exposes no mutation or subscription root: it holds a pool it opened " +
+			"read-only and no caller handle to run a call through (see mutation_test.go)")
 	}
 	if len(schema["directives"].([]any)) == 0 {
 		t.Error("no directives reported")

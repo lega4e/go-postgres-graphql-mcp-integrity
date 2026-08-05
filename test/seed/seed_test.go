@@ -297,11 +297,14 @@ func rootList(t *testing.T, shaped map[string]any) []any {
 // against a real PostgreSQL.
 //
 // Every runnable tab lets a reader edit the SQL that runs between the generated
-// schema and the query — that is the write path, because a SQL/PGQ property
-// graph is a read-only view and gopgql compiles no mutations (SPEC.md §2). What
-// has to hold is that a write reaches the *response*: not the table, which is
-// PostgreSQL's business, but the shaped GraphQL document the page renders,
-// which is the only thing the reader sees.
+// schema and the query — that is the page's write path, because a SQL/PGQ
+// property graph is a read-only view and nothing gopgql compiles writes
+// *through the graph* (SPEC.md §2.2). gopgql does compile writes since M11, but
+// only a `@function` call the SDL declares, and the playground's tabs declare
+// none: the reader's edit is meant to be arbitrary SQL. What has to hold is that
+// a write reaches the *response* — not the table, which is PostgreSQL's
+// business, but the shaped GraphQL document the page renders, which is the only
+// thing the reader sees.
 //
 // An UPDATE through the vertex table and an INSERT into the edge table are both
 // exercised, because they land in different places in the response — one

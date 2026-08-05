@@ -17,33 +17,31 @@ import (
 // PostgreSQL schema can be *named* at all. Before this, every identifier gopgql
 // emitted resolved through search_path and a table outside it was unreachable.
 //
-// # What is deliberately not here
+// `@node(schema:)` applies to any type, managed or not. gopgql emits no
+// CREATE SCHEMA — a schema it does not own is not its to create — so a managed
+// table in another schema depends on that schema already existing; that is the
+// author's business, and the same is true of every table an SDL names.
+//
+// # What is deliberately not here — all of it M13
 //
 // Two things a full "expose somebody else's schema" story needs are not
-// implemented, and each is refused with a message that names it rather than
-// mis-generating quietly (SPEC.md §10 forbids a silent fallback):
-//
-//   - **Qualification of a table gopgql creates.** `@node(schema:)` is accepted
-//     only together with `@readonly`. gopgql emits no CREATE SCHEMA, so a
-//     managed table in a schema gopgql did not create is a migration that
-//     depends on out-of-band setup — and the whole reason qualification exists
-//     is to reach tables that are already there. A managed table is created
-//     where the connection's search_path puts it, exactly as before.
+// implemented, and each is refused with a message naming what is missing rather
+// than mis-generating quietly (SPEC.md §10 forbids a silent fallback):
 //
 //   - **Relationships over tables gopgql does not own.** A @relationship
 //     produces an edge *table*, which gopgql would have to create; over an
-//     unmanaged endpoint it would also have to guess which of that table's
-//     columns are the source and destination keys. Expressing those needs
-//     `@relationship(sourceKey:, destKey:)` naming existing columns, which is
-//     not implemented. A relationship touching an unmanaged type is therefore
-//     refused, and `@relationship(schema:)` — which can only mean "an edge table
-//     that already exists" — is refused with it.
+//     unmanaged endpoint it would also have to be told which of that table's
+//     columns are its source and destination keys. That is
+//     `@relationship(sourceKey:, destKey:)`, which M13 adds. Until then a
+//     relationship touching an unmanaged type is refused, and
+//     `@relationship(schema:)` — which can only mean "an edge table that already
+//     exists" — is refused with it.
 //
-// An unmanaged type also still needs the surrogate `id: ID!` every @node needs
-// (validateKey). A table with no surrogate key at all — `dbos.operation_outputs`
-// is the motivating one — needs a declared natural key to become the vertex
-// identity, which reaches into the compiler's three `id` projection sites and
-// the shaper's parent dedup. That is its own change and is not this one.
+//   - **A vertex with no surrogate key.** An unmanaged type still needs
+//     `id: ID!` (validateKey). `dbos.operation_outputs`, the motivating table,
+//     has none: making a declared `@key(fields:)` the identity instead reaches
+//     into the compiler's three `id` projection sites and the shaper's parent
+//     dedup, which is M13 and lands after gopgql#10 (SPEC.md §7 → M13).
 
 // validateUnmanaged enforces the boundary above for one type.
 func (d *Document) validateUnmanaged(n *Node) error {
@@ -54,32 +52,26 @@ func (d *Document) validateUnmanaged(n *Node) error {
 		return fmt.Errorf("sdl: %s maps to %s, and a table or schema name may not contain a dot: "+
 			"the qualified identifier could not be read back unambiguously", n.TypeName, qualified(n))
 	}
-	if n.Schema != "" && !n.ReadOnly {
-		return fmt.Errorf("sdl: %s declares @node(schema: %q) without @readonly; gopgql emits no CREATE SCHEMA, "+
-			"so it qualifies only tables it does not create — add @readonly, or drop the schema and let the "+
-			"connection's search_path place the table", n.TypeName, n.Schema)
-	}
-
 	for _, f := range n.Fields {
 		if f.Rel == nil {
 			continue
 		}
 		if f.Rel.Schema != "" {
 			return fmt.Errorf("sdl: %s.%s declares @relationship(schema: %q), which can only mean an edge table "+
-				"that already exists; naming its key columns needs @relationship(sourceKey:/destKey:), which is "+
-				"not implemented", n.TypeName, f.Name, f.Rel.Schema)
+				"that already exists; naming its key columns needs @relationship(sourceKey:/destKey:), which "+
+				"arrives in M13", n.TypeName, f.Name, f.Rel.Schema)
 		}
 		target := d.NodeByType(f.TypeName)
 		switch {
 		case n.ReadOnly:
 			return fmt.Errorf("sdl: %s is @readonly and declares the relationship %s; an edge is a table gopgql "+
 				"would have to create, and over a table it does not own it would also have to be told which "+
-				"columns are its keys — @relationship(sourceKey:/destKey:) is not implemented",
+				"columns are its keys — @relationship(sourceKey:/destKey:) arrives in M13",
 				n.TypeName, f.Name)
 		case target != nil && target.ReadOnly:
 			return fmt.Errorf("sdl: %s.%s points at %s, which is @readonly; the edge table gopgql would create "+
 				"references it by its surrogate id, and naming an existing table's key columns instead needs "+
-				"@relationship(sourceKey:/destKey:), which is not implemented",
+				"@relationship(sourceKey:/destKey:), which arrives in M13",
 				n.TypeName, f.Name, target.TypeName)
 		}
 	}

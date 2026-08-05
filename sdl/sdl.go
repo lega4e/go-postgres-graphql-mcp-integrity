@@ -162,6 +162,17 @@ func (f *Field) PriorColumnNames() []string {
 	return []string{f.RenamedFrom}
 }
 
+// QualifiedTable is the type's physical table as an unambiguous name:
+// "schema.table" when the type declares a schema, the bare table otherwise. It
+// is the key the document holds the type under, and the same form the differ and
+// the fold use, so the three cannot disagree about which table is which.
+func (n *Node) QualifiedTable() string {
+	if n.Schema == "" {
+		return n.Table
+	}
+	return n.Schema + "." + n.Table
+}
+
 // PriorTableNames derives the physical table names this type may have had before
 // the rename its @renamedFrom declares, most likely first. It is nil when the
 // type declares no rename.
@@ -300,7 +311,8 @@ type Document struct {
 func (d *Document) NodeByType(name string) *Node { return d.byType[name] }
 
 // NodeByTable returns the node whose physical table has the given name, or nil.
-// Query root fields resolve to nodes by table name (SPEC.md §7 → M1).
+// The name is the qualified one — "dbos.streams" for a type declaring a schema,
+// the bare table otherwise — matching [Node.QualifiedTable].
 func (d *Document) NodeByTable(name string) *Node { return d.byTable[name] }
 
 // InterfaceByType returns the interface for a GraphQL type name, or nil.
@@ -418,12 +430,16 @@ func Parse(src string) (*Document, error) {
 	sort.Slice(doc.Nodes, func(i, j int) bool { return doc.Nodes[i].TypeName < doc.Nodes[j].TypeName })
 
 	for _, n := range doc.Nodes {
-		if prev, dup := doc.byTable[n.Table]; dup {
+		// Keyed by the *qualified* name: two tables of one name in two schemas
+		// are two tables, and only their root fields collide (which
+		// buildTargets reports separately, and in the terms a reader can act
+		// on — a root field is a GraphQL name and cannot carry a schema).
+		if prev, dup := doc.byTable[n.QualifiedTable()]; dup {
 			return nil, fmt.Errorf("sdl: types %q and %q both map to table %q; disambiguate with @node(table:)",
-				prev.TypeName, n.TypeName, n.Table)
+				prev.TypeName, n.TypeName, n.QualifiedTable())
 		}
 		doc.byType[n.TypeName] = n
-		doc.byTable[n.Table] = n
+		doc.byTable[n.QualifiedTable()] = n
 	}
 
 	if err := doc.buildInterfaces(schema, ifaceDefs); err != nil {
@@ -924,7 +940,7 @@ func (d *Document) validateRenameHints(n *Node) error {
 			return fmt.Errorf("sdl: %s: @renamedFrom(name: %q), but the SDL still declares the interface %s; "+
 				"that is two types, not a rename", n.TypeName, from, from)
 		}
-		if other := d.byTable[from]; other != nil && other != n {
+		if other := d.byTable[schemaQualify(n.Schema, from)]; other != nil && other != n {
 			return fmt.Errorf("sdl: %s: @renamedFrom(name: %q), but %s still maps to table %q; "+
 				"that is two tables, not a rename", n.TypeName, from, other.TypeName, from)
 		}
@@ -1033,6 +1049,16 @@ func namedType(t *ast.Type) string {
 		t = t.Elem
 	}
 	return ""
+}
+
+// schemaQualify renders a prior table name under a type's schema, so a rename
+// hint is resolved against the same namespace the type lives in — a rename never
+// moves a table between schemas.
+func schemaQualify(schemaName, table string) string {
+	if schemaName == "" {
+		return table
+	}
+	return schemaName + "." + table
 }
 
 // pluralize derives a table name from a label ("person" -> "persons"). It is a

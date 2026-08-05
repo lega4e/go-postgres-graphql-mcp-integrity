@@ -155,12 +155,14 @@ func classifyLike(prior, like *schema.Schema) *schema.Schema {
 	}
 	edges := map[string]bool{}
 	for _, e := range like.EdgeTables {
-		edges[e.Name] = true
+		edges[e.Key()] = true
 	}
 	out := &schema.Schema{GraphName: prior.GraphName, Indexes: prior.Indexes}
 	for _, vt := range prior.VertexTables {
-		if edges[vt.Name] {
-			out.EdgeTables = append(out.EdgeTables, schema.EdgeTable{Name: vt.Name, Columns: vt.Columns})
+		if edges[vt.Key()] {
+			out.EdgeTables = append(out.EdgeTables, schema.EdgeTable{
+				Name: vt.Name, Schema: vt.Schema, Columns: vt.Columns,
+			})
 			continue
 		}
 		out.VertexTables = append(out.VertexTables, vt)
@@ -236,7 +238,10 @@ type uniqueChange struct {
 	Column string
 }
 
-func (u uniqueChange) name() string { return schema.UniqueConstraintName(u.Table, u.Column) }
+// name derives the constraint's name from the *bare* table name: PostgreSQL's
+// implicit constraint names carry no schema, and the drop has to find the name
+// the database actually gave it.
+func (u uniqueChange) name() string { return schema.UniqueConstraintName(bare(u.Table), u.Column) }
 
 func (d *schemaDiff) structural() bool {
 	return len(d.addedVertices) > 0 || len(d.droppedVertices) > 0 ||
@@ -267,28 +272,28 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 	toV := vertexIndex(to)
 	// Vertex tables added / dropped, and column diffs for those in both.
 	for _, vt := range to.VertexTables {
-		if _, ok := fromV[vt.Name]; !ok {
-			d.addedVertices = append(d.addedVertices, vt.Name)
+		if _, ok := fromV[vt.Key()]; !ok {
+			d.addedVertices = append(d.addedVertices, vt.Key())
 		}
 	}
 	for _, vt := range from.VertexTables {
-		if _, ok := toV[vt.Name]; !ok {
-			d.droppedVertices = append(d.droppedVertices, vt.Name)
+		if _, ok := toV[vt.Key()]; !ok {
+			d.droppedVertices = append(d.droppedVertices, vt.Key())
 			continue
 		}
 	}
 	for _, vt := range from.VertexTables {
-		toVT, ok := toV[vt.Name]
+		toVT, ok := toV[vt.Key()]
 		if !ok {
 			continue
 		}
 		added, dropped := columnDiff(vt.Columns, toVT.Columns)
 		if len(added) > 0 || len(dropped) > 0 {
-			d.commonVertices = append(d.commonVertices, vt.Name)
-			d.addedColumns[vt.Name] = added
-			d.droppedColumns[vt.Name] = dropped
+			d.commonVertices = append(d.commonVertices, vt.Key())
+			d.addedColumns[vt.Key()] = added
+			d.droppedColumns[vt.Key()] = dropped
 		}
-		gained, lost := uniqueDiff(vt.Name, vt.Columns, toVT.Columns)
+		gained, lost := uniqueDiff(vt.Key(), vt.Columns, toVT.Columns)
 		d.addedUniques = append(d.addedUniques, gained...)
 		d.droppedUniques = append(d.droppedUniques, lost...)
 
@@ -296,19 +301,19 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 		d.addedConstraints = append(d.addedConstraints, addedCons...)
 		d.droppedConstraints = append(d.droppedConstraints, droppedCons...)
 
-		d.defaultChanges = append(d.defaultChanges, defaultDiff(vt.Name, vt.Columns, toVT.Columns)...)
+		d.defaultChanges = append(d.defaultChanges, defaultDiff(vt.Key(), vt.Columns, toVT.Columns)...)
 	}
 
 	fromE := edgeIndex(from)
 	toE := edgeIndex(to)
 	for _, et := range to.EdgeTables {
-		if _, ok := fromE[et.Name]; !ok {
-			d.addedEdges = append(d.addedEdges, et.Name)
+		if _, ok := fromE[et.Key()]; !ok {
+			d.addedEdges = append(d.addedEdges, et.Key())
 		}
 	}
 	for _, et := range from.EdgeTables {
-		if _, ok := toE[et.Name]; !ok {
-			d.droppedEdges = append(d.droppedEdges, et.Name)
+		if _, ok := toE[et.Key()]; !ok {
+			d.droppedEdges = append(d.droppedEdges, et.Key())
 		}
 	}
 
@@ -319,24 +324,24 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 	fromIdx := indexByName(from)
 	toIdx := indexByName(to)
 	for _, idx := range to.Indexes {
-		prior, ok := fromIdx[idx.Name]
+		prior, ok := fromIdx[idx.Key()]
 		// An index whose definition moved — different columns or a different
 		// access method — is dropped and recreated: PostgreSQL has no ALTER for
 		// either (SPEC.md §7 → M6).
 		if ok && sameIndex(prior, idx) {
 			continue
 		}
-		if addedTables[idx.Table] {
+		if addedTables[schema.QualifiedKey(idx.Schema, idx.Table)] {
 			continue
 		}
 		d.addedIndexes = append(d.addedIndexes, idx)
 	}
 	for _, idx := range from.Indexes {
-		desired, ok := toIdx[idx.Name]
+		desired, ok := toIdx[idx.Key()]
 		if ok && sameIndex(idx, desired) {
 			continue
 		}
-		if droppedTables[idx.Table] {
+		if droppedTables[schema.QualifiedKey(idx.Schema, idx.Table)] {
 			continue
 		}
 		d.droppedIndexes = append(d.droppedIndexes, idx)
@@ -346,7 +351,8 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 
 // sameIndex reports whether two same-named indexes are identical in definition.
 func sameIndex(a, b schema.Index) bool {
-	if a.Table != b.Table || a.Method != b.Method || len(a.Columns) != len(b.Columns) {
+	if a.Table != b.Table || a.Schema != b.Schema || a.Method != b.Method ||
+		len(a.Columns) != len(b.Columns) {
 		return false
 	}
 	for i := range a.Columns {
@@ -400,7 +406,7 @@ func constraintDiff(from, to *schema.VertexTable) (added, dropped []constraintCh
 			continue
 		}
 		added = append(added, constraintChange{
-			Table: to.Name, Name: c.Name, Kind: c.Kind, Columns: c.Columns, Expr: c.Expr,
+			Table: to.Key(), Name: c.Name, Kind: c.Kind, Columns: c.Columns, Expr: c.Expr,
 		})
 	}
 	for _, c := range generator.TableConstraints(from) {
@@ -408,7 +414,7 @@ func constraintDiff(from, to *schema.VertexTable) (added, dropped []constraintCh
 			continue
 		}
 		dropped = append(dropped, constraintChange{
-			Table: from.Name, Name: c.Name, Kind: c.Kind, Columns: c.Columns, Expr: c.Expr,
+			Table: from.Key(), Name: c.Name, Kind: c.Kind, Columns: c.Columns, Expr: c.Expr,
 		})
 	}
 	return added, dropped
@@ -500,7 +506,7 @@ func (d *schemaDiff) upStructural(to *schema.Schema) []string {
 		s = append(s, dropNamedConstraintStmt(c))
 	}
 	for _, idx := range d.droppedIndexes {
-		s = append(s, dropIndexStmt(idx.Name))
+		s = append(s, dropIndexStmt(idx))
 	}
 	for _, u := range d.droppedUniques {
 		s = append(s, dropConstraintStmt(u))
@@ -565,7 +571,7 @@ func (d *schemaDiff) downStructural(from *schema.Schema) []string {
 		s = append(s, dropNamedConstraintStmt(c))
 	}
 	for _, idx := range d.addedIndexes {
-		s = append(s, dropIndexStmt(idx.Name))
+		s = append(s, dropIndexStmt(idx))
 	}
 	for _, u := range d.addedUniques {
 		s = append(s, dropConstraintStmt(u))
@@ -652,20 +658,20 @@ func columnDiff(fromCols, toCols []schema.Column) (added, dropped []schema.Colum
 // by the CREATE INDEX for each index m declares on it (in m's index order) — so
 // a table created in a delta arrives with its mandatory destination-key index
 // (SPEC.md §5.3 invariant 2).
-func tableCreateStmts(m *schema.Schema, name string) []string {
+func tableCreateStmts(m *schema.Schema, key string) []string {
 	var out []string
 	for i := range m.VertexTables {
-		if m.VertexTables[i].Name == name {
+		if m.VertexTables[i].Key() == key {
 			out = append(out, generator.VertexTableDDL(&m.VertexTables[i]))
 		}
 	}
 	for i := range m.EdgeTables {
-		if m.EdgeTables[i].Name == name {
+		if m.EdgeTables[i].Key() == key {
 			out = append(out, generator.EdgeTableDDL(&m.EdgeTables[i]))
 		}
 	}
 	for _, idx := range m.Indexes {
-		if idx.Table == name {
+		if schema.QualifiedKey(idx.Schema, idx.Table) == key {
 			out = append(out, generator.IndexDDL(idx))
 		}
 	}
@@ -673,15 +679,15 @@ func tableCreateStmts(m *schema.Schema, name string) []string {
 }
 
 func addColumnStmt(table string, c schema.Column) string {
-	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", quote(table), generator.ColumnDDL(c))
+	return fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", qualify(table), generator.ColumnDDL(c))
 }
 
 func dropColumnStmt(table, col string) string {
-	return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", quote(table), quote(col))
+	return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", qualify(table), quote(col))
 }
 
-func dropTableStmt(name string) string {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", quote(name))
+func dropTableStmt(key string) string {
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s;", qualify(key))
 }
 
 // addConstraintStmt / dropConstraintStmt render a single-column UNIQUE
@@ -689,12 +695,12 @@ func dropTableStmt(name string) string {
 // constraint created inline by CREATE TABLE can later be dropped by name.
 func addConstraintStmt(u uniqueChange) string {
 	return fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);",
-		pgident.Quote(u.Table), pgident.Quote(u.name()), pgident.Quote(u.Column))
+		qualify(u.Table), pgident.Quote(u.name()), pgident.Quote(u.Column))
 }
 
 func dropConstraintStmt(u uniqueChange) string {
 	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
-		pgident.Quote(u.Table), pgident.Quote(u.name()))
+		qualify(u.Table), pgident.Quote(u.name()))
 }
 
 // addNamedConstraintStmt / dropNamedConstraintStmt render the M7 constraints —
@@ -704,12 +710,12 @@ func dropConstraintStmt(u uniqueChange) string {
 // the drop can find it.
 func addNamedConstraintStmt(c constraintChange) string {
 	body := generator.TableConstraint{Name: c.Name, Kind: c.Kind, Columns: c.Columns, Expr: c.Expr}
-	return fmt.Sprintf("ALTER TABLE %s ADD %s;", pgident.Quote(c.Table), body.Body())
+	return fmt.Sprintf("ALTER TABLE %s ADD %s;", qualify(c.Table), body.Body())
 }
 
 func dropNamedConstraintStmt(c constraintChange) string {
 	return fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;",
-		pgident.Quote(c.Table), pgident.Quote(c.Name))
+		qualify(c.Table), pgident.Quote(c.Name))
 }
 
 // setDefaultStmt renders a default change. An empty expression is a DROP: the
@@ -719,14 +725,17 @@ func dropNamedConstraintStmt(c constraintChange) string {
 func setDefaultStmt(table, column, expr string) string {
 	if expr == "" {
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;",
-			pgident.Quote(table), pgident.Quote(column))
+			qualify(table), pgident.Quote(column))
 	}
 	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;",
-		pgident.Quote(table), pgident.Quote(column), expr)
+		qualify(table), pgident.Quote(column), expr)
 }
 
-func dropIndexStmt(name string) string {
-	return fmt.Sprintf("DROP INDEX IF EXISTS %s;", quote(name))
+// dropIndexStmt qualifies the index by its table's schema: PostgreSQL creates an
+// index in the schema of the table it is on, so a DROP that named it bare would
+// resolve through search_path and miss it.
+func dropIndexStmt(idx schema.Index) string {
+	return fmt.Sprintf("DROP INDEX IF EXISTS %s;", idx.QualifiedName())
 }
 
 // joinStmts joins statements with blank lines and a trailing newline, matching
@@ -735,10 +744,15 @@ func joinStmts(stmts []string) string {
 	return strings.Join(stmts, "\n\n") + "\n"
 }
 
+// The three indexes below are keyed by *qualified* name, not by bare name, and
+// so are every name list on schemaDiff. A schema qualifier is part of the
+// identifier PostgreSQL resolves, so two tables of one name in two schemas are
+// two tables — keying by the bare name would let the differ read one table's
+// columns onto the other and emit an ALTER against the wrong one.
 func vertexIndex(m *schema.Schema) map[string]schema.VertexTable {
 	out := make(map[string]schema.VertexTable, len(m.VertexTables))
 	for _, vt := range m.VertexTables {
-		out[vt.Name] = vt
+		out[vt.Key()] = vt
 	}
 	return out
 }
@@ -746,7 +760,7 @@ func vertexIndex(m *schema.Schema) map[string]schema.VertexTable {
 func edgeIndex(m *schema.Schema) map[string]schema.EdgeTable {
 	out := make(map[string]schema.EdgeTable, len(m.EdgeTables))
 	for _, et := range m.EdgeTables {
-		out[et.Name] = et
+		out[et.Key()] = et
 	}
 	return out
 }
@@ -754,9 +768,19 @@ func edgeIndex(m *schema.Schema) map[string]schema.EdgeTable {
 func indexByName(m *schema.Schema) map[string]schema.Index {
 	out := make(map[string]schema.Index, len(m.Indexes))
 	for _, idx := range m.Indexes {
-		out[idx.Name] = idx
+		out[idx.Key()] = idx
 	}
 	return out
+}
+
+// qualify renders a table key back as the identifier a statement names it by.
+func qualify(key string) string { return schema.QualifiedName(schema.SplitKey(key)) }
+
+// bare is the table name a constraint name is derived from. Constraint names are
+// per-table and never carry a schema, so the derivation uses the bare half.
+func bare(key string) string {
+	_, name := schema.SplitKey(key)
+	return name
 }
 
 func nameSet(groups ...[]string) map[string]bool {

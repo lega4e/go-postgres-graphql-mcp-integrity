@@ -26,6 +26,14 @@ import (
 // tableRename renames a vertex table; columnRename renames one of its columns,
 // naming the table by the name it has *after* any table rename, because that is
 // the order the statements run in.
+//
+// From, To and Table are *qualified keys* (schema.QualifiedKey), for the same
+// reason the differ's name lists are: a same-named table in another schema is a
+// different table, and a rename must not match it. A rename never crosses
+// schemas — @renamedFrom states a prior GraphQL name and the qualifier comes
+// from the current declaration — so the two keys always share a schema, and the
+// emitted RENAME TO carries a bare target because PostgreSQL forbids a qualifier
+// there.
 type tableRename struct{ From, To string }
 
 type columnRename struct{ Table, From, To string }
@@ -62,11 +70,15 @@ func planRenames(from, to *schema.Schema) renamePlan {
 	// resolved against the prior state under the name it had there.
 	priorTable := map[string]string{}
 	for _, vt := range to.VertexTables {
-		if _, taken := fromV[vt.Name]; taken {
+		if _, taken := fromV[vt.Key()]; taken {
 			continue
 		}
-		for _, cand := range vt.RenamedFrom {
-			if cand == vt.Name {
+		for _, name := range vt.RenamedFrom {
+			// A candidate is a prior *table* name; it inherits the type's
+			// current schema, because a rename does not move a table between
+			// schemas.
+			cand := schema.QualifiedKey(vt.Schema, name)
+			if cand == vt.Key() {
 				continue
 			}
 			if _, ok := fromV[cand]; !ok {
@@ -75,15 +87,15 @@ func planRenames(from, to *schema.Schema) renamePlan {
 			if _, stillDesired := toV[cand]; stillDesired {
 				continue
 			}
-			p.tables = append(p.tables, tableRename{From: cand, To: vt.Name})
-			priorTable[vt.Name] = cand
+			p.tables = append(p.tables, tableRename{From: cand, To: vt.Key()})
+			priorTable[vt.Key()] = cand
 			break
 		}
 	}
 
 	for _, vt := range to.VertexTables {
-		old := vt.Name
-		if prior, ok := priorTable[vt.Name]; ok {
+		old := vt.Key()
+		if prior, ok := priorTable[vt.Key()]; ok {
 			old = prior
 		}
 		priorVT, ok := fromV[old]
@@ -98,7 +110,7 @@ func planRenames(from, to *schema.Schema) renamePlan {
 				if cand == c.Name || !hasColumn(priorVT.Columns, cand) || hasColumn(vt.Columns, cand) {
 					continue
 				}
-				p.columns = append(p.columns, columnRename{Table: vt.Name, From: cand, To: c.Name})
+				p.columns = append(p.columns, columnRename{Table: vt.Key(), From: cand, To: c.Name})
 				break
 			}
 		}
@@ -159,15 +171,18 @@ func applyRenames(from *schema.Schema, p renamePlan) (*schema.Schema, []staleCon
 	var stale []staleConstraint
 	for i := range m.VertexTables {
 		vt := &m.VertexTables[i]
-		prevTable, tableMoved := oldTable[vt.Name]
+		prevKey, tableMoved := oldTable[vt.Key()]
 		if !tableMoved {
-			prevTable = vt.Name
+			prevKey = vt.Key()
 		}
-		prevCol := func(name string) string {
-			if was, ok := oldColumn[vt.Name][name]; ok {
+		// Constraint names are per-table and carry no schema, so they are
+		// derived from the bare half of the key on both sides.
+		prevTable, name := bare(prevKey), vt.Name
+		prevCol := func(col string) string {
+			if was, ok := oldColumn[vt.Key()][col]; ok {
 				return was
 			}
-			return name
+			return col
 		}
 
 		if vt.NaturalKey != nil {
@@ -182,18 +197,18 @@ func applyRenames(from *schema.Schema, p renamePlan) (*schema.Schema, []staleCon
 			c := &vt.Columns[j]
 			if c.Check != "" {
 				old := schema.ColumnCheckConstraintName(prevTable, prevCol(c.Name))
-				if old != schema.ColumnCheckConstraintName(vt.Name, c.Name) {
+				if old != schema.ColumnCheckConstraintName(name, c.Name) {
 					stale = append(stale, staleConstraint{
-						Table: vt.Name, Name: old, Kind: "CHECK", Expr: c.Check,
+						Table: vt.Key(), Name: old, Kind: "CHECK", Expr: c.Check,
 					})
 					c.Check = ""
 				}
 			}
 			if c.Unique && !c.PrimaryKey {
 				old := schema.UniqueConstraintName(prevTable, prevCol(c.Name))
-				if old != schema.UniqueConstraintName(vt.Name, c.Name) {
+				if old != schema.UniqueConstraintName(name, c.Name) {
 					stale = append(stale, staleConstraint{
-						Table: vt.Name, Name: old, Kind: "UNIQUE", Columns: []string{c.Name},
+						Table: vt.Key(), Name: old, Kind: "UNIQUE", Columns: []string{c.Name},
 					})
 					c.Unique = false
 				}
@@ -202,7 +217,7 @@ func applyRenames(from *schema.Schema, p renamePlan) (*schema.Schema, []staleCon
 		if tableMoved && len(vt.Checks) > 0 {
 			for n, expr := range vt.Checks {
 				stale = append(stale, staleConstraint{
-					Table: vt.Name, Name: schema.TableCheckConstraintName(prevTable, n+1),
+					Table: vt.Key(), Name: schema.TableCheckConstraintName(prevTable, n+1),
 					Kind: "CHECK", Expr: expr,
 				})
 			}
@@ -216,30 +231,33 @@ func applyRenames(from *schema.Schema, p renamePlan) (*schema.Schema, []staleCon
 // it. Indexes keep their names — PostgreSQL does not rename them either — so the
 // ordinary index diff drops the old-named index and creates the new-named one.
 func renameTableIn(m *schema.Schema, from, to string) {
+	fromSchema, fromName := schema.SplitKey(from)
+	toSchema, toName := schema.SplitKey(to)
 	for i := range m.VertexTables {
-		if m.VertexTables[i].Name == from {
-			m.VertexTables[i].Name = to
+		if m.VertexTables[i].Key() == from {
+			m.VertexTables[i].Schema, m.VertexTables[i].Name = toSchema, toName
 		}
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		if e.SourceTable == from {
-			e.SourceTable = to
+		if schema.QualifiedKey(e.SourceSchema, e.SourceTable) == from {
+			e.SourceSchema, e.SourceTable = toSchema, toName
 		}
-		if e.DestTable == from {
-			e.DestTable = to
+		if schema.QualifiedKey(e.DestSchema, e.DestTable) == from {
+			e.DestSchema, e.DestTable = toSchema, toName
 		}
 	}
 	forEachColumn(m, func(_ string, c *schema.Column) {
-		if c.References != nil && c.References.Table == from {
-			c.References.Table = to
+		if c.References != nil && schema.QualifiedKey(c.References.Schema, c.References.Table) == from {
+			c.References.Schema, c.References.Table = toSchema, toName
 		}
 	})
 	for i := range m.Indexes {
-		if m.Indexes[i].Table == from {
-			m.Indexes[i].Table = to
+		if schema.QualifiedKey(m.Indexes[i].Schema, m.Indexes[i].Table) == from {
+			m.Indexes[i].Schema, m.Indexes[i].Table = toSchema, toName
 		}
 	}
+	_, _ = fromSchema, fromName
 }
 
 // renameColumnIn renames a column of one table and every reference to it: the
@@ -248,7 +266,7 @@ func renameTableIn(m *schema.Schema, from, to string) {
 func renameColumnIn(m *schema.Schema, table, from, to string) {
 	for i := range m.VertexTables {
 		vt := &m.VertexTables[i]
-		if vt.Name != table {
+		if vt.Key() != table {
 			continue
 		}
 		for j := range vt.Columns {
@@ -266,20 +284,22 @@ func renameColumnIn(m *schema.Schema, table, from, to string) {
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		if e.SourceTable == table && e.SourceRef == from {
+		if schema.QualifiedKey(e.SourceSchema, e.SourceTable) == table && e.SourceRef == from {
 			e.SourceRef = to
 		}
-		if e.DestTable == table && e.DestRef == from {
+		if schema.QualifiedKey(e.DestSchema, e.DestTable) == table && e.DestRef == from {
 			e.DestRef = to
 		}
 	}
 	forEachColumn(m, func(_ string, c *schema.Column) {
-		if c.References != nil && c.References.Table == table && c.References.Column == from {
+		if c.References != nil &&
+			schema.QualifiedKey(c.References.Schema, c.References.Table) == table &&
+			c.References.Column == from {
 			c.References.Column = to
 		}
 	})
 	for i := range m.Indexes {
-		if m.Indexes[i].Table == table {
+		if schema.QualifiedKey(m.Indexes[i].Schema, m.Indexes[i].Table) == table {
 			m.Indexes[i].Columns = replaceIn(m.Indexes[i].Columns, from, to)
 		}
 	}
@@ -371,13 +391,16 @@ func hasColumn(cols []schema.Column, name string) bool {
 	return false
 }
 
+// renameTableStmt qualifies the table being renamed and leaves the new name
+// bare: PostgreSQL rejects a schema qualifier after RENAME TO, because a rename
+// cannot move a table between schemas.
 func renameTableStmt(r tableRename) string {
-	return fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", pgident.Quote(r.From), pgident.Quote(r.To))
+	return fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualify(r.From), pgident.Quote(bare(r.To)))
 }
 
 func renameColumnStmt(r columnRename) string {
 	return fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;",
-		pgident.Quote(r.Table), pgident.Quote(r.From), pgident.Quote(r.To))
+		qualify(r.Table), pgident.Quote(r.From), pgident.Quote(r.To))
 }
 
 // invert turns a plan into the plan that undoes it: tables and columns swap
