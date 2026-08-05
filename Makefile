@@ -1,4 +1,4 @@
-.PHONY: build vet test lint vuln wasm docs release-check release-snapshot all
+.PHONY: build vet test bench lint vuln wasm docs release-check release-snapshot all
 
 # Host build of all packages (cmd/wasm builds its host stub here).
 build:
@@ -11,6 +11,18 @@ vet:
 # The container-backed suite always runs — there is no skip path (SPEC.md §10).
 test:
 	go test -v -timeout 20m ./...
+
+# The depth x fan-out shaping benchmark (SPEC.md §7 -> M8), and the document it
+# produces. Requires Docker; boots postgres:19beta2 via testcontainers.
+#
+# -benchtime 3x rather than the default: a fan-out-64 depth-3 case ships 262,144
+# rows to the client under Go-side shaping, so letting the framework choose its
+# own iteration count would run for hours to sharpen a number that is dominated
+# by the machine anyway. The numbers that are properties of the *strategy* —
+# rows shipped and bytes received — are exact at one iteration.
+bench:
+	go test -run '^$$' -bench . -benchtime 3x -timeout 40m ./test/bench/... \
+		| scripts/benchmarks-md.sh > docs/benchmarks.md
 
 lint:
 	golangci-lint run ./...

@@ -279,8 +279,8 @@ func (st *scenarioState) compileAndExecute(ctx context.Context, query string, va
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	st.response = shape.Rows(cq.Projection, flat)
-	return nil
+	st.response, err = shape.Rows(cq.Projection, flat)
+	return err
 }
 
 // assertParameterised confirms the filter value was compiled to a bind

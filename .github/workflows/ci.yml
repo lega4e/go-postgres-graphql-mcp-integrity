@@ -38,6 +38,32 @@ jobs:
       - name: integration tests (godog + testcontainers)
         run: go test -v -timeout 20m ./...
 
+  # The shaping benchmark, run for one iteration per case (SPEC.md §7 → M8).
+  #
+  # It has a job of its own rather than a step in the one above: the test job is
+  # capped at 25 minutes and already boots a container per suite, and if
+  # something has to be thinned it must never be test/parity — that suite is the
+  # milestone's acceptance criterion.
+  #
+  # One iteration proves the benchmark still compiles, still boots a container
+  # and that both strategies still return a result. It asserts no timings: a
+  # shared runner cannot hold them steady, and a flaky performance gate gets
+  # switched off within a month. The numbers that *are* deterministic — the rows
+  # each strategy ships — are asserted by ordinary tests in the same package,
+  # which the job above already runs.
+  bench:
+    name: shaping benchmark (smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: benchmark smoke run
+        run: go test -run '^$' -bench . -benchtime 1x -timeout 20m ./test/bench/...
+
   lint:
     name: golangci-lint
     runs-on: ubuntu-latest

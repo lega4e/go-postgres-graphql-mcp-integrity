@@ -22,9 +22,19 @@ import (
 // KeyColumn) to its scanned value. The returned map has one entry — the root
 // field's response key — whose value is the ordered, deduplicated list of parent
 // objects.
-func Rows(proj compiler.Projection, rows []map[string]any) map[string]any {
+//
+// Every leaf is normalised on the way through, so the response this builds is
+// the same canonical value shape.Decode builds from the SQL-side strategy's JSON
+// and Encode writes identical bytes for either (design D3, D5). Normalisation is
+// what makes the error return necessary: a non-finite Float has no JSON form,
+// and it fails here rather than succeeding on one path and failing on the other.
+func Rows(proj compiler.Projection, rows []map[string]any) (map[string]any, error) {
 	root := proj.Root
-	return map[string]any{root.ResponseKey: group(root, rows)}
+	list, err := group(root, rows)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{root.ResponseKey: list}, nil
 }
 
 // group buckets rows by sel.KeyColumn and builds one object per distinct key,
@@ -32,7 +42,7 @@ func Rows(proj compiler.Projection, rows []map[string]any) map[string]any {
 // key at this level is null are skipped: an inner-join MATCH never produces a
 // null key, but a defensive skip keeps a stray null from becoming a phantom
 // parent.
-func group(sel *compiler.Selection, rows []map[string]any) []any {
+func group(sel *compiler.Selection, rows []map[string]any) ([]any, error) {
 	var order []string
 	buckets := map[string][]map[string]any{}
 	for _, row := range rows {
@@ -52,14 +62,22 @@ func group(sel *compiler.Selection, rows []map[string]any) []any {
 		grp := buckets[k]
 		obj := make(map[string]any, len(sel.Fields)+len(sel.Children))
 		for _, f := range sel.Fields {
-			obj[f.ResponseKey] = grp[0][f.Column]
+			val, err := normalise(f, grp[0][f.Column])
+			if err != nil {
+				return nil, err
+			}
+			obj[f.ResponseKey] = val
 		}
 		for _, child := range sel.Children {
-			obj[child.ResponseKey] = group(child, grp)
+			nested, err := group(child, grp)
+			if err != nil {
+				return nil, err
+			}
+			obj[child.ResponseKey] = nested
 		}
 		list = append(list, obj)
 	}
-	return list
+	return list, nil
 }
 
 // keyString renders a key value as a stable string usable as a map key. Scanned

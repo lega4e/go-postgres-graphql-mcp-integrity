@@ -302,8 +302,8 @@ func (st *scenarioState) compileAndExecute(ctx context.Context, query string) er
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	st.response = shape.Rows(cq.Projection, flat)
-	return nil
+	st.response, err = shape.Rows(cq.Projection, flat)
+	return err
 }
 
 func (st *scenarioState) assertJSON(want *godog.DocString) error {

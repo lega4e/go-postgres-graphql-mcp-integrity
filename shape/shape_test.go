@@ -10,6 +10,18 @@ import (
 
 // flatProjection mirrors what the compiler builds for `{ persons { name } }`:
 // one level keyed by v0_k with a single scalar field.
+// mustRows shapes rows and fails the test if the leaf normaliser rejects one.
+// These projections carry no scalar kinds, so nothing here can fail — the helper
+// exists to keep the assertions about grouping, which is what they are for.
+func mustRows(t *testing.T, proj compiler.Projection, rows []map[string]any) map[string]any {
+	t.Helper()
+	got, err := shape.Rows(proj, rows)
+	if err != nil {
+		t.Fatalf("Rows: %v", err)
+	}
+	return got
+}
+
 func flatProjection() compiler.Projection {
 	return compiler.Projection{Root: &compiler.Selection{
 		ResponseKey: "persons",
@@ -25,7 +37,7 @@ func TestRowsNestsUnderRoot(t *testing.T) {
 		{"v0_k": "a", "v0_c0": "Alice"},
 		{"v0_k": "b", "v0_c0": "Bob"},
 	}
-	got := shape.Rows(proj, rows)
+	got := mustRows(t, proj, rows)
 	want := map[string]any{
 		"persons": []any{
 			map[string]any{"name": "Alice"},
@@ -38,7 +50,7 @@ func TestRowsNestsUnderRoot(t *testing.T) {
 }
 
 func TestRowsEmpty(t *testing.T) {
-	got := shape.Rows(flatProjection(), nil)
+	got := mustRows(t, flatProjection(), nil)
 	list, ok := got["persons"].([]any)
 	if !ok {
 		t.Fatalf("expected []any under persons, got %T", got["persons"])
@@ -73,7 +85,7 @@ func TestRowsDedupsParents(t *testing.T) {
 		{"v0_k": "alice", "v0_c0": "Alice", "v1_k": "carol", "v1_c0": "Carol"},
 		{"v0_k": "bob", "v0_c0": "Bob", "v1_k": "dave", "v1_c0": "Dave"},
 	}
-	got := shape.Rows(proj, rows)
+	got := mustRows(t, proj, rows)
 	want := map[string]any{
 		"persons": []any{
 			map[string]any{"name": "Alice", "follows": []any{
@@ -99,7 +111,7 @@ func TestRowsHandlesNonComparableKeys(t *testing.T) {
 		{"v0_k": id(1), "v0_c0": "Alice", "v1_k": id(2), "v1_c0": "Bob"},
 		{"v0_k": id(1), "v0_c0": "Alice", "v1_k": id(3), "v1_c0": "Carol"},
 	}
-	got := shape.Rows(proj, rows)
+	got := mustRows(t, proj, rows)
 	persons, _ := got["persons"].([]any)
 	if len(persons) != 1 {
 		t.Fatalf("expected 1 deduped parent, got %d: %#v", len(persons), persons)
@@ -146,7 +158,7 @@ func TestRowsNestsThreeLevels(t *testing.T) {
 			},
 		}},
 	}
-	if got := shape.Rows(proj, rows); !reflect.DeepEqual(got, want) {
+	if got := mustRows(t, proj, rows); !reflect.DeepEqual(got, want) {
 		t.Errorf("Rows = %#v, want %#v", got, want)
 	}
 }

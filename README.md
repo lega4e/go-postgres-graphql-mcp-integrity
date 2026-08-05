@@ -266,6 +266,57 @@ The server never migrates and never writes: the compiler emits nothing but a
 `default_transaction_read_only=on`, so a write is refused by the database
 itself.
 
+## Choose how the response is shaped
+
+gopgql has two ways to turn a match into the nested GraphQL response, and you
+pick one when you build the compiler:
+
+```go
+// The default: project flat columns and regroup them in Go.
+c := compiler.New(doc)
+
+// Or: let PostgreSQL assemble the response with json_build_object / json_agg
+// and return it as a single `response` column.
+c := compiler.New(doc, compiler.WithShaping(compiler.SQLSide))
+```
+
+It is a *compiler* option rather than a runtime switch because the two emit
+different SQL. `exec.Query` reads the strategy off the compiled query and
+dispatches, so its signature is the same either way and every existing caller
+keeps working. The `MATCH` pattern, its predicates and its bind parameters are
+identical under both — only the projection around them changes.
+
+A depth-*d*, fan-out-*f* query ships *f^d* rows to the client under Go-side
+shaping and exactly one row under SQL-side shaping. Where a query branches, the
+flat statement `LEFT JOIN`s the branches and a parent with *m* and *n* children
+yields *m×n* rows, while the SQL-side statement aggregates each branch to an
+array before the join. Measurements are in
+[`docs/benchmarks.md`](docs/benchmarks.md); the default is Go-side, and the
+numbers are what a change to that would have to argue from.
+
+**Both produce byte-identical responses** — where that means something specific,
+and worth reading before relying on it:
+
+> The response is the `map[string]any` returned by `exec.Query`. Its canonical
+> encoding is `shape.Encode`, which is `encoding/json` over that value. Two
+> strategies produce byte-identical responses when `shape.Encode` of each
+> returns equal bytes.
+
+It does **not** mean the bytes PostgreSQL sends equal the bytes gopgql writes.
+They do not: `json_build_object` emits `{"k" : v}` in argument order, and
+`jsonb_build_object` additionally sorts keys by length-then-bytes and drops
+duplicates. That divergence stops where the SQL-side path decodes the database's
+JSON into the same Go value the Go-side path builds — one encoder writes both,
+so identity holds by construction rather than by a passing test. `test/parity`
+re-runs every query scenario from every earlier milestone under both strategies
+against a real `postgres:19beta2` and compares the encoded bytes, list order
+included.
+
+One consequence worth knowing: under SQL-side shaping a projected scalar gopgql
+has no canonical form for — a `@column(type: "interval")`, say — is a typed
+`*compiler.UnshapeableScalarError` at compile time. Go-side shaping keeps
+accepting it, because it makes no cross-strategy promise about it.
+
 ## Check the database still matches
 
 Everything above reasons from the SDL alone, which is sound only while nobody
@@ -323,6 +374,7 @@ will remove.
 ```sh
 make build        # go build ./...
 make test         # integration suite (needs Docker + postgres:19beta2)
+make bench        # shaping benchmark; regenerates docs/benchmarks.md
 make lint         # golangci-lint
 make docs         # build the WASM playground + docs site into docs/dist
 ```

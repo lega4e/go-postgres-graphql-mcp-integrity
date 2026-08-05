@@ -121,7 +121,14 @@ func TestQueryAnswersTypename(t *testing.T) {
 func TestQueryTypenameAlone(t *testing.T) {
 	// Stripping `__typename` empties the selection set, which the compiler
 	// rejects; a surrogate key is selected instead and removed from the result.
-	db := &recordingDB{cols: []string{"v0_k", "v0_c0"}, values: [][]any{{int64(1), int64(1)}}}
+	// The surrogate selection is a real `id` field, so the value standing in for
+	// it has to be one a uuid column could actually produce: pgx decodes uuid to
+	// a [16]byte, and shape holds ID to that (SPEC.md §7 → M8, design D5). An
+	// int64 here would be a fixture no database can generate.
+	db := &recordingDB{
+		cols:   []string{"v0_k", "v0_c0"},
+		values: [][]any{{int64(1), [16]byte{0x50, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00}}},
+	}
 	s := newServerWithDB(t, db)
 
 	out, err := s.Query(context.Background(), `{ Persons { kind: __typename } }`, nil, FormatJSON)

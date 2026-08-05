@@ -9,13 +9,15 @@
 // never fabricates query results, which would require rows from PostgreSQL
 // (SPEC.md §4).
 //
-// Six functions are exported:
+// Eight functions are exported:
 //
 //   - gopgqlSchema(sdl) -> {schema, error}
 //   - gopgqlGraph(sdl) -> {graph, error}
 //   - gopgqlMigration(sdl) -> {migration, error}
 //   - gopgqlCompile(sdl, query, varsJSON[, maxDepth]) -> {sql, params, args, error, depthExceeded, maxDepth}
+//   - gopgqlCompileShaped(sdl, query, varsJSON, sqlSide) -> {strategy, sql, params, args, resultShape, error}
 //   - gopgqlShape(sdl, query, varsJSON, resultJSON[, maxDepth]) -> {json, error}
+//   - gopgqlShapeParity(sdl, query, varsJSON, goResultJSON, sqlResultJSON) -> {goJSON, sqlJSON, identical, bytes, error}
 //   - gopgqlDelta(oldSDL, newSDL) -> {delta, changed, error}
 //
 // gopgqlShape closes the round trip. The page compiles a GraphQL query here,
@@ -24,6 +26,17 @@
 // response — the same shape.Rows the Go integration suites assert on. Shaping
 // needs no database (SPEC.md §4.1), so it belongs on this side of the boundary;
 // only exec, which owns the pgx connection, does not.
+//
+// gopgqlCompileShaped compiles under one result-shaping strategy (SPEC.md §7 →
+// M8). Choosing a strategy changes what the *compiler* emits, and — since #31
+// gave the page a real PostgreSQL — what it emits can now be run. So it returns
+// bind values alongside the SQL, exactly as gopgqlCompile does.
+//
+// gopgqlShapeParity is M8's claim, live: given the result set each strategy's
+// statement returned, it builds both responses and reports whether their
+// canonical encodings are equal. It is the same comparison test/parity asserts
+// in CI, on the same shape.Encode bytes — see the function for what that does
+// and does not claim.
 //
 // gopgqlCompile classifies a depth rejection separately from other errors so the
 // page can show it as the designed outcome it is: SQL/PGQ has no
@@ -62,7 +75,7 @@ import (
 // page refuses to run — invisible to CI, which never loads the page, and
 // immediately visible to anyone who opens a PR preview. TestAPIVersionsAgree
 // enforces this.
-const apiVersion = 7
+const apiVersion = 8
 
 func main() {
 	js.Global().Set("gopgqlApiVersion", js.ValueOf(apiVersion))
@@ -70,7 +83,9 @@ func main() {
 	js.Global().Set("gopgqlGraph", js.FuncOf(graphDDL))
 	js.Global().Set("gopgqlMigration", js.FuncOf(migration))
 	js.Global().Set("gopgqlCompile", js.FuncOf(compile))
+	js.Global().Set("gopgqlCompileShaped", js.FuncOf(compileShaped))
 	js.Global().Set("gopgqlShape", js.FuncOf(shapeResult))
+	js.Global().Set("gopgqlShapeParity", js.FuncOf(shapeParity))
 	js.Global().Set("gopgqlDelta", js.FuncOf(delta))
 	js.Global().Set("gopgqlExampleSDL", js.ValueOf(playground.ExampleSDL))
 	js.Global().Set("gopgqlExampleQuery", js.ValueOf(playground.ExampleQuery))
@@ -79,6 +94,8 @@ func main() {
 	js.Global().Set("gopgqlRevisedExampleSDL", js.ValueOf(playground.RevisedExampleSDL))
 	js.Global().Set("gopgqlExampleDeepQuery", js.ValueOf(playground.ExampleDeepQuery))
 	js.Global().Set("gopgqlExampleMultiQuery", js.ValueOf(playground.ExampleMultiPatternQuery))
+	js.Global().Set("gopgqlExampleShapingQuery", js.ValueOf(playground.ExampleShapingQuery))
+	js.Global().Set("gopgqlExampleShapingSeed", js.ValueOf(playground.ExampleShapingSeed))
 	js.Global().Set("gopgqlExampleDirectivesSDL", js.ValueOf(playground.ExampleDirectivesSDL))
 	js.Global().Set("gopgqlExampleDirectivesQuery", js.ValueOf(playground.ExampleDirectivesQuery))
 	js.Global().Set("gopgqlExampleDirectivesVars", js.ValueOf(playground.ExampleDirectivesVars))
@@ -222,6 +239,103 @@ func compile(_ js.Value, args []js.Value) any {
 	}
 	result["sql"] = out.SQL
 	result["params"] = out.Params
+	return js.ValueOf(result)
+}
+
+// compileShaped is bound to window.gopgqlCompileShaped. It takes the same three
+// strings as gopgqlCompile plus a boolean selecting the SQL-side strategy, and
+// returns the SQL that strategy emits, its bind values, and the result set it
+// asks the database for — k flat columns assembled in Go, or one column
+// assembled in PostgreSQL.
+//
+// It returns `args` for the same reason gopgqlCompile does: the page executes
+// both statements. Until gopgql#31 landed there was no database in the browser
+// to execute them against and this returned SQL only (design D8); now that
+// there is, withholding the bind values would be the only thing stopping the
+// page from showing that the two strategies agree.
+func compileShaped(_ js.Value, args []js.Value) any {
+	result := map[string]any{
+		"strategy": "", "sql": "", "params": "", "args": "[]",
+		"resultShape": "", "error": "",
+	}
+	if len(args) < 4 || args[0].Type() != js.TypeString || args[1].Type() != js.TypeString ||
+		args[2].Type() != js.TypeString || args[3].Type() != js.TypeBoolean {
+		result["error"] = "gopgqlCompileShaped expects (sdl, query, varsJSON, sqlSide) arguments"
+		return js.ValueOf(result)
+	}
+	vars, err := parseVars(args[2].String())
+	if err != nil {
+		result["error"] = "variables: " + err.Error()
+		return js.ValueOf(result)
+	}
+	out, err := playground.CompileWithShaping(args[0].String(), args[1].String(), vars, args[3].Bool())
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	if len(out.Args) > 0 {
+		encoded, err := json.Marshal(out.Args)
+		if err != nil {
+			result["error"] = "bind parameters: " + err.Error()
+			return js.ValueOf(result)
+		}
+		result["args"] = string(encoded)
+	}
+	result["strategy"] = out.Strategy
+	result["sql"] = out.SQL
+	result["params"] = out.Params
+	result["resultShape"] = out.ResultShape
+	return js.ValueOf(result)
+}
+
+// shapeParity is bound to window.gopgqlShapeParity. It expects five string
+// arguments — the SDL, the GraphQL query, a variables document as JSON (may be
+// empty), and the two result sets, one from the statement each strategy
+// emitted — and reports whether the responses they shape into are identical.
+//
+// This is the milestone's claim executed in front of the reader rather than
+// asserted in CI: test/parity runs exactly this comparison against a real
+// PostgreSQL, and so does this, against the PostgreSQL in the page.
+//
+// What "identical" means here is what design D3 defines and nothing more: the
+// two shape.Encode outputs are equal bytes. The database's own serialisation is
+// not being compared and could not be — PostgreSQL's json_build_object spaces
+// its colons and jsonb_build_object reorders keys, neither of which matches
+// encoding/json. Both paths are decoded into the same Go value and re-encoded
+// by the one encoder here, which is why the bytes agree, and the panel says so.
+func shapeParity(_ js.Value, args []js.Value) any {
+	result := map[string]any{
+		"goJSON": "", "sqlJSON": "", "identical": false, "bytes": 0, "error": "",
+	}
+	for i := range 5 {
+		if len(args) <= i || args[i].Type() != js.TypeString {
+			result["error"] = "gopgqlShapeParity expects (sdl, query, varsJSON, goResultJSON, sqlResultJSON) string arguments"
+			return js.ValueOf(result)
+		}
+	}
+	vars, err := parseVars(args[2].String())
+	if err != nil {
+		result["error"] = "variables: " + err.Error()
+		return js.ValueOf(result)
+	}
+	var goRes, sqlRes playground.Result
+	if err := json.Unmarshal([]byte(args[3].String()), &goRes); err != nil {
+		result["error"] = "Go-side result set: " + err.Error()
+		return js.ValueOf(result)
+	}
+	if err := json.Unmarshal([]byte(args[4].String()), &sqlRes); err != nil {
+		result["error"] = "SQL-side result set: " + err.Error()
+		return js.ValueOf(result)
+	}
+	out, err := playground.ShapeParity(args[0].String(), args[1].String(), vars, goRes, sqlRes)
+	if err != nil {
+		result["error"] = err.Error()
+		return js.ValueOf(result)
+	}
+	result["goJSON"] = out.GoJSON
+	result["sqlJSON"] = out.SQLJSON
+	result["identical"] = out.Identical
+	result["bytes"] = out.Bytes
 	return js.ValueOf(result)
 }
 

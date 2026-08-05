@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/sdl"
 )
@@ -76,7 +79,8 @@ func TestCompileSingleVertex(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if sql != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", sql, want)
 	}
@@ -95,7 +99,8 @@ func TestCompileMultipleProperties(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.id AS v0_c0, v0.name AS v0_c1, v0.email AS v0_c2)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -117,7 +122,8 @@ func TestCompileAlias(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -139,7 +145,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.name = $1 AND v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -167,7 +174,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) <-[e0 IS follows]- (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -186,7 +194,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person)
   WHERE v0.name = $1 AND v0.age = $2
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if sql != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", sql, want)
 	}
@@ -208,7 +217,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -249,7 +259,8 @@ FROM GRAPH_TABLE (app_graph
 		`AND v1.id <> v2.id AND v1.id <> v3.id AND v2.id <> v3.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0, ` +
 		`v2.id AS v2_k, v2.name AS v2_c0, v3.id AS v3_k, v3.name AS v3_c0)
-)`
+)
+ORDER BY v0_k, v1_k, v2_k, v3_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -344,7 +355,8 @@ func TestCompileSharedLabelInterface(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS actor)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -362,7 +374,8 @@ func TestCompileLabelAlternation(t *testing.T) {
 FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS bot|person)
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0)
-)`
+)
+ORDER BY v0_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -382,7 +395,8 @@ FROM GRAPH_TABLE (app_graph
   MATCH (v0 IS actor) -[e0 IS follows]-> (v1 IS person)
   WHERE v0.id <> v1.id
   COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v1.id AS v1_k, v1.name AS v1_c0)
-)`
+)
+ORDER BY v0_k, v1_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -416,7 +430,8 @@ LEFT JOIN GRAPH_TABLE (app_graph
     MATCH (v3 IS person) <-[e1 IS follows]- (v4 IS person)
     WHERE v3.id <> v4.id
     COLUMNS (v3.id AS v3_j, v4.id AS v4_k, v4.name AS v4_c0)
-  ) AS q2 ON q2.v3_j = q0.v0_k`
+  ) AS q2 ON q2.v3_j = q0.v0_k
+ORDER BY q0.v0_k, q1.v2_k, q2.v4_k`
 	if cq.SQL != want {
 		t.Errorf("SQL mismatch:\n--- got ---\n%s\n--- want ---\n%s", cq.SQL, want)
 	}
@@ -569,4 +584,168 @@ func TestCompileRejects(t *testing.T) {
 			t.Errorf("%s: expected error, got nil for %q", name, tc.op)
 		}
 	}
+}
+
+// --- M8: deterministic order, and the strategy selector ---
+
+// TestOrderByCoversEveryLevel is task 1.3. Byte-identity between the two
+// strategies is impossible while list order is whatever the planner produced, so
+// the flat query orders by every level's key column, outermost first. A level
+// that stopped contributing its key would leave that level's list free to come
+// back in a different order from the SQL-side strategy's json_agg.
+func TestOrderByCoversEveryLevel(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "a three-hop chain orders by all four levels",
+			query: `{ persons { name follows { name follows { name follows { name } } } } }`,
+			want:  "\nORDER BY v0_k, v1_k, v2_k, v3_k",
+		},
+		{
+			name:  "an M5 branch split orders by each branch's key, qualified by its fragment",
+			query: `{ persons { name follows { name } followedBy { name } } }`,
+			want:  "\nORDER BY q0.v0_k, q1.v2_k, q2.v4_k",
+		},
+		{
+			name:  "a single level still orders",
+			query: `{ persons { name } }`,
+			want:  "\nORDER BY v0_k",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql, _, err := compiler.New(doc).Compile(tt.query, nil)
+			require.NoError(t, err)
+			assert.True(t, strings.HasSuffix(sql, tt.want),
+				"the statement must close with %q:\n%s", tt.want, sql)
+		})
+	}
+}
+
+// TestShapingIsRecordedOnTheCompiledQuery covers the selector itself: it
+// defaults to Go-side, WithShaping changes it, and the choice rides on the
+// compiled query so exec can dispatch without being told again (design D1).
+func TestShapingIsRecordedOnTheCompiledQuery(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	assert.Equal(t, compiler.GoSide, compiler.DefaultShaping,
+		"a caller that sets nothing must get exactly the behaviour M3-M7 shipped")
+
+	plain := compiler.New(doc)
+	assert.Equal(t, compiler.GoSide, plain.Shaping())
+	cq, err := plain.CompileQuery(`{ persons { name } }`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, compiler.GoSide, cq.Shaping)
+
+	shaped := compiler.New(doc, compiler.WithShaping(compiler.SQLSide))
+	assert.Equal(t, compiler.SQLSide, shaped.Shaping())
+	cq, err = shaped.CompileQuery(`{ persons { name } }`, nil)
+	require.NoError(t, err)
+	assert.Equal(t, compiler.SQLSide, cq.Shaping)
+
+	assert.Equal(t, "go-side", compiler.GoSide.String())
+	assert.Equal(t, "sql-side", compiler.SQLSide.String())
+}
+
+// TestSQLSideEmitsAggregationNotAFlatProjection checks the emitted statement is
+// the aggregating one: json throughout, never jsonb, every aggregate COALESCEd,
+// and one output column.
+func TestSQLSideEmitsAggregationNotAFlatProjection(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	sql, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).
+		Compile(`{ persons { name follows { name } } }`, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "AS response", "the result is one named column")
+	assert.Contains(t, sql, "::text", "the outermost expression is cast to text")
+	assert.Contains(t, sql, "json_build_object")
+	assert.Contains(t, sql, "json_agg")
+	assert.NotContains(t, sql, "jsonb",
+		"jsonb sorts keys by length-then-bytes and drops duplicates (design D2)")
+
+	// json_agg over an empty set returns SQL NULL where the Go-side shaper
+	// returns an empty list, so every aggregate is COALESCEd.
+	assert.Equal(t, strings.Count(sql, "json_agg("), strings.Count(sql, "COALESCE(json_agg("),
+		"every json_agg must be COALESCEd to '[]'::json:\n%s", sql)
+}
+
+// TestSQLSideAggregatesEachBranchBeforeTheJoin is the reason SQL-side shaping
+// can win on a branching query: the flat statement LEFT JOINs both branches
+// together, so a parent with m and n children yields m*n rows, while each
+// branch here is aggregated to an array against the spine alone.
+func TestSQLSideAggregatesEachBranchBeforeTheJoin(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	sql, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).
+		Compile(`{ persons { name follows { name } followedBy { name } } }`, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "q0 LEFT JOIN q1")
+	assert.Contains(t, sql, "q0 LEFT JOIN q2")
+	assert.NotContains(t, sql, "q1 LEFT JOIN q2",
+		"the two branches must never be joined to each other; that is the m*n cross-product")
+	assert.NotContains(t, sql, "q2 LEFT JOIN q1",
+		"the two branches must never be joined to each other; that is the m*n cross-product")
+}
+
+// TestPatternConcernsAreIdenticalUnderBothStrategies is task 3.9. The depth
+// ceiling, the isomorphism guards and the interface positions are concerns of
+// the *pattern*, not of the projection, so selecting a shaping strategy must not
+// move any of them. A depth rejection in particular must still happen before any
+// SQL is emitted, under either strategy.
+func TestPatternConcernsAreIdenticalUnderBothStrategies(t *testing.T) {
+	doc, err := sdl.Parse(exampleSDL)
+	require.NoError(t, err)
+
+	t.Run("the depth ceiling refuses the same query under both", func(t *testing.T) {
+		const tooDeep = `{ persons { follows { follows { follows { follows { name } } } } } }`
+		for _, s := range []compiler.Shaping{compiler.GoSide, compiler.SQLSide} {
+			sql, _, err := compiler.New(doc, compiler.WithShaping(s)).Compile(tooDeep, nil)
+
+			var depthErr *compiler.DepthExceededError
+			require.ErrorAs(t, err, &depthErr, "under %s", s)
+			assert.Equal(t, compiler.DefaultMaxDepth, depthErr.MaxDepth)
+			assert.Empty(t, sql, "a rejected query emits no SQL, so nothing reaches a database")
+		}
+	})
+
+	t.Run("the isomorphism guards are the same predicates under both", func(t *testing.T) {
+		// Both positions can bind a person, so the pattern needs a guard or a
+		// self-follow would satisfy it.
+		const q = `{ persons { name follows { name } } }`
+		flat, _, err := compiler.New(doc).Compile(q, nil)
+		require.NoError(t, err)
+		shaped, _, err := compiler.New(doc, compiler.WithShaping(compiler.SQLSide)).Compile(q, nil)
+		require.NoError(t, err)
+
+		const guard = `WHERE v0.id <> v1.id`
+		assert.Contains(t, flat, guard)
+		assert.Contains(t, shaped, guard)
+	})
+
+	t.Run("an interface position matches the same labels under both", func(t *testing.T) {
+		ifaceDoc, err := sdl.Parse(interfaceSDL)
+		require.NoError(t, err)
+
+		flat, _, err := compiler.New(ifaceDoc).Compile(`{ profiles { name } }`, nil)
+		require.NoError(t, err)
+		shaped, _, err := compiler.New(ifaceDoc, compiler.WithShaping(compiler.SQLSide)).
+			Compile(`{ profiles { name } }`, nil)
+		require.NoError(t, err)
+
+		const alternation = `(v0 IS bot|person)`
+		assert.Contains(t, flat, alternation)
+		assert.Contains(t, shaped, alternation)
+	})
 }

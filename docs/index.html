@@ -80,7 +80,7 @@
 
       <ga-tabs
         id="tabs"
-        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
+        tabs='[{"id":"traversal","label":"Traversal"},{"id":"multipattern","label":"Multi-pattern"},{"id":"shaping","label":"Shaping"},{"id":"directives","label":"Directives"},{"id":"constraints","label":"Constraints"},{"id":"depth","label":"Depth limit"},{"id":"interfaces","label":"Interfaces"},{"id":"migration","label":"Migration"},{"id":"conformance","label":"Conformance"}]'
       >
         <!-- Traversal: the multi-hop exit query. -->
         <div slot="traversal">
@@ -643,6 +643,111 @@
                 An illustrative conformance report — a fixture, not a live check
               </label>
               <ga-code id="f-report"></ga-code>
+            </div>
+          </div>
+        </div>
+        <!-- Shaping: the same query compiled under both result-shaping
+             strategies, and — since gopgql#31 put a real PostgreSQL in the page
+             — run under both against one database, so the reader watches the
+             two responses come out the same (SPEC.md §7 → M8, design D8). -->
+        <div slot="shaping">
+          <p class="panel-hint">
+            gopgql has two ways to turn a match into a nested GraphQL response.
+            <strong>Go-side</strong> projects one flat column per selected field
+            and regroups the rows in Go. <strong>SQL-side</strong> asks
+            PostgreSQL to assemble the response with
+            <code>json_build_object</code> and <code>json_agg</code>, and
+            returns it as a single <code>response</code> column. The strategy is
+            a compiler option (<code>compiler.WithShaping</code>), not an
+            execution-time switch, because the two emit different SQL.
+          </p>
+          <p class="panel-hint">
+            The <code>MATCH</code> pattern, its predicates and its bind
+            parameters are identical under both — only the projection around
+            them changes, which is why which rows match is not part of what the
+            two strategies have to be proven to agree about. Where the query
+            branches, the flat statement <code>LEFT JOIN</code>s the branches
+            and a parent with <em>m</em> and <em>n</em> children yields
+            <em>m×n</em> rows; the SQL-side statement aggregates each branch to
+            an array before the join, so that cross-product never forms.
+          </p>
+          <ga-note>
+            Run executes <strong>both</strong> statements against one database,
+            and shapes each result into a response. What it then compares is the
+            two <strong>canonical encodings</strong> &mdash;
+            <code>shape.Encode</code>, which is <code>encoding/json</code> over
+            the response value. It is <em>not</em> a comparison of the bytes
+            PostgreSQL sent: <code>json_build_object</code> spaces its colons and
+            emits keys in argument order, which <code>encoding/json</code> does
+            neither of. Both paths are decoded into the same Go value and
+            re-encoded by that one encoder, which is why the bytes agree. The
+            same comparison runs in CI against a real
+            <code>postgres:19beta2</code> in the <code>test/parity</code> suite;
+            the two strategies are measured against each other by
+            <code>test/bench</code>.
+          </ga-note>
+          <div class="scenario">
+            <div class="inputs">
+              <label for="s-sdl">GraphQL SDL — schema</label>
+              <textarea id="s-sdl" class="code-input" data-lang="graphql" rows="9" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="s-query">GraphQL query</label>
+              <textarea id="s-query" class="code-input" data-lang="graphql" rows="3" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <label for="s-vars">Variables (JSON)</label>
+              <textarea id="s-vars" class="code-input" data-lang="json" rows="2" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+            </div>
+            <div class="action">
+              <label for="s-strategy">Shaping strategy</label>
+              <ga-radio-group
+                id="s-strategy"
+                value="go-side"
+                items='[{"id":"go-side","label":"Go-side"},{"id":"sql-side","label":"SQL-side"}]'
+              ></ga-radio-group>
+              <ga-button class="run" data-scenario="shaping" variant="primary" disabled>
+                Generate
+              </ga-button>
+              <span id="s-status" class="status"></span>
+            </div>
+            <div class="results">
+              <label>Database schema</label>
+              <ga-code id="s-schema" data-lang="sql"></ga-code>
+              <label>Result set the statement asks for</label>
+              <ga-code id="s-shape"></ga-code>
+              <label>Database query</label>
+              <ga-code id="s-sql" data-lang="sql"></ga-code>
+              <label>Ordered bind parameters &mdash; the same under both strategies</label>
+              <ga-code id="s-params"></ga-code>
+            </div>
+            <div class="execution">
+              <label for="s-data">Data &mdash; SQL applied before the queries</label>
+              <textarea id="s-data" class="code-input" data-lang="sql" rows="12" spellcheck="false"
+                autocapitalize="off" autocorrect="off"></textarea>
+              <p class="exec-cost">
+                These <code>INSERT</code>s branch on purpose: Alice follows two people
+                and is followed by two others. That is the case the two strategies
+                disagree about the <em>shape</em> of &mdash; Go-side asks for
+                2&times;2&nbsp;=&nbsp;4 flat rows, SQL-side for one &mdash; and
+                agree about the <em>response</em> to. Edit it and press Run again.
+              </p>
+              <div class="action">
+                <ga-button class="exec" data-scenario="shaping" variant="secondary" disabled>
+                  Run both strategies
+                </ga-button>
+                <span id="s-exec-status" class="status"></span>
+              </div>
+              <p class="exec-cost">
+                Runs the schema, the data SQL, and then <strong>both</strong>
+                compiled statements against one real PostgreSQL&nbsp;19 compiled
+                to WebAssembly, in this tab. One database, so a difference
+                between the responses could only come from the strategies.
+                Nothing is fetched until you press it: the first press downloads
+                a <strong>~15&nbsp;MB PostgreSQL build</strong> (about
+                4.7&nbsp;MB over the wire) and takes a few seconds to start. The
+                database is in memory only and is discarded afterwards.
+              </p>
+              <div id="s-result" class="result-panel"></div>
             </div>
           </div>
         </div>

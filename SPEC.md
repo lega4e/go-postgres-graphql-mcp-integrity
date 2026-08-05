@@ -60,7 +60,7 @@ No tool exists that generates SQL/PGQ property-graph DDL from GraphQL SDL, and n
 |1 |Mapping source       |Directive-driven SDL, schema-first. No live DB needed to build a schema.                                                                          |
 |2 |Deliverables         |Both a schema generator and a query compiler, from one SDL.                                                                                       |
 |3 |Transitive traversal |**Reject beyond configured depth.** Every emitted query is pure `GRAPH_TABLE`. No `WITH RECURSIVE` emitter.                                       |
-|4 |Result shaping       |Go-side regrouping first; SQL-side `json_agg` added in a later milestone and benchmarked against it.                                              |
+|4 |Result shaping       |**Reached (M8).** Go-side regrouping (M3) and SQL-side `json_build_object`/`json_agg` (M8), selected with `compiler.WithShaping`. `json`, never `jsonb` — `jsonb` sorts keys by length-then-bytes and drops duplicates. Byte-identity is defined over `shape.Encode`, not over PostgreSQL's own bytes (§7 → M8).|
 |5 |Migration application|Versioned migrations.                                                                                                                             |
 |6 |Migration content    |**Delta migrations.** Prior state is folded from `gopgql`’s own earlier migration files — no sidecar state artifact, no database at generate time.|
 |7 |Migration format     |`goose` single-file, `-- +goose Up` / `-- +goose Down`.                                                                                           |
@@ -186,7 +186,7 @@ Single Go module, `github.com/<owner>/gopgql`:
 |`generator` |Model → DDL statements (`CREATE TABLE`, indexes, `CREATE PROPERTY GRAPH`).                             |
 |`migrate`   |Fold prior goose migrations → model; diff against desired; emit next migration.                        |
 |`compiler`  |GraphQL operation → `GRAPH_TABLE` SQL + ordered bind params.                                           |
-|`shape`     |Flat rows → nested GraphQL response (Go-side; SQL-side added M8).                                      |
+|`shape`     |The canonical GraphQL response and its one encoder: flat rows → response (`Rows`, Go-side), database JSON → response (`Decode`, SQL-side), response → bytes (`Encode`). Both strategies' leaves normalise to one form per scalar.|
 |`exec`      |Thin `pgx` execution helper: compiled query → rows → shaped response; opens the read-only pool.        |
 |`conform`   |Reflect the live property graph out of `pg_propgraph_*`; diff it against the generated model; report typed findings.|
 |`mcp`       |Model Context Protocol server: GraphQL introspection over the SDL, plus a query tool over `exec`.      |
@@ -473,13 +473,26 @@ Parser complicates: nesting and arguments.
 
 -----
 
-### M8 — SQL-side shaping and benchmark
+### M8 — SQL-side shaping and benchmark — **implemented**
 
-- Second shaping strategy: `jsonb_build_object` / `json_agg` producing the nested response in-database.
-- Strategy selectable; both must produce byte-identical responses.
-- Benchmark both across depth and fan-out; record results in the docs.
+- Second shaping strategy: `json_build_object` / `json_agg` producing the nested response in-database, returned as a single `response` column.
+- Strategy selectable with `compiler.WithShaping(compiler.SQLSide)`, recorded on the `*Compiled`; `exec.Query` dispatches on it. It is a *compiler* option, not an execution-time switch, because the two strategies emit different SQL.
+- Both produce byte-identical responses. **Benchmark:** depth × fan-out, in `test/bench`, output in [`docs/benchmarks.md`](docs/benchmarks.md), smoke-run by CI at `-benchtime 1x`.
+- **Demonstrated, not only asserted.** The playground's Shaping tab runs both statements against one in-browser PostgreSQL (§8.6) and reports whether the responses agree, which is `test/parity`'s comparison executed in front of the reader. It says what it compared — the canonical encodings, per the definition below — because a panel showing two responses side by side would otherwise imply the stronger claim the next paragraph rules out.
 
-**Exit:** Scenario — every prior milestone’s query scenarios re-run under SQL-side shaping and produce identical responses. Benchmark output committed.
+**`json`, not `jsonb`.** The milestone text above originally said `jsonb_build_object` / `json_agg`. That mixture is wrong twice over and is corrected here: `jsonb_build_object` sorts keys by length-then-bytes and keeps only the last of a duplicated key (`'zebra',1,'a',2,'bb',3` → `{"a": 2, "bb": 3, "zebra": 1}`), and `jsonb` costs a parse-into-binary plus reserialise for a value whose only destination is text.
+
+**What "byte-identical" means.** The bytes PostgreSQL sends are *not* the bytes gopgql writes, and cannot be: `json_build_object` emits `{"k" : v}` with spaces around the colon and in argument order, where `encoding/json` emits `{"k":v}` with keys sorted. So the claim is defined over gopgql's own response:
+
+> The response is the `map[string]any` returned by `exec.Query`. Its canonical encoding is `shape.Encode`, which is `encoding/json` over that value. **Two strategies produce byte-identical responses when `shape.Encode` of each returns equal bytes.**
+
+Under that definition it holds *by construction*: the SQL-side path decodes the database's JSON into the same Go value the Go-side path builds, and one encoder writes both. PostgreSQL's key order and spacing stop at the decode boundary. Three things make it true rather than approximately true:
+
+- **A total `ORDER BY`** over every level's key column, under both strategies — the flat query's `ORDER BY` and the matching `ORDER BY` inside each `json_agg`. Nothing ordered anything before M8, and the M1–M7 suites compare with array order ignored, so a divergence on a fan-out of two would not have been visible.
+- **Every aggregate `COALESCE`d** to `'[]'::json`: `json_agg` over an empty set returns SQL `NULL` where the Go-side shaper returns an empty list.
+- **A scalar contract.** One canonical Go form per GraphQL scalar, reached from either a pgx-scanned value or a decoded JSON value. `DateTime` normalises to RFC3339Nano **in UTC**, because PostgreSQL renders `timestamptz` in the session's `TimeZone`; `numeric` keeps the database's own digits; a non-finite `Float` is an error on both paths, because PostgreSQL emits the JSON string `"NaN"` where `json.Marshal` refuses the value. A projected scalar with no canonical form is a typed `*compiler.UnshapeableScalarError` at compile time **under `SQLSide` only** — `GoSide` keeps accepting it, because it makes no cross-strategy promise about it.
+
+**Exit:** Met. `test/parity` re-runs every M1–M7 query scenario under both strategies against a real `postgres:19beta2` and asserts the encoded responses are byte-equal, with list order compared exactly. A guard test scans the feature files and fails naming any query the catalogue omits. Benchmark output committed.
 
 -----
 

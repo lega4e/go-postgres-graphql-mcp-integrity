@@ -183,6 +183,18 @@ var scenarios = []scenario{
 		vars:  nil,
 	},
 	{
+		// The Shaping tab reads ExampleSDL but deliberately not ExampleSeed. Its
+		// query fans out on two branches at once, and the chain above gives each
+		// branch exactly one edge — a 1×1 cross-product, which is the single
+		// case where the two strategies' result sets look the same and the tab
+		// demonstrates nothing.
+		name:  "shaping",
+		sdl:   playground.ExampleSDL,
+		seed:  playground.ExampleShapingSeed,
+		query: playground.ExampleShapingQuery,
+		vars:  map[string]any{"n": "Alice"},
+	},
+	{
 		// The Depth tab refuses its query at the default ceiling, which is the
 		// point of the tab — but a reader who raises the ceiling gets a query,
 		// and it has to find something. Four hops from Alice with five distinct
@@ -356,6 +368,71 @@ func followedNames(t *testing.T, shaped map[string]any) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// TestShapingSeedShowsBothStrategiesAgreeing is the Shaping tab's Run button,
+// proven against a real PostgreSQL: one database, the same query compiled under
+// each strategy, and the two responses compared.
+//
+// It is what the panel now claims, and the two halves of the claim are asserted
+// separately because they are separate facts. The *result sets* differ, and
+// visibly — four flat rows against one row of one column — which is the reason
+// the two strategies exist. The *responses* do not differ at all. A seed that
+// drifted into a 1×1 fan-out would still pass the second assertion while making
+// the tab pointless, so the first one is what keeps the fixture honest.
+//
+// test/parity is the milestone's proof across the whole catalogue; this is the
+// narrower claim that the fixtures the page ships with demonstrate it.
+func TestShapingSeedShowsBothStrategiesAgreeing(t *testing.T) {
+	ctx, conn := freshConn(t)
+
+	ddl, err := playground.Schema(playground.ExampleSDL)
+	require.NoError(t, err, "Schema")
+	_, err = conn.Exec(ctx, ddl)
+	require.NoError(t, err, "apply the generated DDL")
+	_, err = conn.Exec(ctx, playground.ExampleShapingSeed)
+	require.NoError(t, err, "apply the shaping seed")
+
+	vars := map[string]any{"n": "Alice"}
+	goSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, false)
+	require.NoError(t, err, "CompileWithShaping(Go-side)")
+	sqlSide, err := playground.CompileWithShaping(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, true)
+	require.NoError(t, err, "CompileWithShaping(SQL-side)")
+
+	goRes := shapedQuery(ctx, t, conn, goSide)
+	sqlRes := shapedQuery(ctx, t, conn, sqlSide)
+
+	assert.Len(t, goRes.Rows, 4,
+		"Alice follows two people and is followed by two others, so the Go-side "+
+			"statement's LEFT JOIN of the branches is 2×2 rows; a seed that stopped "+
+			"fanning out would leave the tab demonstrating nothing")
+	assert.Len(t, sqlRes.Rows, 1, "the SQL-side statement returns one row")
+	assert.Len(t, sqlRes.Columns, 1, "of one response column")
+
+	parity, err := playground.ShapeParity(
+		playground.ExampleSDL, playground.ExampleShapingQuery, vars, goRes, sqlRes)
+	require.NoError(t, err, "ShapeParity")
+	assert.True(t, parity.Identical,
+		"the two strategies must shape into the same response\nGo-side:\n%s\nSQL-side:\n%s",
+		parity.GoJSON, parity.SQLJSON)
+	assert.JSONEq(t,
+		`{"persons":[{"name":"Alice",`+
+			`"follows":[{"name":"Bob"},{"name":"Carol"}],`+
+			`"followedBy":[{"name":"Dave"},{"name":"Erin"}]}]}`,
+		parity.GoJSON,
+		"and it is the response the seed describes, not merely the same wrong one twice")
+}
+
+// shapedQuery runs a strategy-compiled statement and returns its result in the
+// positional form the page posts back across the WASM boundary. It is `query`
+// for a playground.Shaped rather than a playground.Compiled — the two carry the
+// same SQL and Args, and keeping them apart avoids a conversion whose only
+// purpose would be to satisfy a signature.
+func shapedQuery(ctx context.Context, t *testing.T, conn *pgx.Conn, compiled playground.Shaped) playground.Result {
+	t.Helper()
+	return query(ctx, t, conn, playground.Compiled{SQL: compiled.SQL, Args: compiled.Args})
 }
 
 // TestSeedDependsOnPhysicalColumnNames pins the one way a seed silently goes
