@@ -64,14 +64,21 @@ func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
 	for _, e := range edges {
 		m.EdgeTables = append(m.EdgeTables, e)
 		// SPEC.md §5.3 invariant 2: every edge table gopgql *generates* has an
-		// index on its destination key column.
+		// index on its destination key. An edge mapped onto an existing table
+		// gets none — a CREATE INDEX on a table gopgql does not own is DDL it
+		// must not emit, and whether that table is indexed is its owner's call.
+		if e.Unmanaged {
+			continue
+		}
 		m.Indexes = append(m.Indexes, schema.Index{
 			Name:    e.Name + "_target_idx",
 			Table:   e.Name,
 			Schema:  e.Schema,
-			Columns: []string{e.DestKey},
+			Columns: e.DestKey,
 		})
 	}
+
+	aliasEdges(m)
 
 	if err := validateInvariants(m); err != nil {
 		return nil, err
@@ -238,6 +245,22 @@ func attachInterfaceLabels(m *schema.Schema, doc *sdl.Document) error {
 // field and its @hasInverse IN partner map to the same table (SPEC.md §5.2), so
 // OUT fields are processed first and IN fields only contribute a table when no
 // OUT field already produced it.
+// aliasEdges gives an edge element an explicit alias wherever its table is also
+// a vertex element. The alias is the edge's label, which is the name a reader
+// already associates with that traversal; a label that would itself collide is
+// reported by invariant 4 rather than silently suffixed.
+func aliasEdges(m *schema.Schema) {
+	vertices := map[string]bool{}
+	for _, vt := range m.VertexTables {
+		vertices[vt.ElementAlias()] = true
+	}
+	for i := range m.EdgeTables {
+		if vertices[m.EdgeTables[i].ElementAlias()] {
+			m.EdgeTables[i].Alias = m.EdgeTables[i].Label
+		}
+	}
+}
+
 func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 	seen := map[string]bool{}
 	var edges []schema.EdgeTable
@@ -258,18 +281,47 @@ func collectEdges(doc *sdl.Document) []schema.EdgeTable {
 			// IN reverses orientation: the declaring type is the destination.
 			src, dst = target, n
 		}
+
+		// An edge mapped onto an existing table names its own key columns and
+		// references each endpoint's *identity* — which may be multi-column for
+		// a @readonly type. gopgql creates no table for it and knows no columns
+		// of it beyond the keys, so Columns stays nil: the graph element is the
+		// whole of what is emitted (SPEC.md §7 → M13).
+		if len(f.Rel.SourceKey) > 0 {
+			edges = append(edges, schema.EdgeTable{
+				Name:         table,
+				Schema:       f.Rel.Schema,
+				Unmanaged:    true,
+				Label:        f.Rel.Type,
+				SourceKey:    f.Rel.SourceKey,
+				SourceSchema: src.Schema,
+				SourceTable:  src.Table,
+				SourceRef:    src.IdentityColumns(),
+				DestKey:      f.Rel.DestKey,
+				DestSchema:   dst.Schema,
+				DestTable:    dst.Table,
+				DestRef:      dst.IdentityColumns(),
+				// The two key lists can overlap — a join table keyed by
+				// (workflow_uuid, function_id) uses workflow_uuid as its source
+				// key too — and a label cannot expose one property twice, so the
+				// element publishes their distinct union in first-seen order.
+				Properties: distinctColumns(f.Rel.SourceKey, f.Rel.DestKey),
+			})
+			return
+		}
+
 		edges = append(edges, schema.EdgeTable{
 			Name:         table,
 			Schema:       f.Rel.Schema,
 			Label:        f.Rel.Type,
-			SourceKey:    "source_id",
+			SourceKey:    []string{"source_id"},
 			SourceSchema: src.Schema,
 			SourceTable:  src.Table,
-			SourceRef:    "id",
-			DestKey:      "target_id",
+			SourceRef:    []string{"id"},
+			DestKey:      []string{"target_id"},
 			DestSchema:   dst.Schema,
 			DestTable:    dst.Table,
-			DestRef:      "id",
+			DestRef:      []string{"id"},
 			Columns: []schema.Column{
 				{Name: "source_id", Type: "uuid", NotNull: true,
 					References: &schema.Reference{Schema: src.Schema, Table: src.Table, Column: "id"}},
@@ -318,6 +370,9 @@ func TablesDDL(m *schema.Schema) string {
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
+		if e.Unmanaged {
+			continue
+		}
 		blocks = append(blocks, withIndexes(m, e.Key(), EdgeTableDDL(e)))
 	}
 	return strings.Join(blocks, "\n\n")
@@ -465,7 +520,7 @@ func EdgeTableDDL(e *schema.EdgeTable) string {
 	for _, c := range e.Columns {
 		fmt.Fprintf(&b, "    %s,\n", ColumnDDL(c))
 	}
-	fmt.Fprintf(&b, "    PRIMARY KEY (%s, %s)\n", pgident.Quote(e.SourceKey), pgident.Quote(e.DestKey))
+	fmt.Fprintf(&b, "    PRIMARY KEY (%s)\n", quoteList(append(append([]string{}, e.SourceKey...), e.DestKey...)))
 	b.WriteString(");")
 	return b.String()
 }
@@ -522,11 +577,15 @@ func GraphDDL(m *schema.Schema) string {
 		elines := make([]string, len(m.EdgeTables))
 		for i, e := range m.EdgeTables {
 			var eb strings.Builder
+			// REFERENCES names a *vertex element* of this graph, not a table, so
+			// it is the element's alias and is never schema-qualified —
+			// PostgreSQL rejects a qualified name there outright, and resolves a
+			// bare one against the graph rather than through search_path.
 			fmt.Fprintf(&eb, "    %s SOURCE KEY (%s) REFERENCES %s (%s)\n",
-				e.QualifiedName(), pgident.Quote(e.SourceKey),
-				e.QualifiedSource(), pgident.Quote(e.SourceRef))
+				e.ElementRef(), quoteList(e.SourceKey),
+				pgident.Quote(e.SourceTable), quoteList(e.SourceRef))
 			fmt.Fprintf(&eb, "            DESTINATION KEY (%s) REFERENCES %s (%s)\n",
-				pgident.Quote(e.DestKey), e.QualifiedDest(), pgident.Quote(e.DestRef))
+				quoteList(e.DestKey), pgident.Quote(e.DestTable), quoteList(e.DestRef))
 			fmt.Fprintf(&eb, "            LABEL %s PROPERTIES (%s)",
 				pgident.Quote(e.Label), quoteList(e.Properties))
 			elines[i] = eb.String()
@@ -569,29 +628,51 @@ func validateInvariants(m *schema.Schema) error {
 		}
 	}
 	for _, e := range m.EdgeTables {
-		if !contains(e.Properties, e.SourceKey) || !contains(e.Properties, e.DestKey) {
-			return fmt.Errorf("generator: edge %q keys missing from PROPERTIES (invariant 1)", e.Name)
+		for _, k := range append(append([]string{}, e.SourceKey...), e.DestKey...) {
+			if !contains(e.Properties, k) {
+				return fmt.Errorf("generator: edge %q key %q missing from PROPERTIES (invariant 1)", e.Name, k)
+			}
 		}
-		// 2. Every edge table has an index on its destination key column.
-		if !hasDestIndex(m, e) {
-			return fmt.Errorf("generator: edge %q has no index on destination key %q (invariant 2)", e.Name, e.DestKey)
+		// 2. Every edge table gopgql *generates* has an index on its destination
+		// key. An edge mapped onto an existing table is exempt: gopgql cannot
+		// create an index on a table it does not own, and a warning it could not
+		// act on would be noise (SPEC.md §5.3 invariant 2).
+		if !e.Unmanaged && !hasDestIndex(m, e) {
+			return fmt.Errorf("generator: edge %q has no index on destination key %v (invariant 2)", e.Name, e.DestKey)
 		}
 	}
-	// 4. Table names (aliases) are unique within the graph. A schema qualifier is
-	// part of the name here, because it is part of the identifier PostgreSQL
-	// resolves: two tables of one name in two schemas are two tables.
-	tables := map[string]bool{}
-	for _, vt := range m.VertexTables {
-		if tables[vt.Key()] {
-			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", vt.Key())
+	// 4. Distinct graph elements may share a table only when at most one of them
+	// is a **vertex** element (SPEC.md §5.3 invariant 4, narrowed in M13).
+	//
+	// One table serving as both a vertex and an edge is the shape an externally
+	// owned join table takes: a row of dbos.operation_outputs is a step, and the
+	// same row is the edge connecting a workflow to it. Two *vertex* elements
+	// over one table stays refused — that really is one table declared twice,
+	// and the property lists would have to be identical for it to mean anything.
+	// The uniqueness PostgreSQL actually enforces is over *element aliases*, and
+	// an alias is a bare name — so two tables of one name in two schemas collide
+	// as elements even though they are two tables, and a table serving as both a
+	// vertex and an edge needs the edge to carry an explicit alias. Both are
+	// checked here so the failure names the SDL rather than arriving as
+	// "alias used more than once as element table" from the server.
+	aliases := map[string]string{}
+	claim := func(alias, what string) error {
+		if prev, dup := aliases[alias]; dup {
+			return fmt.Errorf("generator: %s and %s are both the graph element %q; "+
+				"element aliases are unqualified and must be unique (invariant 4)", prev, what, alias)
 		}
-		tables[vt.Key()] = true
+		aliases[alias] = what
+		return nil
+	}
+	for _, vt := range m.VertexTables {
+		if err := claim(vt.ElementAlias(), "vertex table "+vt.QualifiedName()); err != nil {
+			return err
+		}
 	}
 	for _, e := range m.EdgeTables {
-		if tables[e.Key()] {
-			return fmt.Errorf("generator: duplicate table name %q in graph (invariant 4)", e.Key())
+		if err := claim(e.ElementAlias(), "edge table "+e.QualifiedName()); err != nil {
+			return err
 		}
-		tables[e.Key()] = true
 	}
 
 	// 5. A label may span several tables, but every table carrying it must
@@ -605,6 +686,12 @@ type labelUse struct {
 	table string
 	props []string
 	types map[string]string
+	// typesKnown is false for an element gopgql has no column list for — an edge
+	// mapped onto a table it does not own. Its properties take part in the
+	// per-label alignment and sit out the graph-wide type check, because gopgql
+	// has nothing to check them against and PostgreSQL will do it anyway when
+	// the graph is created.
+	typesKnown bool
 }
 
 // validateLabelAlignment enforces SPEC.md §5.3 invariant 5 and the graph-wide
@@ -627,13 +714,23 @@ func validateLabelAlignment(m *schema.Schema) error {
 
 	for _, vt := range m.VertexTables {
 		types := columnTypes(vt.Columns)
-		add(vt.Label, labelUse{table: vt.Key(), props: vt.Properties, types: types})
+		add(vt.Label, labelUse{table: vt.QualifiedName(), props: vt.Properties, types: types, typesKnown: true})
 		for _, extra := range vt.ExtraLabels {
-			add(extra.Label, labelUse{table: vt.Key(), props: extra.Properties, types: types})
+			add(extra.Label, labelUse{
+				table: vt.QualifiedName(), props: extra.Properties, types: types, typesKnown: true,
+			})
 		}
 	}
 	for _, e := range m.EdgeTables {
-		add(e.Label, labelUse{table: e.Key(), props: e.Properties, types: columnTypes(e.Columns)})
+		// An edge mapped onto an existing table contributes no columns: gopgql
+		// knows the key columns it was told about and nothing else of that
+		// table. Its property list is still aligned against other tables sharing
+		// the label; its property *types* cannot be, and pretending otherwise
+		// would report every one of them as a column that does not exist.
+		add(e.Label, labelUse{
+			table: e.QualifiedName(), props: e.Properties,
+			types: columnTypes(e.Columns), typesKnown: len(e.Columns) > 0,
+		})
 	}
 
 	// Per-label alignment: same count, same names in order, same types.
@@ -661,6 +758,9 @@ func validateLabelAlignment(m *schema.Schema) error {
 	propOwner := map[string]string{}
 	for _, label := range order {
 		for _, use := range uses[label] {
+			if !use.typesKnown {
+				continue
+			}
 			for _, name := range use.props {
 				typ, ok := use.types[name]
 				if !ok {
@@ -695,12 +795,40 @@ func columnTypes(cols []schema.Column) map[string]string {
 
 func hasDestIndex(m *schema.Schema, e schema.EdgeTable) bool {
 	for _, idx := range m.Indexes {
-		if schema.QualifiedKey(idx.Schema, idx.Table) == e.Key() &&
-			len(idx.Columns) == 1 && idx.Columns[0] == e.DestKey {
+		if schema.QualifiedKey(idx.Schema, idx.Table) == e.Key() && sameStrings(idx.Columns, e.DestKey) {
 			return true
 		}
 	}
 	return false
+}
+
+// distinctColumns returns the union of column lists, de-duplicated, in
+// first-seen order.
+func distinctColumns(lists ...[]string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range lists {
+		for _, c := range l {
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func contains(xs []string, s string) bool {

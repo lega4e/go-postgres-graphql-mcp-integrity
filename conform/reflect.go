@@ -105,12 +105,12 @@ func Reflect(ctx context.Context, db exec.Querier, graphName string) (*schema.Sc
 				Schema:       el.schemaName,
 				SourceSchema: el.sourceSchema,
 				SourceTable:  el.sourceTable,
-				SourceKey:    firstColumn(el.sourceKey),
-				SourceRef:    firstColumn(el.sourceRef),
+				SourceKey:    el.sourceKey,
+				SourceRef:    el.sourceRef,
 				DestSchema:   el.destSchema,
 				DestTable:    el.destTable,
-				DestKey:      firstColumn(el.destKey),
-				DestRef:      firstColumn(el.destRef),
+				DestKey:      el.destKey,
+				DestRef:      el.destRef,
 			}
 			if own := labels[el.key()]; len(own) > 0 {
 				et.Label = own[0].Label
@@ -312,15 +312,4 @@ func reflectElements(ctx context.Context, db exec.Querier, graphID uint32) ([]re
 		return nil, fmt.Errorf("conform: read graph elements: %w", err)
 	}
 	return out, nil
-}
-
-// firstColumn narrows a key column list to the single column
-// [schema.EdgeTable] can hold. Every edge gopgql generates has a one-column
-// source and destination key (SPEC.md §5.3), so this is lossless for anything
-// gopgql made and is documented on Reflect for anything it did not.
-func firstColumn(cols []string) string {
-	if len(cols) == 0 {
-		return ""
-	}
-	return cols[0]
 }

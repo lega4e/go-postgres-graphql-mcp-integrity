@@ -358,8 +358,8 @@ func renderProjection(root *compiler.Selection) string {
 }
 
 func renderSelection(b *strings.Builder, sel *compiler.Selection) {
-	fmt.Fprintf(b, "&compiler.Selection{ResponseKey: %s, TypeName: %s, Alias: %s, KeyColumn: %s",
-		quoteGo(sel.ResponseKey), quoteGo(sel.TypeName), quoteGo(sel.Alias), quoteGo(sel.KeyColumn))
+	fmt.Fprintf(b, "&compiler.Selection{ResponseKey: %s, TypeName: %s, Alias: %s, KeyColumns: %s",
+		quoteGo(sel.ResponseKey), quoteGo(sel.TypeName), quoteGo(sel.Alias), goStrings(sel.KeyColumns))
 	if len(sel.Fields) > 0 {
 		b.WriteString(", Fields: []compiler.ProjectedField{")
 		for i, f := range sel.Fields {
@@ -416,6 +416,18 @@ func scalarKindName(k compiler.ScalarKind) string {
 	default:
 		return "ScalarUnknown"
 	}
+}
+
+// goStrings renders a string slice as a Go literal.
+func goStrings(xs []string) string {
+	if len(xs) == 0 {
+		return "nil"
+	}
+	quoted := make([]string, len(xs))
+	for i, x := range xs {
+		quoted[i] = quoteGo(x)
+	}
+	return "[]string{" + strings.Join(quoted, ", ") + "}"
 }
 
 // quoteGo renders a string as a Go literal. %q is exact for every string a

@@ -1,6 +1,9 @@
 package sdl
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // @readonly and schema qualification, and the boundary between what they
 // deliver and what they do not (SPEC.md §7 → M12).
@@ -19,26 +22,18 @@ import "fmt"
 // table in another schema depends on that schema already existing; that is the
 // author's business, and the same is true of every table an SDL names.
 //
-// # What is deliberately not here — all of it M13
+// # Edges over tables gopgql does not own
 //
-// Two things a full "expose somebody else's schema" story needs are not
-// implemented, and each is refused with a message naming what is missing rather
-// than mis-generating quietly (SPEC.md §10 forbids a silent fallback):
+// A @relationship ordinarily produces an edge *table* that gopgql creates, with
+// source_id/target_id referencing each endpoint's surrogate id. Over an
+// unmanaged endpoint that is not available: the table already exists, gopgql
+// must not create it, and the columns acting as its keys are whatever its owner
+// chose. `@relationship(sourceKey:, destKey:)` names them, and `table:` names
+// the existing table (SPEC.md §7 → M13).
 //
-//   - **Relationships over tables gopgql does not own.** A @relationship
-//     produces an edge *table*, which gopgql would have to create; over an
-//     unmanaged endpoint it would also have to be told which of that table's
-//     columns are its source and destination keys. That is
-//     `@relationship(sourceKey:, destKey:)`, which M13 adds. Until then a
-//     relationship touching an unmanaged type is refused, and
-//     `@relationship(schema:)` — which can only mean "an edge table that already
-//     exists" — is refused with it.
-//
-//   - **A vertex with no surrogate key.** An unmanaged type still needs
-//     `id: ID!` (validateKey). `dbos.operation_outputs`, the motivating table,
-//     has none: making a declared `@key(fields:)` the identity instead reaches
-//     into the compiler's three `id` projection sites and the shaper's parent
-//     dedup, which is M13 and lands after gopgql#10 (SPEC.md §7 → M13).
+// A relationship touching an unmanaged type **without** them is still refused,
+// because the alternative is a graph whose edge silently references a column
+// that does not exist — a silent fallback, which SPEC.md §10 forbids.
 
 // validateUnmanaged enforces the boundary above for one type.
 func (d *Document) validateUnmanaged(n *Node) error {
@@ -46,24 +41,69 @@ func (d *Document) validateUnmanaged(n *Node) error {
 		if f.Rel == nil {
 			continue
 		}
-		if f.Rel.Schema != "" {
-			return fmt.Errorf("sdl: %s.%s declares @relationship(schema: %q), which can only mean an edge table "+
-				"that already exists; naming its key columns needs @relationship(sourceKey:/destKey:), which "+
-				"arrives in M13", n.TypeName, f.Name, f.Rel.Schema)
+		if err := d.validateRelationshipMapping(n, f); err != nil {
+			return err
 		}
-		target := d.NodeByType(f.TypeName)
-		switch {
-		case n.ReadOnly:
-			return fmt.Errorf("sdl: %s is @readonly and declares the relationship %s; an edge is a table gopgql "+
-				"would have to create, and over a table it does not own it would also have to be told which "+
-				"columns are its keys — @relationship(sourceKey:/destKey:) arrives in M13",
-				n.TypeName, f.Name)
-		case target != nil && target.ReadOnly:
-			return fmt.Errorf("sdl: %s.%s points at %s, which is @readonly; the edge table gopgql would create "+
-				"references it by its surrogate id, and naming an existing table's key columns instead needs "+
-				"@relationship(sourceKey:/destKey:), which arrives in M13",
-				n.TypeName, f.Name, target.TypeName)
+	}
+	return nil
+}
+
+// validateRelationshipMapping decides which of the two edge mappings a
+// relationship uses, and refuses the combinations that cannot mean anything.
+func (d *Document) validateRelationshipMapping(n *Node, f *Field) error {
+	rel := f.Rel
+	target := d.NodeByType(f.TypeName)
+	existing := len(rel.SourceKey) > 0 || len(rel.DestKey) > 0
+	touchesUnmanaged := n.ReadOnly || (target != nil && target.ReadOnly)
+
+	if !existing {
+		if rel.Schema != "" {
+			return fmt.Errorf("sdl: %s.%s declares @relationship(schema: %q), which can only mean an edge "+
+				"table that already exists; name its key columns with "+
+				"@relationship(sourceKey:, destKey:) so gopgql maps that table instead of creating one",
+				n.TypeName, f.Name, rel.Schema)
 		}
+		if touchesUnmanaged {
+			which := n.TypeName
+			if !n.ReadOnly {
+				which = target.TypeName
+			}
+			return fmt.Errorf("sdl: %s.%s relates to %s, which is @readonly; gopgql would have to create an "+
+				"edge table referencing a table it does not own. Map an existing table instead: "+
+				"@relationship(table:, sourceKey:, destKey:)", n.TypeName, f.Name, which)
+		}
+		return nil
+	}
+
+	// From here the edge is mapped onto an existing table.
+	if len(rel.SourceKey) == 0 || len(rel.DestKey) == 0 {
+		return fmt.Errorf("sdl: %s.%s declares only one of @relationship(sourceKey:, destKey:); "+
+			"an edge over an existing table needs both, because gopgql derives neither",
+			n.TypeName, f.Name)
+	}
+	if rel.Table == "" {
+		return fmt.Errorf("sdl: %s.%s declares @relationship(sourceKey:, destKey:) but no table:; "+
+			"those name the columns of an existing table, so which table has to be said",
+			n.TypeName, f.Name)
+	}
+	if target == nil {
+		return nil // validateRelField reports the unmapped target
+	}
+
+	// The key columns reference each endpoint's identity, so their counts have
+	// to match it — SOURCE KEY (a, b) REFERENCES t (c, d) is arity-checked by
+	// PostgreSQL, and catching it here names the field instead of the SQL.
+	src, dst := n, target
+	if rel.Direction == In {
+		src, dst = target, n
+	}
+	if got, want := len(rel.SourceKey), len(src.IdentityColumns()); got != want {
+		return fmt.Errorf("sdl: %s.%s: @relationship(sourceKey:) names %d column(s), but %s is identified by "+
+			"%d (%s)", n.TypeName, f.Name, got, src.TypeName, want, strings.Join(src.IdentityColumns(), ", "))
+	}
+	if got, want := len(rel.DestKey), len(dst.IdentityColumns()); got != want {
+		return fmt.Errorf("sdl: %s.%s: @relationship(destKey:) names %d column(s), but %s is identified by "+
+			"%d (%s)", n.TypeName, f.Name, got, dst.TypeName, want, strings.Join(dst.IdentityColumns(), ", "))
 	}
 	return nil
 }

@@ -26,7 +26,7 @@ func flatProjection() compiler.Projection {
 	return compiler.Projection{Root: &compiler.Selection{
 		ResponseKey: "persons",
 		Alias:       "v0",
-		KeyColumn:   "v0_k",
+		KeyColumns:  []string{"v0_k"},
 		Fields:      []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0"}},
 	}}
 }
@@ -65,12 +65,12 @@ func nestedProjection() compiler.Projection {
 	return compiler.Projection{Root: &compiler.Selection{
 		ResponseKey: "persons",
 		Alias:       "v0",
-		KeyColumn:   "v0_k",
+		KeyColumns:  []string{"v0_k"},
 		Fields:      []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0"}},
 		Children: []*compiler.Selection{{
 			ResponseKey: "follows",
 			Alias:       "v1",
-			KeyColumn:   "v1_k",
+			KeyColumns:  []string{"v1_k"},
 			Fields:      []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0"}},
 		}},
 	}}
@@ -127,13 +127,13 @@ func TestRowsHandlesNonComparableKeys(t *testing.T) {
 // parent just as the root does, and each level sees only its own parent's rows.
 func TestRowsNestsThreeLevels(t *testing.T) {
 	proj := compiler.Projection{Root: &compiler.Selection{
-		ResponseKey: "persons", Alias: "v0", KeyColumn: "v0_k",
+		ResponseKey: "persons", Alias: "v0", KeyColumns: []string{"v0_k"},
 		Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0"}},
 		Children: []*compiler.Selection{{
-			ResponseKey: "follows", Alias: "v1", KeyColumn: "v1_k",
+			ResponseKey: "follows", Alias: "v1", KeyColumns: []string{"v1_k"},
 			Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0"}},
 			Children: []*compiler.Selection{{
-				ResponseKey: "follows", Alias: "v2", KeyColumn: "v2_k",
+				ResponseKey: "follows", Alias: "v2", KeyColumns: []string{"v2_k"},
 				Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v2_c0"}},
 			}},
 		}},

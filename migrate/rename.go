@@ -284,11 +284,11 @@ func renameColumnIn(m *schema.Schema, table, from, to string) {
 	}
 	for i := range m.EdgeTables {
 		e := &m.EdgeTables[i]
-		if schema.QualifiedKey(e.SourceSchema, e.SourceTable) == table && e.SourceRef == from {
-			e.SourceRef = to
+		if schema.QualifiedKey(e.SourceSchema, e.SourceTable) == table {
+			e.SourceRef = replaceIn(e.SourceRef, from, to)
 		}
-		if schema.QualifiedKey(e.DestSchema, e.DestTable) == table && e.DestRef == from {
-			e.DestRef = to
+		if schema.QualifiedKey(e.DestSchema, e.DestTable) == table {
+			e.DestRef = replaceIn(e.DestRef, from, to)
 		}
 	}
 	forEachColumn(m, func(_ string, c *schema.Column) {

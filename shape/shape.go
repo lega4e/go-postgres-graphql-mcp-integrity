@@ -13,6 +13,7 @@ package shape
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/lega4e/gopgql/compiler"
 )
@@ -37,20 +38,23 @@ func Rows(proj compiler.Projection, rows []map[string]any) (map[string]any, erro
 	return map[string]any{root.ResponseKey: list}, nil
 }
 
-// group buckets rows by sel.KeyColumn and builds one object per distinct key,
-// recursing into nested relationships with just that parent's rows. Rows whose
-// key at this level is null are skipped: an inner-join MATCH never produces a
-// null key, but a defensive skip keeps a stray null from becoming a phantom
-// parent.
+// group buckets rows by sel.KeyColumns and builds one object per distinct key,
+// recursing into nested relationships with just that parent's rows.
+//
+// A row whose identity is *wholly* null is skipped: that is what a LEFT JOINed
+// branch which matched nothing looks like, and without the skip it would become
+// a phantom parent. A row with only some components null is a real row whose key
+// is partly unknown — a @key column is UNIQUE but never NOT NULL — and is kept.
+// The SQL-side strategy's FILTER applies the same rule, which is what keeps the
+// two agreeing (design D4).
 func group(sel *compiler.Selection, rows []map[string]any) ([]any, error) {
 	var order []string
 	buckets := map[string][]map[string]any{}
 	for _, row := range rows {
-		kv, ok := row[sel.KeyColumn]
-		if !ok || kv == nil {
+		k, present := keyOf(sel.KeyColumns, row)
+		if !present {
 			continue
 		}
-		k := keyString(kv)
 		if _, seen := buckets[k]; !seen {
 			order = append(order, k)
 		}
@@ -80,10 +84,30 @@ func group(sel *compiler.Selection, rows []map[string]any) ([]any, error) {
 	return list, nil
 }
 
-// keyString renders a key value as a stable string usable as a map key. Scanned
-// identifiers (uuids in particular) may decode to non-comparable types such as
-// byte slices, which cannot be map keys directly; formatting sidesteps that
-// while grouping equal ids together.
-func keyString(v any) string {
-	return fmt.Sprintf("%v", v)
+// keyOf renders a row's identity as a stable map key, and reports whether the
+// row has an identity at all.
+//
+// Scanned identifiers — uuids in particular — may decode to non-comparable Go
+// types such as byte slices, which cannot be map keys directly; formatting
+// sidesteps that while still grouping equal values together.
+//
+// The components are joined with **NUL**, and that is load-bearing rather than
+// cosmetic. A dedup collision is silent: two rows that are not the same row
+// merge, one of them disappears from the response, and nothing reports it. With
+// a printable separator, ("a b", "c") and ("a", "b c") encode identically the
+// moment a key column holds a space — and text keys are exactly what a natural
+// key tends to be. NUL cannot occur in a PostgreSQL text value at all, so the
+// encoding is unambiguous by construction. It is the same discipline
+// schema.QualifiedKey uses, for the same reason.
+func keyOf(cols []string, row map[string]any) (string, bool) {
+	parts := make([]string, len(cols))
+	present := false
+	for i, c := range cols {
+		v, ok := row[c]
+		if ok && v != nil {
+			present = true
+		}
+		parts[i] = fmt.Sprintf("%v", v)
+	}
+	return strings.Join(parts, "\x00"), present
 }

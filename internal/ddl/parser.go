@@ -689,17 +689,13 @@ func (p *parser) edgeTableDef() (EdgeTableDef, error) {
 }
 
 // keyReference parses "<which> KEY (<key>) REFERENCES <table> (<ref>)".
-func (p *parser) keyReference(which string) (key, schemaName, table, ref string, err error) {
+func (p *parser) keyReference(which string) (key []string, schemaName, table string, ref []string, err error) {
 	if err = p.expectKeyword(which, "KEY"); err != nil {
 		return
 	}
-	if err = p.expectPunct(TokenLParen, "("); err != nil {
-		return
-	}
-	if key, err = p.ident("key column"); err != nil {
-		return
-	}
-	if err = p.expectPunct(TokenRParen, ")"); err != nil {
+	// Both sides are column *lists*: an edge mapped onto an existing table may
+	// reference a vertex identified by more than one column (SPEC.md §7 → M13).
+	if key, err = p.parenIdentList(); err != nil {
 		return
 	}
 	if err = p.expectKeyword("REFERENCES"); err != nil {
@@ -708,13 +704,7 @@ func (p *parser) keyReference(which string) (key, schemaName, table, ref string,
 	if schemaName, table, err = p.qualifiedIdent("referenced table"); err != nil {
 		return
 	}
-	if err = p.expectPunct(TokenLParen, "("); err != nil {
-		return
-	}
-	if ref, err = p.ident("referenced column"); err != nil {
-		return
-	}
-	err = p.expectPunct(TokenRParen, ")")
+	ref, err = p.parenIdentList()
 	return
 }
 

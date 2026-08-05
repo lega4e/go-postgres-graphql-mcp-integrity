@@ -336,7 +336,7 @@ The generator must guarantee, and the test suite must assert:
 1. Every `KEY` / `SOURCE KEY` / `DESTINATION KEY` column also appears in that element’s `PROPERTIES` list.
 1. Every edge table **gopgql generates** has an index on its destination key column. gopgql emits no `CREATE INDEX` on a table it does not own, so an unmanaged edge's destination index belongs to the schema's owner.
 1. Labels and identifiers colliding with SQL keywords are double-quoted.
-1. Vertex and edge table aliases are unique within a graph; self-referential edges get an explicit `AS` alias. A schema qualifier is part of the name for this purpose: two tables of one name in two schemas are two tables. (M13 narrows this further — *distinct* elements may share a table when at most one of them is a vertex element, which is the shape a table serving as both vertex and edge needs. Not yet implemented; the invariant stands as written.)
+1. Element **aliases** are unique within a graph, and an alias is an unqualified name. Distinct elements may share a *table* — that is how an externally-owned join table is both a vertex and an edge (M13) — and the edge then carries an explicit `AS` alias. Two tables of one name in two schemas are two tables but collide as elements, which is the same rule seen from the other side.
 1. When one label spans multiple tables, property lists are aligned by count, name, and type — with `col AS name` renames emitted as needed. (Reached in M4; interface fields carry identical names and types across implementors by GraphQL's own rules, so no rename is needed for that case.)
 
 -----
@@ -554,15 +554,20 @@ Under that definition it holds *by construction*: the SQL-side path decodes the 
 
 **Exit:** a second schema and its tables applied by a hand-written init script; gopgql generates over them; `goose up`; a compiled query returns the seeded rows, including a column named `offset`. **The M12 fixture table carries an `id`** — the compiler still projects `id` at every level until M13, so M12 proves DDL suppression and schema qualification and deliberately does *not* yet demonstrate the `dbos.*` case.
 
-A `@readonly` type over a table with **no `id` column at all** is therefore refused at generate time, naming the type — *"type Step must declare a surrogate key field `id: ID!`"* — and no migration is written. That refusal is deliberate: without M13 the alternative is a `CREATE PROPERTY GRAPH` naming a column that does not exist, which passes generation and fails only when the migration is applied.
+A `@readonly` type over a table with **no `id` column at all** is M13's business, and M12's own fixture deliberately does not exercise it. What M12 refuses on its own — and M13 lifts — is a type that declares neither an `id` nor a `@key`.
 
-### M13 — Identity without a surrogate key *(not implemented)*
+### M13 — Identity without a surrogate key
 
 - A declared `@key(fields:)` becomes the vertex identity for an unmanaged type, resolving §9's third open decision **for the read path over tables gopgql does not own** and leaving it open for tables it does.
 - `compiler.Selection.KeyColumn` widens to `KeyColumns` — exported, and consumed by `shape`, `playground` and `cmd/wasm`, so `apiVersion` moves with it. The isomorphism guard becomes a NULL-safe disjunction of `IS DISTINCT FROM`, and `shape`'s parent dedup gains a delimiter-safe tuple encoding.
 - `@relationship(sourceKey:, destKey:)` maps an edge onto an existing table, which is what lets one table serve as both a vertex element and an edge element — narrowing §5.3 invariant 4 — and `EdgeTable`'s key fields widen to lists.
 
-It was sequenced **after gopgql#10 (M8)**, which rewrites `shape` and touches the same grouping code; #10 has since merged, so the ordering constraint is discharged. Until M13 itself lands, an unmanaged type still needs the surrogate `id: ID!` — so a table that has none is refused at generate time (see M12) — and a relationship touching one is refused rather than mis-generated.
+It was sequenced **after gopgql#10 (M8)**, which rewrites `shape` and touches the same grouping code; #10 merged first and this landed on top of it, so both shaping strategies carry the widened identity.
+
+**Two syntax rules of PostgreSQL's, established against `postgres:19beta2` rather than assumed:**
+
+- An edge element's `SOURCE KEY (…) REFERENCES <t> (…)` names a **vertex element of the same graph**, not a table. It is therefore always *unqualified* — a schema-qualified name there is a syntax error — and it resolves against the graph even with that schema off `search_path` entirely. A property graph spanning two schemas works; the qualification belongs on the element, not on the reference.
+- Every element alias in a graph must be unique, and an alias is a bare name. A table serving as both a vertex element and an edge element therefore needs an explicit `AS` on the edge, which gopgql emits using the relationship's label.
 
 **Exit:** a vertex over an externally-owned table with a two-column key and **no `id`** is matched and deduplicated correctly across a fan-out; a NULL in a key column does not silently drop rows; a traversal runs over an edge declared on an existing table; one table serves as both vertex and edge.
 
@@ -718,7 +723,7 @@ Carried forward, to be resolved before or during the milestone that needs them:
 
 1. **Module layout** — proposed as a single module with the §4.1 packages; separate modules for `exec` (to keep `pgx` out of WASM consumers’ dependency graph) is an alternative.
 1. **Rename hint ergonomics** — **resolved in M7: `@renamedFrom`.** The hint lives in the SDL rather than in a manifest, so the rename travels with the declaration it describes and cannot be lost from a separate file; it names the previous *GraphQL* name and the differ resolves candidate physical names against the folded prior state (§5). A manifest remains the better answer only if renames ever need to be expressed for objects the SDL does not declare, which has not come up.
-1. **Natural keys as the physical identity** — opened by M7, and **scheduled as M13, which is not yet implemented**. `@key(fields:)` is a uniqueness constraint alongside the surrogate `id`. M13 resolves this **for the read path over tables gopgql does not own** — a `@readonly` type has no surrogate key to fall back on — and leaves it open for tables gopgql creates, whose generated edge tables keep referencing `id`. Until M13 lands, every type needs `id: ID!`, including an unmanaged one.
+1. **Natural keys as the physical identity** — opened by M7, **resolved in M13 for the read path over tables gopgql does not own** and still open for tables it creates. A `@readonly` type identifies its rows by its declared `@key(fields:)`, because such a table may have no surrogate key and gopgql cannot add one to it. For a managed type `@key(fields:)` remains a uniqueness constraint *alongside* `id`, and generated edge tables keep referencing `id`; making a natural key the identity there would change every edge table's shape and is still a milestone of its own.
 1. **Table naming convention** — pluralisation rules for deriving table names from type names, and whether `@node(table:)` is required or optional.
 1. **Goose embedding** — whether `gopgql` embeds `goose` as a library for a `migrate up` convenience command, or only emits files.
 1. **Default `MaxDepth`** — **resolved in M4: 3.** A 3-hop pattern rewrites to a 7-way join, which the M4 suite executes against `postgres:19beta2` well inside the scenario budget. The ceiling is per-`Compiler` configuration (`compiler.WithMaxDepth`), so a deployment can lower it without a code change; 4 hops remains rejected by default.

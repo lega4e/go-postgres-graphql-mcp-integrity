@@ -52,9 +52,9 @@ func compileShaping(t *testing.T, sqlSide bool) (*compiler.Selection, *compiler.
 // rows up by are the names the compiler projected them as.
 func goSideResult(root, follows, followedBy *compiler.Selection) playground.Result {
 	columns := []string{
-		root.KeyColumn, root.Fields[0].Column,
-		follows.KeyColumn, follows.Fields[0].Column,
-		followedBy.KeyColumn, followedBy.Fields[0].Column,
+		root.KeyColumns[0], root.Fields[0].Column,
+		follows.KeyColumns[0], follows.Fields[0].Column,
+		followedBy.KeyColumns[0], followedBy.Fields[0].Column,
 	}
 	rows := [][]any{}
 	for _, f := range []struct{ key, name string }{{"k-bob", "Bob"}, {"k-carol", "Carol"}} {

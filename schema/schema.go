@@ -318,6 +318,10 @@ type VertexTable struct {
 func (v VertexTable) QualifiedName() string { return QualifiedName(v.Schema, v.Name) }
 func (v VertexTable) Key() string           { return QualifiedKey(v.Schema, v.Name) }
 
+// ElementAlias is the name this element is known by inside the graph — its bare
+// table name. An edge's REFERENCES clause names it, and never carries a schema.
+func (v VertexTable) ElementAlias() string { return v.Name }
+
 // EdgeTable is a table mapped as a graph edge.
 type EdgeTable struct {
 	// Name is the physical table name.
@@ -328,20 +332,38 @@ type EdgeTable struct {
 	Label string
 	// Columns are the table's columns in declaration order.
 	Columns []Column
-	// SourceKey is the source-key column (e.g. "source_id").
-	SourceKey string
-	// SourceTable / SourceRef are the referenced vertex table and column;
-	// SourceSchema qualifies SourceTable.
+	// Alias is the graph *element* alias, emitted as "<table> AS <alias>", or
+	// empty when the table's own name serves.
+	//
+	// PostgreSQL requires every element alias in a graph to be unique, so a
+	// table appearing as both a vertex element and an edge element — the shape
+	// an externally-owned join table takes — needs one on the edge. It is also
+	// the name an edge's SOURCE/DESTINATION KEY … REFERENCES resolves against:
+	// that clause names a *vertex element*, never a table, and is therefore
+	// always unqualified (verified against postgres:19beta2 — a qualified name
+	// there is a syntax error, and a bare one resolves with the schema off
+	// search_path entirely).
+	Alias string
+	// Unmanaged marks an edge element mapped onto a table gopgql does not own —
+	// a table named by @relationship(table:) together with the key columns to
+	// use. Like VertexTable.Unmanaged it means no DDL of any kind is emitted:
+	// no CREATE TABLE for the edge and no destination-key index, because the
+	// index on a table somebody else owns is theirs (SPEC.md §5.3 invariant 2).
+	Unmanaged bool
+	// SourceKey are the source-key columns of *this* table (e.g. "source_id").
+	SourceKey []string
+	// SourceTable / SourceRef are the referenced vertex table and the columns
+	// of it referenced — its identity; SourceSchema qualifies SourceTable.
 	SourceSchema string
 	SourceTable  string
-	SourceRef    string
-	// DestKey is the destination-key column (e.g. "target_id").
-	DestKey string
-	// DestTable / DestRef are the referenced vertex table and column;
+	SourceRef    []string
+	// DestKey are the destination-key columns of this table (e.g. "target_id").
+	DestKey []string
+	// DestTable / DestRef are the referenced vertex table and columns;
 	// DestSchema qualifies DestTable.
 	DestSchema string
 	DestTable  string
-	DestRef    string
+	DestRef    []string
 	// Properties are the graph-exposed property names, including the key
 	// columns (SPEC.md §5.3 invariant 1).
 	Properties []string
@@ -351,6 +373,24 @@ type EdgeTable struct {
 // is held under while diffing.
 func (e EdgeTable) QualifiedName() string { return QualifiedName(e.Schema, e.Name) }
 func (e EdgeTable) Key() string           { return QualifiedKey(e.Schema, e.Name) }
+
+// ElementAlias is the name this element is known by inside the graph: its
+// explicit alias when it has one, otherwise its bare table name. Element aliases
+// are never schema-qualified.
+func (e EdgeTable) ElementAlias() string {
+	if e.Alias != "" {
+		return e.Alias
+	}
+	return e.Name
+}
+
+// ElementRef renders the element as it appears in the graph's table list.
+func (e EdgeTable) ElementRef() string {
+	if e.Alias == "" {
+		return e.QualifiedName()
+	}
+	return e.QualifiedName() + " AS " + pgident.Quote(e.Alias)
+}
 
 // QualifiedSource / QualifiedDest render the vertex tables an edge references.
 func (e EdgeTable) QualifiedSource() string { return QualifiedName(e.SourceSchema, e.SourceTable) }

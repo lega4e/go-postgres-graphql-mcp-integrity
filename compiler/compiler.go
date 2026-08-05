@@ -193,14 +193,21 @@ type Selection struct {
 	TypeName string
 	// Alias is the vertex's SQL alias in the MATCH pattern (v0, v1, …).
 	Alias string
-	// KeyColumn is the SQL output-column name under which this level's identifying
-	// value (its `id`) appears in each flat row. shape groups rows by it.
-	KeyColumn string
+	// KeyColumns are the SQL output-column names under which this level's
+	// identifying values appear in each flat row, in identity order. shape
+	// groups rows by the whole tuple.
+	//
+	// It is a slice because a @readonly type may identify a row by a declared
+	// @key(fields:) rather than by a surrogate `id` — a table gopgql does not
+	// own may have no `id` at all (SPEC.md §7 → M13). For every type that has
+	// one it is a single column named as it always was, and the emitted SQL is
+	// unchanged.
+	KeyColumns []string
 	// Fields are the projected scalar fields in selection order.
 	Fields []ProjectedField
 	// Children are nested relationship levels, in selection order. More than one
 	// means the level branches: each child was compiled into its own GRAPH_TABLE
-	// joined on this level's KeyColumn (SPEC.md §7 → M5).
+	// joined on this level's KeyColumns (SPEC.md §7 → M5).
 	Children []*Selection
 
 	// frag is the query fragment this level's columns are projected by. It is
@@ -327,17 +334,17 @@ type builder struct {
 	cur   *fragment   // the fragment currently being written
 	path  []vertexPos // ancestor positions on the walk, root first
 
-	// order is every level's key column in walk order — outermost level first —
+	// order is every level's key columns in walk order — outermost level first —
 	// each tagged with the fragment projecting it. It is what the flat query's
-	// ORDER BY is built from, and the order is total because every key is a
-	// level's unique id (design D4).
+	// ORDER BY is built from, and the order is total because every key
+	// identifies a level's row uniquely (design D4).
 	order []orderKey
 }
 
-// orderKey is one level's key column and the fragment that projects it.
+// orderKey is one level's key columns and the fragment that projects them.
 type orderKey struct {
 	frag *fragment
-	col  string
+	cols []string
 }
 
 // outCol is one column the outer query exposes: the name it is projected under
@@ -376,20 +383,21 @@ type fragment struct {
 	verts   []vertexPos     // this fragment's vertex positions, for its own guards
 
 	// Branch wiring — empty on the spine.
-	parent    *fragment // fragment holding the branch point
-	joinKey   string    // this fragment's projected branch-point id column
-	parentKey string    // the parent fragment's key column it joins against
-	onGuards  []string  // isomorphism guards that span the split, for the ON clause
+	parent     *fragment // fragment holding the branch point
+	joinKeys   []string  // this fragment's projected branch-point identity columns
+	parentKeys []string  // the parent fragment's key columns it joins against
+	onGuards   []string  // isomorphism guards that span the split, for the ON clause
 }
 
 // vertexPos is one vertex position in an emitted pattern: its alias, the tables a
-// row bound there can come from, the fragment it lives in, and the output column
-// its id is projected as.
+// row bound there can come from, the fragment it lives in, the columns that
+// identify a row bound there, and the output columns they are projected as.
 type vertexPos struct {
-	alias  string
-	tables []string
-	frag   *fragment
-	key    string
+	alias    string
+	tables   []string
+	frag     *fragment
+	identity []string // the vertex's identity columns, as the graph exposes them
+	keys     []string // the output columns those are projected as
 }
 
 func newBuilder(doc *sdl.Document, vars map[string]any, varDefs map[string]*ast.VariableDefinition, maxDepth int, shaping Shaping) *builder {
@@ -435,18 +443,27 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 
 	sel := &Selection{ResponseKey: responseKey(field), TypeName: t.TypeName, Alias: alias, frag: b.cur}
 
-	// Hidden key column: every level projects its id so shape can regroup rows
-	// and deduplicate parents across the fan-out.
-	keyCol := alias + "_k"
-	b.addColumn(alias, "id", keyCol, "")
-	sel.KeyColumn = keyCol
+	// Hidden key columns: every level projects its identity so shape can regroup
+	// rows and deduplicate parents across the fan-out. That is `id` for every
+	// type gopgql owns, and a declared @key for a @readonly type without one.
+	keyCols := make([]string, len(t.Identity))
+	for i, col := range t.Identity {
+		// A single-column identity keeps the name it always had, so the emitted
+		// SQL for every pre-M13 schema is byte-identical.
+		keyCols[i] = alias + "_k"
+		if len(t.Identity) > 1 {
+			keyCols[i] = fmt.Sprintf("%s_k%d", alias, i)
+		}
+		b.addColumn(alias, col, keyCols[i], "")
+	}
+	sel.KeyColumns = keyCols
 
 	// Every level's key joins the flat query's ORDER BY, outermost level first,
 	// so the Go-side and SQL-side strategies deliver lists in the same order
 	// (design D4).
-	b.order = append(b.order, orderKey{frag: b.cur, col: keyCol})
+	b.order = append(b.order, orderKey{frag: b.cur, cols: keyCols})
 
-	pos := vertexPos{alias: alias, tables: t.Tables, frag: b.cur, key: keyCol}
+	pos := vertexPos{alias: alias, tables: t.Tables, frag: b.cur, identity: t.Identity, keys: keyCols}
 	b.addPosition(pos)
 	b.path = append(b.path, pos)
 	defer func() { b.path = b.path[:len(b.path)-1] }()
@@ -565,9 +582,9 @@ func (b *builder) vertex(t *sdl.Target, field *ast.Field, depth int, path []stri
 // matches against the branch point's own key column.
 func (b *builder) branch(t *sdl.Target, at vertexPos) *fragment {
 	f := &fragment{
-		name:      "q" + strconv.Itoa(len(b.frags)),
-		parent:    at.frag,
-		parentKey: at.key,
+		name:       "q" + strconv.Itoa(len(b.frags)),
+		parent:     at.frag,
+		parentKeys: at.keys,
 	}
 	b.frags = append(b.frags, f)
 
@@ -575,15 +592,24 @@ func (b *builder) branch(t *sdl.Target, at vertexPos) *fragment {
 	prev := b.cur
 	b.cur = f
 	b.writeVertex(alias, t.Labels)
-	// The join key is projected but not exposed to the outer SELECT: it repeats
-	// the branch point's id, which the parent fragment already carries.
-	f.joinKey = alias + "_j"
-	f.columns = append(f.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote("id"), f.joinKey))
+	// The join keys are projected but not exposed to the outer SELECT: they
+	// repeat the branch point's identity, which the parent fragment already
+	// carries.
+	for i, col := range t.Identity {
+		name := alias + "_j"
+		if len(t.Identity) > 1 {
+			name = fmt.Sprintf("%s_j%d", alias, i)
+		}
+		f.joinKeys = append(f.joinKeys, name)
+		f.columns = append(f.columns, fmt.Sprintf("%s.%s AS %s", alias, pgident.Quote(col), name))
+	}
 	b.cur = prev
 
 	// The re-bound vertex is the branch point, so it needs no guard against it;
 	// its own descendants are guarded within this fragment as usual.
-	f.verts = append(f.verts, vertexPos{alias: alias, tables: t.Tables, frag: f, key: f.joinKey})
+	f.verts = append(f.verts, vertexPos{
+		alias: alias, tables: t.Tables, frag: f, identity: t.Identity, keys: f.joinKeys,
+	})
 	return f
 }
 
@@ -598,12 +624,13 @@ func (b *builder) addPosition(pos vertexPos) {
 			continue
 		}
 		// The branch point itself is re-bound as this fragment's first position
-		// and joined on its id, so the fragment's own guards already cover it.
-		if anc.frag == pos.frag.parent && anc.key == pos.frag.parentKey {
+		// and joined on its identity, so the fragment's own guards already cover
+		// it.
+		if anc.frag == pos.frag.parent && sameCols(anc.keys, pos.frag.parentKeys) {
 			continue
 		}
-		pos.frag.onGuards = append(pos.frag.onGuards, fmt.Sprintf("%s.%s <> %s.%s",
-			pos.frag.name, pos.key, anc.frag.name, anc.key))
+		pos.frag.onGuards = append(pos.frag.onGuards,
+			distinctGuard(pos.frag.name, pos.keys, anc.frag.name, anc.keys))
 	}
 }
 
@@ -725,16 +752,59 @@ func (b *builder) addColumn(alias, property, out, cast string) {
 // same row; positions over disjoint tables need none.
 func (f *fragment) isomorphismGuards() []string {
 	var out []string
-	id := pgident.Quote("id")
 	for i := range f.verts {
 		for j := i + 1; j < len(f.verts); j++ {
 			if !overlaps(f.verts[i].tables, f.verts[j].tables) {
 				continue
 			}
-			out = append(out, fmt.Sprintf("%s.%s <> %s.%s", f.verts[i].alias, id, f.verts[j].alias, id))
+			a, b := f.verts[i], f.verts[j]
+			cols := make([]string, len(a.identity))
+			for k, c := range a.identity {
+				cols[k] = pgident.Quote(c)
+			}
+			out = append(out, distinctGuard(a.alias, cols, b.alias, cols))
 		}
 	}
 	return out
+}
+
+// distinctGuard renders "these two positions are not the same row" over an
+// identity of any width.
+//
+// A single column keeps `<>`, which is what every schema with a surrogate `id`
+// emitted before M13 and what its golden files still expect. A wider identity
+// becomes a **disjunction of IS DISTINCT FROM**, one per component, and the
+// NULL-safety is the whole reason for that shape: `(a,b) <> (c,d)` evaluates to
+// NULL as soon as one component is NULL, and a WHERE that is NULL excludes the
+// row. A @key column is only UNIQUE, never NOT NULL, so a plain `<>` over a
+// nullable key column would silently *drop* rows rather than admit them — the
+// failure this guard exists to prevent, inverted.
+//
+// A surrogate `id` is a NOT NULL primary key, so the single-column form is
+// exactly as safe as it has always been.
+func distinctGuard(leftAlias string, left []string, rightAlias string, right []string) string {
+	if len(left) == 1 {
+		return fmt.Sprintf("%s.%s <> %s.%s", leftAlias, left[0], rightAlias, right[0])
+	}
+	parts := make([]string, len(left))
+	for i := range left {
+		parts[i] = fmt.Sprintf("%s.%s IS DISTINCT FROM %s.%s",
+			leftAlias, left[i], rightAlias, right[i])
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
+}
+
+// sameCols reports whether two column lists are equal, order included.
+func sameCols(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // overlaps reports whether two sorted table-name sets share a member.
@@ -774,12 +844,28 @@ func (b *builder) render(graphName string) string {
 	fmt.Fprintf(&sb, "SELECT %s\nFROM %s AS %s",
 		strings.Join(outs, ", "), b.frags[0].graphTable(graphName, "  "), b.frags[0].name)
 	for _, f := range b.frags[1:] {
-		on := append([]string{fmt.Sprintf("%s.%s = %s.%s", f.name, f.joinKey, f.parent.name, f.parentKey)}, f.onGuards...)
+		on := branchJoinOn(f)
 		fmt.Fprintf(&sb, "\nLEFT JOIN %s AS %s ON %s",
 			f.graphTable(graphName, "  "), f.name, strings.Join(on, " AND "))
 	}
 	sb.WriteString(b.orderBy(true))
 	return sb.String()
+}
+
+// branchJoinOn renders a branch fragment's ON clause: the branch-point identity
+// equated component by component, then any guard that spans the split.
+//
+// Equality rather than IS NOT DISTINCT FROM is deliberate. A NULL component
+// means the row has no identity at that position, and a row with no identity
+// must not join — shape skips such a row for the same reason, so the two
+// strategies agree about it.
+func branchJoinOn(f *fragment) []string {
+	on := make([]string, 0, len(f.joinKeys)+len(f.onGuards))
+	for i := range f.joinKeys {
+		on = append(on, fmt.Sprintf("%s.%s = %s.%s",
+			f.name, f.joinKeys[i], f.parent.name, f.parentKeys[i]))
+	}
+	return append(on, f.onGuards...)
 }
 
 // orderBy renders the flat query's ORDER BY clause over every level's key
@@ -789,12 +875,14 @@ func (b *builder) orderBy(qualified bool) string {
 	if len(b.order) == 0 {
 		return ""
 	}
-	cols := make([]string, len(b.order))
-	for i, k := range b.order {
-		if qualified {
-			cols[i] = k.frag.name + "." + k.col
-		} else {
-			cols[i] = k.col
+	var cols []string
+	for _, k := range b.order {
+		for _, c := range k.cols {
+			if qualified {
+				cols = append(cols, k.frag.name+"."+c)
+			} else {
+				cols = append(cols, c)
+			}
 		}
 	}
 	return "\nORDER BY " + strings.Join(cols, ", ")

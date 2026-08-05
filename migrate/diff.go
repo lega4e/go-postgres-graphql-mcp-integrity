@@ -112,20 +112,33 @@ func withoutUnmanaged(from, to *schema.Schema) (*schema.Schema, *schema.Schema) 
 			unmanaged[vt.Key()] = true
 		}
 	}
+	// An edge mapped onto an existing table is unowned in exactly the same way,
+	// and it is the same table as a vertex element when a join table is queried
+	// from both roles (SPEC.md §7 → M13). Missing it here is a CREATE TABLE for
+	// a table that already exists.
+	for _, e := range to.EdgeTables {
+		if e.Unmanaged {
+			unmanaged[e.Key()] = true
+		}
+	}
 	if len(unmanaged) == 0 {
 		return from, to
 	}
 	return stripTables(from, unmanaged), stripTables(to, unmanaged)
 }
 
-// stripTables returns a copy of m without the named vertex tables or anything
-// attached to them. Edge tables are untouched: an edge over an unmanaged
-// endpoint is refused in the SDL, so none can exist.
+// stripTables returns a copy of m without the named tables or anything attached
+// to them, on either side of the diff.
 func stripTables(m *schema.Schema, drop map[string]bool) *schema.Schema {
 	if m == nil {
 		return nil
 	}
-	out := &schema.Schema{GraphName: m.GraphName, EdgeTables: m.EdgeTables}
+	out := &schema.Schema{GraphName: m.GraphName}
+	for _, e := range m.EdgeTables {
+		if !drop[e.Key()] && !e.Unmanaged {
+			out.EdgeTables = append(out.EdgeTables, e)
+		}
+	}
 	for _, vt := range m.VertexTables {
 		if !drop[vt.Key()] {
 			out.VertexTables = append(out.VertexTables, vt)

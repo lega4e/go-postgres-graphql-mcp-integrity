@@ -332,12 +332,38 @@ owns a table cannot change in a delta — both directions are refused at generat
 time, because neither has a migration that could be written for it.
 
 `@node(schema:)` applies to any type, owned or not; gopgql emits no `CREATE
-SCHEMA` either way, so the schema has to already exist. What is **not** yet
-supported is a relationship touching a `@readonly` type: an edge is a table
-gopgql would create, and over one it does not own it also has to be told which
-columns are its keys. That is `@relationship(sourceKey:/destKey:)`, and it
-arrives in M13 together with making a declared `@key(fields:)` the vertex
-identity — so until then every type, unowned included, still needs `id: ID!`.
+SCHEMA` either way, so the schema has to already exist.
+
+A table you do not own may have no `id` at all, and gopgql cannot add one to it.
+Declare `@key(fields:)` and those columns become the type's identity — what the
+compiler projects, groups the response by, and compares between positions:
+
+```graphql
+type Step @node(label: "step", table: "operation_outputs", schema: "dbos") @readonly
+  @key(fields: ["workflowUuid", "functionId"]) {
+  workflowUuid: ID! @column(name: "workflow_uuid")
+  functionId: Int! @column(name: "function_id")
+  output: String
+}
+```
+
+For a type gopgql *owns* nothing changes: `id` stays the identity, and
+`@key(fields:)` stays a uniqueness constraint alongside it.
+
+An edge can be mapped onto an existing table too, which is how one table serves
+as both a row and the join that reaches it:
+
+```graphql
+steps: [Step!]! @relationship(
+  type: "has_step", direction: OUT
+  table: "operation_outputs", schema: "dbos"
+  sourceKey: ["workflow_uuid"], destKey: ["workflow_uuid", "function_id"]
+)
+```
+
+Without `sourceKey:`/`destKey:`, a relationship touching a `@readonly` type is
+refused rather than mis-generated: gopgql would otherwise have to create an edge
+table referencing a table it does not own.
 
 ## A typed Go client
 

@@ -54,20 +54,17 @@ func (b *builder) renderShaped(graphName string, root *Selection) string {
 	// query that matches nothing at all.
 	rel := b.levelRel(root, nil)
 	src := b.nextAlias()
-	fmt.Fprintf(&sb, "\nSELECT (json_build_object(%s, COALESCE(json_agg(%s ORDER BY %s.%s), '[]'::json)))::text AS response\nFROM %s AS %s",
-		quoteLiteral(root.ResponseKey), b.objectOf(src, root), src, root.KeyColumn,
+	fmt.Fprintf(&sb, "\nSELECT (json_build_object(%s, COALESCE(json_agg(%s ORDER BY %s), '[]'::json)))::text AS response\nFROM %s AS %s",
+		quoteLiteral(root.ResponseKey), b.objectOf(src, root),
+		strings.Join(qualify(src, root.KeyColumns), ", "),
 		rel, src)
 	return sb.String()
 }
 
 // cteColumns renders the column list of a fragment's CTE: everything the outer
-// query can see of it, plus the branch-point id a branch fragment joins on.
+// query can see of it, plus the branch-point identity a branch fragment joins on.
 func (f *fragment) cteColumns() []string {
-	cols := selectList(f.outs, "")
-	if f.joinKey != "" {
-		cols = append(cols, f.joinKey)
-	}
-	return cols
+	return append(selectList(f.outs, ""), f.joinKeys...)
 }
 
 // levelRel renders the subquery that produces one row per distinct path down to
@@ -90,7 +87,7 @@ func (f *fragment) cteColumns() []string {
 // PRIMARY KEY (source_id, target_id) (generator.go), so two edges between the
 // same pair cannot exist to produce a duplicate path in the first place.
 func (b *builder) levelRel(sel *Selection, anc []string) string {
-	group := append(append([]string{}, anc...), sel.KeyColumn)
+	group := append(append([]string{}, anc...), sel.KeyColumns...)
 
 	own := append([]string{}, group...)
 	for _, f := range sel.Fields {
@@ -136,14 +133,23 @@ func (b *builder) levelRel(sel *Selection, anc []string) string {
 // The FILTER is for the branch case: a LEFT JOINed branch that matched nothing
 // contributes a row whose key is NULL, and without the filter that row would
 // aggregate to [null] instead of [].
+//
+// With a multi-column identity the test is "not *every* component is NULL", not
+// "no component is NULL". A branch that matched nothing has all of them NULL; a
+// row with only some of them NULL is a real row whose key is partly unknown,
+// and a @key column is UNIQUE but never NOT NULL, so it can happen. Requiring
+// all of them to be present would silently drop such a row — the same mistake
+// the isomorphism guard avoids with IS DISTINCT FROM. shape's Go-side grouping
+// applies exactly this rule, which is what keeps the two strategies in step.
 func (b *builder) childAggregate(child *Selection, group []string) string {
 	rel := b.levelRel(child, group)
 	src := b.nextAlias()
 	grouped := qualify(src, group)
 	return fmt.Sprintf(
-		"(SELECT %s, COALESCE(json_agg(%s ORDER BY %s.%s) FILTER (WHERE %s.%s IS NOT NULL), '[]'::json) AS %s\nFROM %s AS %s\nGROUP BY %s)",
+		"(SELECT %s, COALESCE(json_agg(%s ORDER BY %s) FILTER (WHERE %s), '[]'::json) AS %s\nFROM %s AS %s\nGROUP BY %s)",
 		strings.Join(grouped, ", "),
-		b.objectOf(src, child), src, child.KeyColumn, src, child.KeyColumn, aggColumn(child),
+		b.objectOf(src, child), strings.Join(qualify(src, child.KeyColumns), ", "),
+		presentPredicate(src, child.KeyColumns), aggColumn(child),
 		rel, src,
 		strings.Join(grouped, ", "))
 }
@@ -186,10 +192,22 @@ func flatSource(f *fragment) string {
 	var sb strings.Builder
 	sb.WriteString(chain[0].name)
 	for _, g := range chain[1:] {
-		on := append([]string{fmt.Sprintf("%s.%s = %s.%s", g.name, g.joinKey, g.parent.name, g.parentKey)}, g.onGuards...)
-		fmt.Fprintf(&sb, " LEFT JOIN %s ON %s", g.name, strings.Join(on, " AND "))
+		fmt.Fprintf(&sb, " LEFT JOIN %s ON %s", g.name, strings.Join(branchJoinOn(g), " AND "))
 	}
 	return sb.String()
+}
+
+// presentPredicate renders "this row exists": at least one identity component is
+// non-NULL. See childAggregate for why it is not "every component".
+func presentPredicate(alias string, cols []string) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = fmt.Sprintf("%s.%s IS NOT NULL", alias, c)
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
 }
 
 // joinOn renders the equality that reattaches a child's aggregate to its parent

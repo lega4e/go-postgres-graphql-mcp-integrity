@@ -24,7 +24,7 @@ import (
 // leaf builds a one-field projection over the given scalar.
 func leaf(kind compiler.ScalarKind, graphQLType, columnType string) compiler.Projection {
 	return compiler.Projection{Root: &compiler.Selection{
-		ResponseKey: "rows", Alias: "v0", KeyColumn: "v0_k",
+		ResponseKey: "rows", Alias: "v0", KeyColumns: []string{"v0_k"},
 		Fields: []compiler.ProjectedField{{
 			ResponseKey: "f", Property: "f", Column: "v0_c0",
 			GraphQLType: graphQLType, ColumnType: columnType, Scalar: kind,

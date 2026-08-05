@@ -195,14 +195,14 @@ type EdgeTableDef struct {
 	// DestTable respectively, each "" for an unqualified name.
 	Schema       string
 	Label        string
-	SourceKey    string
+	SourceKey    []string
 	SourceSchema string
 	SourceTable  string
-	SourceRef    string
-	DestKey      string
+	SourceRef    []string
+	DestKey      []string
 	DestSchema   string
 	DestTable    string
-	DestRef      string
+	DestRef      []string
 	Properties   []string
 }
 

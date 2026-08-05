@@ -73,6 +73,19 @@ type Relationship struct {
 	// empty means the identifier resolves through search_path, exactly as every
 	// gopgql identifier did before schema qualification existed.
 	Schema string
+	// SourceKey and DestKey name the columns of an **existing** table to use as
+	// its source and destination keys (@relationship(sourceKey:, destKey:)).
+	//
+	// Present, they mean the edge is mapped onto a table gopgql does not own:
+	// Table is required, no edge table is generated, and only the graph element
+	// is emitted. Absent, everything behaves exactly as it did before — gopgql
+	// creates the edge table with source_id/target_id (SPEC.md §7 → M13).
+	//
+	// They are lists because the vertex they reference may identify a row by a
+	// multi-column key, and SOURCE KEY (…) REFERENCES t (…) has to name all of
+	// it.
+	SourceKey []string
+	DestKey   []string
 	// HasInverse names the paired field when @hasInverse is present.
 	HasInverse string
 }
@@ -184,6 +197,32 @@ type tableRef struct{ Schema, Name string }
 
 func (n *Node) tableRef() tableRef { return tableRef{Schema: n.Schema, Name: n.Table} }
 
+// IdentityColumns are the physical columns that identify a row of this type.
+//
+// For a type gopgql owns this is always the surrogate `id`, and SPEC.md §9's
+// open decision stays open for it: a @key(fields:) is a uniqueness constraint
+// *alongside* the identity, not the identity.
+//
+// For a @readonly type it is the declared @key(fields:) when there is one,
+// because such a table may have no surrogate key at all and gopgql cannot add
+// one to a table it does not own. A @readonly type that does declare `id` and no
+// key keeps `id`, so nothing about an existing schema changes.
+func (n *Node) IdentityColumns() []string {
+	if n.ReadOnly && len(n.NaturalKey) > 0 {
+		out := make([]string, 0, len(n.NaturalKey))
+		for _, name := range n.NaturalKey {
+			for _, f := range n.Fields {
+				if f.Name == name && f.IsScalarColumn() {
+					out = append(out, f.ColumnName())
+					break
+				}
+			}
+		}
+		return out
+	}
+	return []string{"id"}
+}
+
 // PriorTableNames derives the physical table names this type may have had before
 // the rename its @renamedFrom declares, most likely first. It is nil when the
 // type declares no rename.
@@ -288,6 +327,16 @@ type Target struct {
 	// positions whose table sets intersect could bind the same row, which is
 	// where an isomorphism guard is required (SPEC.md §2.2). Sorted.
 	Tables []string
+	// Identity are the physical columns that identify a vertex bound here, in
+	// declaration order: `id` alone for every type gopgql owns, and the
+	// @key(fields:) columns for a @readonly type that has no surrogate key
+	// (SPEC.md §7 → M13).
+	//
+	// The compiler projects them at this position, groups the response by them
+	// and compares them between positions. At an interface position every
+	// implementor must agree on them, which is what makes one label expression
+	// stand for one notion of identity.
+	Identity []string
 }
 
 // Document is the typed mapping model built from an SDL source: the set of
@@ -366,7 +415,7 @@ func (d *Document) RootFields() []string {
 // prelude declares the gopgql directive vocabulary and custom scalars so
 // gqlparser recognises and validates them. It is SPEC.md §5 through M7.
 const prelude = `directive @node(label: String!, table: String, schema: String) on OBJECT | INTERFACE
-directive @relationship(type: String!, direction: RelDirection, table: String, schema: String) on FIELD_DEFINITION
+directive @relationship(type: String!, direction: RelDirection, table: String, schema: String, sourceKey: [String!], destKey: [String!]) on FIELD_DEFINITION
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @ignore on FIELD_DEFINITION
 directive @column(name: String, type: String) on FIELD_DEFINITION | ARGUMENT_DEFINITION
@@ -524,7 +573,10 @@ func (d *Document) buildTargets() error {
 	}
 
 	for _, n := range d.Nodes {
-		t := &Target{TypeName: n.TypeName, Labels: []string{n.Label}, Fields: n.Fields, Tables: []string{n.Table}}
+		t := &Target{
+			TypeName: n.TypeName, Labels: []string{n.Label}, Fields: n.Fields,
+			Tables: []string{n.Table}, Identity: n.IdentityColumns(),
+		}
 		d.targets[n.TypeName] = t
 		if err := claim(n.Table, n.TypeName, t); err != nil {
 			return err
@@ -539,6 +591,21 @@ func (d *Document) buildTargets() error {
 				// Unlabelled: matched by alternation over the implementors'
 				// own labels.
 				t.Labels = append(t.Labels, impl.Label)
+			}
+			// One position, one notion of identity. The compiler projects the
+			// interface's identity columns from whichever table a row came from
+			// and compares them against other positions, so implementors that
+			// disagreed would make one label expression mean two things — and
+			// the disagreement would surface as rows silently mis-grouped, not
+			// as an error.
+			ident := impl.IdentityColumns()
+			if t.Identity == nil {
+				t.Identity = ident
+			} else if !sameColumns(t.Identity, ident) {
+				return fmt.Errorf("sdl: %s is implemented by types that identify a row differently "+
+					"(%s by %s, %s by %s); every implementor of an interface must share its identity columns",
+					iface.TypeName, iface.Implementors[0].TypeName, strings.Join(t.Identity, ", "),
+					impl.TypeName, strings.Join(ident, ", "))
 			}
 		}
 		if iface.Label != "" {
@@ -659,6 +726,8 @@ func buildFields(def *ast.Definition) ([]*Field, error) {
 				Direction: Out,
 				Table:     argString(relDir, "table"),
 				Schema:    argString(relDir, "schema"),
+				SourceKey: argStringList(relDir, "sourceKey"),
+				DestKey:   argStringList(relDir, "destKey"),
 			}
 			if d := argString(relDir, "direction"); d == string(In) {
 				rel.Direction = In
@@ -706,7 +775,7 @@ func (d *Document) validate() error {
 			// Allowed, but the table name will be quoted in DDL; nothing to do.
 			_ = n.Table
 		}
-		if err := validateKey(n.TypeName, "type", n.Fields); err != nil {
+		if err := validateKey(n.TypeName, "type", n.Fields, n.ReadOnly, len(n.NaturalKey) > 0); err != nil {
 			return err
 		}
 		for _, f := range n.Fields {
@@ -737,7 +806,11 @@ func (d *Document) validate() error {
 	}
 
 	for _, iface := range d.Interfaces {
-		if err := validateKey(iface.TypeName, "interface", iface.Fields); err != nil {
+		// An interface is not itself a table, so it has no @readonly of its own:
+		// its identity comes from its implementors, which buildTargets requires
+		// to agree. It still needs `id` when they identify by `id`.
+		if err := validateKey(iface.TypeName, "interface", iface.Fields,
+			ifaceUsesNaturalKey(iface), true); err != nil {
 			return err
 		}
 		for _, f := range iface.Fields {
@@ -981,10 +1054,37 @@ func (d *Document) validateRenameHints(n *Node) error {
 	return nil
 }
 
-// validateKey requires the surrogate key `id: ID!`. Interfaces need it too: the
-// compiler projects it as every level's hidden key column and compares it
-// between vertex positions to exclude self-matches.
-func validateKey(typeName, kind string, fields []*Field) error {
+// sameColumns reports whether two identity column lists are equal, order
+// included: identity is an ordered tuple, and (a,b) is not (b,a) to a comparison
+// or to a grouping key.
+func sameColumns(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// validateKey requires a way to identify a row.
+//
+// For a type gopgql owns — and for an interface — that is the surrogate
+// `id: ID!`, exactly as before: the compiler projects it as the level's key
+// column and compares it between vertex positions to exclude self-matches.
+//
+// A @readonly type may instead declare `@key(fields:)`, because a table gopgql
+// does not own may have no surrogate key and gopgql cannot add one to it
+// (SPEC.md §7 → M13). What is refused is a @readonly type with **neither**:
+// without one or the other there is nothing to group a response by, and a
+// wrong identity does not fail — it silently merges rows that are not the same
+// row.
+//
+// A declared `id` still has to be `ID!` either way; a @readonly type that
+// declares one and no key keeps it, so no existing schema changes shape.
+func validateKey(typeName, kind string, fields []*Field, allowNaturalKey, hasNaturalKey bool) error {
 	for _, f := range fields {
 		if f.Name != "id" {
 			continue
@@ -994,7 +1094,28 @@ func validateKey(typeName, kind string, fields []*Field) error {
 		}
 		return fmt.Errorf("sdl: %s.id must be `ID!` (surrogate uuid keys only)", typeName)
 	}
+	if allowNaturalKey {
+		if hasNaturalKey {
+			return nil
+		}
+		return fmt.Errorf("sdl: %s %s is @readonly and declares neither `id: ID!` nor @key(fields:); "+
+			"a table gopgql does not own may have no surrogate key, so one or the other must say how a "+
+			"row is identified", kind, typeName)
+	}
 	return fmt.Errorf("sdl: %s %s must declare a surrogate key field `id: ID!`", kind, typeName)
+}
+
+// ifaceUsesNaturalKey reports whether an interface's implementors identify rows
+// by something other than `id`, in which case the interface needs no `id` of its
+// own — buildTargets has already required them to agree on what that something
+// is.
+func ifaceUsesNaturalKey(iface *Interface) bool {
+	for _, impl := range iface.Implementors {
+		if impl.ReadOnly && len(impl.NaturalKey) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // validateInverse checks that a @hasInverse field points at a real field on the
