@@ -2,6 +2,24 @@ type Person @node(label: "person") {
   id: ID!
   name: String!
   nickname: String
+  age: Int! @default(value: "0")
+  score: Float! @default(value: "0")
+  rating: Float @column(type: "numeric(10,2)")
+  seen: DateTime
+  marks: [Int!]
+  # A nullable Int, so that "null stays null" is asserted for the scalar whose
+  # decoder issue #51 was reported against, and not only for the ones beside it.
+  tally: Int
+  # An Int wider than a float64 can represent. 2^53+1 is the smallest integer a
+  # float64 rounds away, so a decoder that reached int64 by way of a float would
+  # return 9007199254740992 here and fail — which is what makes "decoded from
+  # its digits" a claim this fixture can falsify rather than merely assert.
+  ticket: Int! @column(type: "bigint") @default(value: "0")
+  # Boolean and JSON complete the scalar table. Their canonical form is already
+  # the Go type pgx scans, so they are the control cases: a change to shape that
+  # gave either one a new canonical form would break them here first.
+  active: Boolean! @default(value: "false")
+  notes: JSON
   follows: [Person!]! @relationship(type: "follows", direction: OUT)
 }
 
@@ -13,6 +31,14 @@ type Mutation {
     fromName: String! @column(name: "from_name")
     toName: String! @column(name: "to_name")
   ): Boolean! @function(schema: "app", name: "follow", returns: VOID)
+
+  measure(
+    personName: String! @column(name: "person_name")
+    personAge: Int! @column(name: "person_age")
+    personScore: Float! @column(name: "person_score")
+    personRating: Float! @column(name: "person_rating")
+    personSeen: DateTime! @column(name: "person_seen")
+  ): Int! @function(schema: "app", name: "measure")
 
   explode(code: String!): String! @function(schema: "app", name: "explode")
 }

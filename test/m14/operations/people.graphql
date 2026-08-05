@@ -12,3 +12,27 @@ query FindPerson($name: String!) {
     nickname
   }
 }
+
+# Every scalar the generated decoders handle, in one projection.
+#
+# The ones whose canonical response form is not the Go type pgx scanned it as
+# are the defect: an Int and a Float arrive as json.Number, a numeric-backed
+# Float as a json.Number of the database's own digits, a DateTime as RFC3339Nano
+# text, and an Int list as a list of json.Number. String, ID, Boolean and JSON
+# are here because a projection that covers only the broken ones cannot notice
+# the day one of the others joins them — which is exactly how #51 shipped.
+query FindMeasurements($name: String!) {
+  persons(name: $name) {
+    id
+    name
+    age
+    score
+    rating
+    seen
+    marks
+    tally
+    ticket
+    active
+    notes
+  }
+}

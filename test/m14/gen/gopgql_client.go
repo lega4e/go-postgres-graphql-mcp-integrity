@@ -4,6 +4,7 @@ package gen
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -73,6 +74,32 @@ func gopgqlSlice[T any](path string, v any, decode gopgqlDecoder[T]) ([]T, error
 	return out, nil
 }
 
+// gopgqlAsNumber reads a value that arrived as digits rather than as a Go
+// number: the json.Number every Int, Float and numeric leaf is canonicalised to,
+// and the pgtype.Numeric a numeric-returning function hands back unshaped.
+//
+// The latter is reached through json.Marshaler rather than named outright. That
+// is how gopgql's own shaper reads it, for the same reason: naming pgtype here
+// would put a database dependency in every generated client, including one whose
+// schema has no numeric column anywhere.
+//
+// A marshaller that produced a JSON *string* produced "NaN" or "Infinity" —
+// PostgreSQL's rendering of a value JSON has no number for. It is not a number
+// here either, and saying so is what keeps it an error rather than a zero.
+func gopgqlAsNumber(v any) (json.Number, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		return t, true
+	case json.Marshaler:
+		b, err := t.MarshalJSON()
+		if err != nil || len(b) == 0 || b[0] == '"' {
+			return "", false
+		}
+		return json.Number(b), true
+	}
+	return "", false
+}
+
 func gopgqlAsInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int64:
@@ -83,6 +110,12 @@ func gopgqlAsInt64(v any) (int64, bool) {
 		return int64(n), true
 	case int:
 		return int64(n), true
+	}
+	// A fractional value reaches Int64 as an error rather than as a truncation,
+	// which is the outcome a field declared Int should have.
+	if n, ok := gopgqlAsNumber(v); ok {
+		i, err := n.Int64()
+		return i, err == nil
 	}
 	return 0, false
 }
@@ -98,6 +131,13 @@ func gopgqlAsFloat64(v any) (float64, bool) {
 	case int32:
 		return float64(n), true
 	}
+	// A numeric read into a Float is exact only as far as a float64 goes: the
+	// canonical form carries the database's own digits, and 19.90 lands here as
+	// 19.9. That loss is in the field's declared type, not in this decode.
+	if n, ok := gopgqlAsNumber(v); ok {
+		f, err := n.Float64()
+		return f, err == nil
+	}
 	return 0, false
 }
 
@@ -111,9 +151,22 @@ func gopgqlAsBool(v any) (bool, bool) {
 	return b, ok
 }
 
+// gopgqlAsTime reads a DateTime, whose canonical response form is text and whose
+// unshaped form is a time.Time.
+//
+// The text is RFC3339Nano **in UTC**: shape converts it there so that the same
+// row does not come back with a different offset on a connection whose session
+// TimeZone happens to differ. Parsing it back yields the same instant, which is
+// what the field means; it is not the same Location, which the field does not.
 func gopgqlAsTime(v any) (time.Time, bool) {
-	t, ok := v.(time.Time)
-	return t, ok
+	switch t := v.(type) {
+	case time.Time:
+		return t, true
+	case string:
+		parsed, err := time.Parse(time.RFC3339Nano, t)
+		return parsed, err == nil
+	}
+	return time.Time{}, false
 }
 
 // gopgqlAsAny is the decoder for JSON, whose whole point is that its shape is
@@ -171,6 +224,98 @@ func (c *Client) Explode(ctx context.Context, h exec.Handle, in ExplodeInput) (s
 		return zero, err
 	}
 	return gopgqlValue("Explode", v, gopgqlAsString)
+}
+
+// FindMeasurementsInput is the input of FindMeasurements.
+type FindMeasurementsInput struct {
+	Name string
+}
+
+// FindMeasurementsPerson is one Person of the FindMeasurements result.
+type FindMeasurementsPerson struct {
+	Id     string
+	Name   string
+	Age    int64
+	Score  float64
+	Rating *float64
+	Seen   *time.Time
+	Marks  []int64
+	Tally  *int64
+	Ticket int64
+	Active bool
+	Notes  *any
+}
+
+const findMeasurementsSQL = "SELECT v0_k, v0_c0, v0_c1, v0_c2, v0_c3, v0_c4, v0_c5, v0_c6, v0_c7, v0_c8, v0_c9, v0_c10::text AS v0_c10\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person)\n  WHERE v0.name = $1\n  COLUMNS (v0.id AS v0_k, v0.id AS v0_c0, v0.name AS v0_c1, v0.age AS v0_c2, v0.score AS v0_c3, v0.rating AS v0_c4, v0.seen AS v0_c5, v0.marks AS v0_c6, v0.tally AS v0_c7, v0.ticket AS v0_c8, v0.active AS v0_c9, v0.notes AS v0_c10)\n)\nORDER BY v0_k"
+
+var findMeasurementsProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumns: []string{"v0_k"}, Fields: []compiler.ProjectedField{{ResponseKey: "id", Property: "id", Column: "v0_c0", GraphQLType: "ID", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarID}, {ResponseKey: "name", Property: "name", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "age", Property: "age", Column: "v0_c2", GraphQLType: "Int", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarInt}, {ResponseKey: "score", Property: "score", Column: "v0_c3", GraphQLType: "Float", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarFloat}, {ResponseKey: "rating", Property: "rating", Column: "v0_c4", GraphQLType: "Float", ColumnType: "numeric(10,2)", List: false, NonNull: false, Scalar: compiler.ScalarNumeric}, {ResponseKey: "seen", Property: "seen", Column: "v0_c5", GraphQLType: "DateTime", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarDateTime}, {ResponseKey: "marks", Property: "marks", Column: "v0_c6", GraphQLType: "Int", ColumnType: "", List: true, NonNull: false, Scalar: compiler.ScalarInt}, {ResponseKey: "tally", Property: "tally", Column: "v0_c7", GraphQLType: "Int", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarInt}, {ResponseKey: "ticket", Property: "ticket", Column: "v0_c8", GraphQLType: "Int", ColumnType: "bigint", List: false, NonNull: true, Scalar: compiler.ScalarInt}, {ResponseKey: "active", Property: "active", Column: "v0_c9", GraphQLType: "Boolean", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarBoolean}, {ResponseKey: "notes", Property: "notes", Column: "v0_c10", GraphQLType: "JSON", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarJSON}}}}
+
+// FindMeasurements runs the FindMeasurements operation through the handle the caller supplies.
+func (c *Client) FindMeasurements(ctx context.Context, h exec.Handle, in FindMeasurementsInput) ([]FindMeasurementsPerson, error) {
+	res, err := exec.Query(ctx, h, &compiler.Compiled{
+		SQL:        findMeasurementsSQL,
+		Args:       []any{in.Name},
+		Projection: findMeasurementsProjection,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return assembleFindMeasurementsPerson("persons", res["persons"])
+}
+
+func assembleFindMeasurementsPerson(path string, v any) ([]FindMeasurementsPerson, error) {
+	if v == nil {
+		return nil, nil
+	}
+	rows, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("gopgql: %s: expected a list, got %T", path, v)
+	}
+	out := make([]FindMeasurementsPerson, 0, len(rows))
+	for i, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("gopgql: %s[%d]: expected an object, got %T", path, i, raw)
+		}
+		at := fmt.Sprintf("%s[%d]", path, i)
+		var o FindMeasurementsPerson
+		var err error
+		if o.Id, err = gopgqlValue(at+".id", row["id"], gopgqlAsString); err != nil {
+			return nil, err
+		}
+		if o.Name, err = gopgqlValue(at+".name", row["name"], gopgqlAsString); err != nil {
+			return nil, err
+		}
+		if o.Age, err = gopgqlValue(at+".age", row["age"], gopgqlAsInt64); err != nil {
+			return nil, err
+		}
+		if o.Score, err = gopgqlValue(at+".score", row["score"], gopgqlAsFloat64); err != nil {
+			return nil, err
+		}
+		if o.Rating, err = gopgqlPointer(at+".rating", row["rating"], gopgqlAsFloat64); err != nil {
+			return nil, err
+		}
+		if o.Seen, err = gopgqlPointer(at+".seen", row["seen"], gopgqlAsTime); err != nil {
+			return nil, err
+		}
+		if o.Marks, err = gopgqlSlice(at+".marks", row["marks"], gopgqlAsInt64); err != nil {
+			return nil, err
+		}
+		if o.Tally, err = gopgqlPointer(at+".tally", row["tally"], gopgqlAsInt64); err != nil {
+			return nil, err
+		}
+		if o.Ticket, err = gopgqlValue(at+".ticket", row["ticket"], gopgqlAsInt64); err != nil {
+			return nil, err
+		}
+		if o.Active, err = gopgqlValue(at+".active", row["active"], gopgqlAsBool); err != nil {
+			return nil, err
+		}
+		if o.Notes, err = gopgqlPointer(at+".notes", row["notes"], gopgqlAsAny); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // FindPersonInput is the input of FindPerson.
@@ -339,4 +484,34 @@ func assembleListPeoplePersonFollows(path string, v any) ([]ListPeoplePersonFoll
 		out = append(out, o)
 	}
 	return out, nil
+}
+
+// MeasureInput is the input of Measure.
+type MeasureInput struct {
+	PersonName   string
+	PersonAge    int64
+	PersonScore  float64
+	PersonRating float64
+	PersonSeen   time.Time
+}
+
+const measureSQL = "SELECT app.measure(person_name => $1, person_age => $2, person_score => $3, person_rating => $4, person_seen => $5)"
+
+// Measure calls app.measure through the handle the caller supplies.
+//
+// A failure the function itself raised arrives as an *exec.FunctionError
+// carrying its SQLSTATE, reachable with errors.As.
+func (c *Client) Measure(ctx context.Context, h exec.Handle, in MeasureInput) (int64, error) {
+	v, err := exec.Call(ctx, h, &compiler.CompiledCall{
+		SQL:      measureSQL,
+		Args:     []any{in.PersonName, in.PersonAge, in.PersonScore, in.PersonRating, in.PersonSeen},
+		Returns:  sdl.ReturnScalar,
+		Schema:   "app",
+		Function: "measure",
+	})
+	if err != nil {
+		var zero int64
+		return zero, err
+	}
+	return gopgqlValue("Measure", v, gopgqlAsInt64)
 }
