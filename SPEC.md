@@ -287,6 +287,57 @@ Every directive above is implemented. The four added in M7 carry semantics worth
 
 Overridable per field via `@column(type:)` from M6.
 
+**`JSON` maps to `jsonb`, and stays there.** `jsonb` parses the document into a
+binary form: it sorts object keys, discards insignificant whitespace, and keeps
+only the last of a duplicated key. So a document stored through a `JSON` field
+and read back is *equivalent* to what was written and is not *byte-identical* to
+it. That is a real consequence and it is the right default anyway — `jsonb` is
+what can be indexed and queried, which is what a graph query engine's JSON column
+is normally for, and it is what PostgreSQL's own documentation recommends for
+anything but a write-once blob.
+
+Where byte-identity is the requirement — a signed payload, a document whose hash
+is checked — declare the column type explicitly:
+
+```graphql
+payload: JSON @column(type: "json")
+```
+
+`json` stores the text as given. Nothing else about the field changes: both types
+travel through the same cast to `text` on the way out (design D5), so the shaped
+response is produced the same way for either.
+
+The default is deliberately *not* changed to `json`. Doing so would re-type every
+existing `JSON` column, and the differ would correctly emit an
+`ALTER TABLE … TYPE json` for each of them on the next generation of every schema
+already in production — a migration nobody asked for, to change a default most
+schemas want as it is. The choice is per column because that is the grain at
+which the requirement actually differs (gopgql#53).
+
+**Note on the scalars gopgql does *not* have.** `Bytes`, `Date`, `Time`, `UUID`,
+`BigInt` and `Decimal` are not scalars here; each is refused at parse time with
+the mapping to write instead (`String @column(type: "bytea")`, `ID`,
+`Int @column(type: "bigint")`, …). `Bytes` in particular is refused rather than
+added because a byte string has no canonical response form that both shaping
+strategies could agree on: pgx scans `bytea` to `[]byte`, while the SQL-side
+render would have PostgreSQL put it into JSON, and §4's byte-identity
+requirement is defined over the two agreeing.
+
+That is not a new position, it is the one already enforced. A field mapped with
+`@column(type: "bytea")` reads on the Go-side path and is *refused at compile
+time* under SQL-side shaping, by name and with the alternative:
+
+```
+Blob.data is String via @column(type: "bytea"), which has no canonical response
+form, so SQL-side shaping cannot promise the same value as Go-side shaping;
+compile this query with compiler.GoSide, or map the field to a supported type
+```
+
+A `Bytes` scalar would have to settle that — pick the canonical form and teach
+both strategies to produce it — which is a decision for this section, not
+something a bug fix may do in passing. Until it is made, the mapping above is
+what to write, and the refusal says so at the point of the mistake (gopgql#53).
+
 ### 5.2 Worked example
 
 ```graphql
@@ -542,8 +593,10 @@ Under that definition it holds *by construction*: the SQL-side path decodes the 
 
 ### M10 — A handle the caller owns
 
-- `exec.Handle`: `Query` **and** `Exec`, satisfied by `*pgxpool.Pool`, `*pgx.Conn` and `pgx.Tx`, asserted at compile time so a driver upgrade fails the build rather than a test.
-- `exec.Querier` stays and `exec.Query` keeps taking it: a read needs no `Exec`, and the smaller interface asks less of a caller.
+- `exec.Handle`: `Query` **and** `Exec`, over `exec.Cursor` and `exec.Tag` — types gopgql owns, naming no driver. `exec.Pgx` adapts `*pgxpool.Pool`, `*pgx.Conn` and `pgx.Tx`; those three are asserted against the pgx-shaped interface at compile time, so a driver upgrade fails the build rather than a test.
+- `exec.Portable` adapts any handle that is already driver-agnostic, generically over its cursor and result types. This is what `dbos.Tx` (`sysdb.Tx`) goes through: Go matches interfaces on exact signatures, so a pgx-typed `Handle` was unreachable from DBOS on both the read and the write path, and the alternative — gopgql importing DBOS — would put a workflow dependency in every generated client (gopgql#53).
+- `exec.Querier` stays and `exec.Query` keeps taking it: a read needs no `Exec`, and the smaller interface asks less of a caller. `exec.PgxQuerier` and `exec.PortableQuerier` are its two adapters.
+- A portable cursor cannot report its own column names, so `compiler.Compiled` records the SELECT list it emitted and the flat read keys rows by it. Where a cursor *can* say — the pgx adapter — the two are compared and a disagreement is reported, which is what keeps the recorded list honest on the path that does not need it.
 - `exec.OpenReadOnly` is **behaviourally unchanged** and remains the only pool gopgql opens. Anything that writes runs through a handle the caller supplies, which is what keeps M11 from widening gopgql into something holding a writable connection.
 
 **Exit:** a compiled query executed through a caller's `pgx.Tx` returns rows that transaction inserted and has not committed; the same query through an `OpenReadOnly` pool returns the same rows; a write on that pool fails with SQLSTATE `25006`.
