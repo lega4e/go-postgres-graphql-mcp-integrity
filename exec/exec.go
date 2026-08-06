@@ -78,8 +78,11 @@ func queryShaped(ctx context.Context, db Querier, cq *compiler.Compiled) (map[st
 	// The column count is checked only where the cursor can report it. A
 	// portable cursor cannot, and the statement's shape is the compiler's rather
 	// than the caller's: an SQL-side render emits one column by construction.
+	//
+	// No columns at all is not a shape complaint but a statement that never
+	// produced a result set — see [noResultSet]. The Next/Err below reports why.
 	if named, ok := rows.(NamedCursor); ok {
-		if cols := named.Columns(); len(cols) != 1 {
+		if cols := named.Columns(); len(cols) > 1 {
 			return nil, fmt.Errorf("exec: an SQL-side shaped query returns one column, got %d", len(cols))
 		}
 	}
@@ -154,6 +157,9 @@ func columnsOf(rows Cursor, recorded []string) ([]string, error) {
 		return recorded, nil
 	}
 	cols := named.Columns()
+	if noResultSet(cols) {
+		return recorded, nil
+	}
 	if len(recorded) > 0 && !sameNames(cols, recorded) {
 		return nil, fmt.Errorf("exec: the result set has columns (%s) but the statement was emitted with "+
 			"(%s); the compiled query and the statement it ran have drifted apart",
@@ -161,6 +167,24 @@ func columnsOf(rows Cursor, recorded []string) ([]string, error) {
 	}
 	return cols, nil
 }
+
+// noResultSet reports that a cursor which *can* name its columns named none, so
+// there is no result set to describe and nothing to disagree with.
+//
+// It is the difference between "the statement returned the wrong columns" and
+// "the statement failed", and the two must not be confused, because pgx reaches
+// the second through the first: a statement whose failure happens at execution
+// rather than at prepare — a PL/pgSQL RAISE and its SQLSTATE, a permission
+// denial, a serialisation failure — returns a cursor without error and defers
+// the failure to Next/Err. That cursor has no field descriptions.
+//
+// Reporting a column disagreement there would replace the database's own message
+// with gopgql's, and the database's is the one a caller acts on: SPEC.md §7 → M11
+// requires a raised exception to reach the caller carrying its SQLSTATE. So the
+// columns fall back to the recorded list and the scan proceeds, where Err is read
+// and the real error surfaces. There are no rows to mis-key: a statement that
+// produced no result set produces no rows either.
+func noResultSet(cols []string) bool { return len(cols) == 0 }
 
 func sameNames(a, b []string) bool {
 	if len(a) != len(b) {

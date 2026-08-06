@@ -319,7 +319,10 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		return nil, err
 	}
 
-	var sql, columns = "", []string(nil)
+	var (
+		sql     string
+		columns []string
+	)
 	if c.shaping == SQLSide {
 		sql = b.renderShaped(c.graphName, rootSel)
 		columns = []string{shapedColumn}

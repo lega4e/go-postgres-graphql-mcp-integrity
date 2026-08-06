@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -169,8 +170,13 @@ func TestCallRefusesNilHandle(t *testing.T) {
 // The three pgx types a caller can realistically hold reach Handle through the
 // [Pgx] adapter. The package asserts the pgx-shaped half at compile time; the
 // test states the guarantee so that a reader looking for it finds it here too.
+//
+// The assertion is on the *argument* side. That Pgx returns a Handle is its
+// signature and asserting it would assert nothing; what is worth pinning is that
+// each of these types is accepted, and that a Handle still narrows to a Querier
+// for a caller that only reads.
 func TestPgxTypesSatisfyHandle(*testing.T) {
-	var _ Handle = Pgx((pgx.Tx)(nil))
-	var h Handle = Pgx(&fakeHandle{})
-	var _ Querier = h
+	for _, h := range []pgxHandle{(pgx.Tx)(nil), (*pgx.Conn)(nil), (*pgxpool.Pool)(nil), &fakeHandle{}} {
+		_ = Querier(Pgx(h))
+	}
 }

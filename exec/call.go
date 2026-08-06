@@ -126,8 +126,15 @@ func Call(ctx context.Context, h Handle, cc *compiler.CompiledCall) (any, error)
 	// through a portable handle, where no names are available. A cursor that can
 	// name its columns is still asked, so a function that returned the wrong
 	// shape is reported as that rather than as a scan failure.
+	//
+	// No columns at all is not the wrong shape but a function that never
+	// produced a result set — the RAISE this whole path exists to carry (see
+	// [noResultSet]). Reporting a shape complaint there would flatten a
+	// *FunctionError and its SQLSTATE into prose, which is exactly what M14
+	// requires the generated layer not to do; scalarValues below reads Err and
+	// asFunctionError types it.
 	if named, ok := rows.(NamedCursor); ok {
-		if cols := named.Columns(); len(cols) != 1 {
+		if cols := named.Columns(); !noResultSet(cols) && len(cols) != 1 {
 			return nil, fmt.Errorf("exec: %s.%s returned %d columns; a scalar function returns exactly one",
 				cc.Schema, cc.Function, len(cols))
 		}
