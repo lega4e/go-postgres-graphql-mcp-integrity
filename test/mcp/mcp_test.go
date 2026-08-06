@@ -378,7 +378,7 @@ func (st *scenarioState) connectClient(ctx context.Context) error {
 		return err
 	}
 	st.ro = pool
-	st.server = gopgqlmcp.New(st.doc, st.sdlSource, pool, gopgqlmcp.WithVersion("test"))
+	st.server = gopgqlmcp.New(st.doc, st.sdlSource, exec.PgxQuerier(pool), gopgqlmcp.WithVersion("test"))
 
 	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
 	if _, err := st.server.MCPServer().Connect(ctx, serverTransport, nil); err != nil {

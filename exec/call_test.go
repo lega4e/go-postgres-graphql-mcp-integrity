@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,7 +63,7 @@ func TestCallScalarReadsOneRowOneColumn(t *testing.T) {
 		values: [][]any{{"wf-42"}},
 	}}}
 
-	got, err := Call(context.Background(), h, scalarCall())
+	got, err := Call(context.Background(), Pgx(h), scalarCall())
 	require.NoError(t, err)
 	assert.Equal(t, "wf-42", got)
 	assert.Equal(t, 1, h.calls, "a scalar function is read, so it goes through Query")
@@ -73,7 +74,7 @@ func TestCallScalarReadsOneRowOneColumn(t *testing.T) {
 func TestCallVoidExecutesAndReportsSuccess(t *testing.T) {
 	h := &fakeHandle{}
 
-	got, err := Call(context.Background(), h, voidCall())
+	got, err := Call(context.Background(), Pgx(h), voidCall())
 	require.NoError(t, err)
 	assert.Equal(t, true, got,
 		"a declared VOID return has no value to map, so success itself is the result")
@@ -105,7 +106,7 @@ func TestCallSurfacesSQLSTATE(t *testing.T) {
 		{"void", voidCall(), &fakeHandle{execErr: raised}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Call(context.Background(), tc.h, tc.call)
+			_, err := Call(context.Background(), Pgx(tc.h), tc.call)
 			require.Error(t, err)
 
 			var fnErr *FunctionError
@@ -132,7 +133,7 @@ func TestCallSurfacesSQLSTATE(t *testing.T) {
 func TestCallNonServerErrorIsNotAFunctionError(t *testing.T) {
 	h := &fakeHandle{fakeDB: fakeDB{err: errors.New("connection reset")}}
 
-	_, err := Call(context.Background(), h, scalarCall())
+	_, err := Call(context.Background(), Pgx(h), scalarCall())
 	require.Error(t, err)
 	var fnErr *FunctionError
 	assert.NotErrorAs(t, err, &fnErr)
@@ -142,21 +143,21 @@ func TestCallNonServerErrorIsNotAFunctionError(t *testing.T) {
 func TestCallScalarRejectsWrongShape(t *testing.T) {
 	t.Run("no rows", func(t *testing.T) {
 		h := &fakeHandle{fakeDB: fakeDB{rows: &fakeRows{cols: []string{"f"}}}}
-		_, err := Call(context.Background(), h, scalarCall())
+		_, err := Call(context.Background(), Pgx(h), scalarCall())
 		require.ErrorContains(t, err, "returned 0 rows")
 	})
 	t.Run("several rows", func(t *testing.T) {
 		h := &fakeHandle{fakeDB: fakeDB{rows: &fakeRows{
 			cols: []string{"f"}, values: [][]any{{"a"}, {"b"}},
 		}}}
-		_, err := Call(context.Background(), h, scalarCall())
+		_, err := Call(context.Background(), Pgx(h), scalarCall())
 		require.ErrorContains(t, err, "returned 2 rows")
 	})
 	t.Run("several columns", func(t *testing.T) {
 		h := &fakeHandle{fakeDB: fakeDB{rows: &fakeRows{
 			cols: []string{"a", "b"}, values: [][]any{{"x", "y"}},
 		}}}
-		_, err := Call(context.Background(), h, scalarCall())
+		_, err := Call(context.Background(), Pgx(h), scalarCall())
 		require.ErrorContains(t, err, "returned 2 columns")
 	})
 }
@@ -166,11 +167,16 @@ func TestCallRefusesNilHandle(t *testing.T) {
 	require.ErrorContains(t, err, "no handle supplied")
 }
 
-// The three pgx types a caller can realistically hold satisfy Handle. The
-// package asserts this at compile time; the test states the guarantee so that a
-// reader looking for it finds it in the tests too.
+// The three pgx types a caller can realistically hold reach Handle through the
+// [Pgx] adapter. The package asserts the pgx-shaped half at compile time; the
+// test states the guarantee so that a reader looking for it finds it here too.
+//
+// The assertion is on the *argument* side. That Pgx returns a Handle is its
+// signature and asserting it would assert nothing; what is worth pinning is that
+// each of these types is accepted, and that a Handle still narrows to a Querier
+// for a caller that only reads.
 func TestPgxTypesSatisfyHandle(*testing.T) {
-	var _ Handle = (pgx.Tx)(nil)
-	var h Handle = &fakeHandle{}
-	var _ Querier = h
+	for _, h := range []pgxHandle{(pgx.Tx)(nil), (*pgx.Conn)(nil), (*pgxpool.Pool)(nil), &fakeHandle{}} {
+		_ = Querier(Pgx(h))
+	}
 }

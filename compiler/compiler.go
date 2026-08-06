@@ -230,6 +230,29 @@ type Compiled struct {
 	SQL string
 	// Args are the ordered bind parameters ($1, $2, … in emission order).
 	Args []any
+	// Columns are the statement's output columns, in SELECT order — the names
+	// each flat row is keyed by, recorded by the renderer that emitted them.
+	//
+	// It is here because a portable database handle cannot say. pgx reports a
+	// result set's column names (pgx.Rows.FieldDescriptions), and for a decade
+	// that was the only reader gopgql had; a driver-agnostic cursor —
+	// database/sql's, DBOS's sysdb.Rows — exposes Next/Scan/Err/Close and
+	// nothing that names a column. Reading a result set through one of those
+	// means knowing the names in advance, and the only party that can know them
+	// without guessing is the emitter.
+	//
+	// It is *recorded*, not re-derived. Walking the Projection would produce a
+	// different order the moment a level branches, because a branch is compiled
+	// into its own fragment and every fragment's columns are emitted together —
+	// so a projection walk interleaves where the SELECT list does not. What is
+	// written here is the SELECT list itself (see builder.outputColumns), which
+	// is why exec can also use it to *check* pgx's field descriptions rather
+	// than merely to substitute for them.
+	//
+	// Under SQLSide it is the single `response` column. It is empty on a
+	// Compiled built by hand — a client generated before this existed — and
+	// exec falls back to asking the handle, which pgx can answer.
+	Columns []string
 	// Projection describes how to shape the returned rows into the GraphQL
 	// response.
 	Projection Projection
@@ -296,15 +319,21 @@ func (c *Compiler) CompileQuery(op string, vars map[string]any) (*Compiled, erro
 		return nil, err
 	}
 
-	var sql string
+	var (
+		sql     string
+		columns []string
+	)
 	if c.shaping == SQLSide {
 		sql = b.renderShaped(c.graphName, rootSel)
+		columns = []string{shapedColumn}
 	} else {
 		sql = b.render(c.graphName)
+		columns = b.outputColumns()
 	}
 	return &Compiled{
 		SQL:        sql,
 		Args:       b.args,
+		Columns:    columns,
 		Projection: Projection{Root: rootSel},
 		Shaping:    c.shaping,
 	}, nil
@@ -886,6 +915,28 @@ func (b *builder) orderBy(qualified bool) string {
 		}
 	}
 	return "\nORDER BY " + strings.Join(cols, ", ")
+}
+
+// shapedColumn is the single output column of an SQL-side-shaped statement,
+// holding the whole response.
+const shapedColumn = "response"
+
+// outputColumns is the flat statement's SELECT list as bare column names, in the
+// order render emits it: every fragment in turn, and within a fragment its
+// exposed columns in the order they were projected.
+//
+// It is deliberately the same traversal render performs, and no other: the point
+// of recording the list is that it *is* the SELECT list, so a reader that has no
+// way to ask the database can key each row by it (see Compiled.Columns). A
+// second, differently-ordered enumeration would be worse than none.
+func (b *builder) outputColumns() []string {
+	var cols []string
+	for _, f := range b.frags {
+		for _, o := range f.outs {
+			cols = append(cols, o.name)
+		}
+	}
+	return cols
 }
 
 // selectList renders a fragment's exposed columns for an outer SELECT list,

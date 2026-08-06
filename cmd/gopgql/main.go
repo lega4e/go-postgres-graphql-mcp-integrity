@@ -593,7 +593,7 @@ func conformCheck(ctx context.Context, sdlPath, dsn, graph string) error {
 	}
 	defer pool.Close()
 
-	actual, err := conform.Reflect(ctx, pool, graphName)
+	actual, err := conform.Reflect(ctx, exec.PgxQuerier(pool), graphName)
 	if err != nil {
 		// A missing graph is the other verdict-shaped non-verdict: comparing
 		// against nothing would report every element as missing, when the

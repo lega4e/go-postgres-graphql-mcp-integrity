@@ -119,31 +119,58 @@ func Call(ctx context.Context, h Handle, cc *compiler.CompiledCall) (any, error)
 	if err != nil {
 		return nil, asFunctionError(cc, err)
 	}
-	defer rows.Close()
+	defer closeCursor(rows)
 
-	flat, err := scan(rows)
+	// A scalar function's result set is one row of one column by declaration, so
+	// the read needs no column *names* — which is what lets a call be made
+	// through a portable handle, where no names are available. A cursor that can
+	// name its columns is still asked, so a function that returned the wrong
+	// shape is reported as that rather than as a scan failure.
+	//
+	// No columns at all is not the wrong shape but a function that never
+	// produced a result set — the RAISE this whole path exists to carry (see
+	// [noResultSet]). Reporting a shape complaint there would flatten a
+	// *FunctionError and its SQLSTATE into prose, which is exactly what M14
+	// requires the generated layer not to do; scalarValues below reads Err and
+	// asFunctionError types it.
+	if named, ok := rows.(NamedCursor); ok {
+		if cols := named.Columns(); !noResultSet(cols) && len(cols) != 1 {
+			return nil, fmt.Errorf("exec: %s.%s returned %d columns; a scalar function returns exactly one",
+				cc.Schema, cc.Function, len(cols))
+		}
+	}
+
+	values, err := scalarValues(rows)
 	if err != nil {
-		// scan's error is the driver's, so a function that raised while
-		// streaming its result still arrives as a *FunctionError.
+		// The error is the driver's, so a function that raised while streaming
+		// its result still arrives as a *FunctionError.
 		return nil, asFunctionError(cc, err)
 	}
-	return scalarResult(cc, flat)
+	return scalarResult(cc, values)
+}
+
+// scalarValues drains a one-column result set into its values.
+func scalarValues(rows Cursor) ([]any, error) {
+	var out []any
+	for rows.Next() {
+		var v any
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("exec: read row: %w", err)
+		}
+		out = append(out, jsonValue(v))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("exec: %w", err)
+	}
+	return out, nil
 }
 
 // scalarResult reduces a scalar-returning call's result set to its one value.
-func scalarResult(cc *compiler.CompiledCall, flat []map[string]any) (any, error) {
-	if len(flat) != 1 {
+func scalarResult(cc *compiler.CompiledCall, values []any) (any, error) {
+	if len(values) != 1 {
 		return nil, fmt.Errorf("exec: %s.%s returned %d rows; a scalar function returns exactly one "+
 			"(declare a set-returning function differently — gopgql cannot map one)",
-			cc.Schema, cc.Function, len(flat))
+			cc.Schema, cc.Function, len(values))
 	}
-	row := flat[0]
-	if len(row) != 1 {
-		return nil, fmt.Errorf("exec: %s.%s returned %d columns; a scalar function returns exactly one",
-			cc.Schema, cc.Function, len(row))
-	}
-	for _, v := range row {
-		return v, nil
-	}
-	return nil, nil // unreachable: len(row) == 1
+	return values[0], nil
 }

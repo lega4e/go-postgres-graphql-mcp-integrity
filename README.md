@@ -386,8 +386,27 @@ func (c *Client) ListPeople(ctx context.Context, h exec.Handle, in ListPeopleInp
 
 The handle is the second parameter of every method, and the client opens no
 connection and holds no pool — so an operation runs in whatever transaction you
-are already in, and commits with it. `*pgxpool.Pool`, `*pgx.Conn` and `pgx.Tx`
-all satisfy `exec.Handle`.
+are already in, and commits with it.
+
+`exec.Handle` names no driver type. Adapt whichever handle you hold:
+
+```go
+exec.Pgx(pool)      // *pgxpool.Pool, *pgx.Conn or pgx.Tx
+exec.Portable(tx)   // anything driver-agnostic, e.g. a dbos.Tx
+```
+
+`exec.PgxQuerier` and `exec.PortableQuerier` are the read-only halves, for a
+caller that only runs queries.
+
+`exec.Portable` is what lets a transaction opened by another framework run
+gopgql's statements. Its type parameters are inferred, so a DBOS transaction
+goes through unannotated and gopgql names no DBOS type:
+
+```go
+dbos.RunAsTransaction(ctx, ds, func(ctx context.Context, tx dbos.Tx) (T, error) {
+    return client.AppendEvent(ctx, exec.Portable(tx), in)
+})
+```
 
 The SQL is a `const` and results are assigned field by field by generated code;
 nothing is compiled, parsed or reflected over at run time. A query that cannot

@@ -38,6 +38,7 @@ package sdl
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -438,13 +439,66 @@ scalar JSON
 // Validation covers both GraphQL well-formedness (via gqlparser) and gopgql's
 // own rules: at least one @node type, a surrogate `id: ID!` key on every node,
 // and consistent @relationship/@hasInverse pairing.
+// unsupportedScalars are scalar names an author reasonably expects gopgql to
+// have, together with what to write instead. They are *not* implemented, and the
+// entry is the deliberate way of saying so (gopgql#53).
+//
+// Bytes is the one that was asked for. It is refused rather than added because a
+// byte string has no settled canonical response form, and gopgql's shaping rests
+// on the Go-side and SQL-side strategies producing byte-identical responses: pgx
+// scans bytea to []byte, while the SQL-side render would have PostgreSQL put it
+// into JSON. That position is already enforced a layer down — compiler/shaping.go
+// refuses a bytea-mapped field under SQL-side shaping, naming the field and
+// pointing at compiler.GoSide — so adding the scalar would mean choosing the
+// canonical form and teaching both strategies to produce it, a decision for
+// SPEC.md §5.1 rather than for a bug fix. The mapping below already works on the
+// path that supports it, loses nothing, and says what it is.
+var unsupportedScalars = map[string]string{
+	"Bytes": `gopgql has no Bytes scalar. Declare the field as String with the column type: ` +
+		`data: String! @column(type: "bytea"). The column really is bytea; what gopgql does not do ` +
+		`is decode it for you, because a byte string has no canonical JSON form that both shaping ` +
+		`strategies could agree on (SPEC.md §5.1)`,
+	"Byte": `gopgql has no Byte scalar; see Bytes — use String @column(type: "bytea")`,
+	"Date": `gopgql has no Date scalar. Use DateTime (timestamptz), or String @column(type: "date") ` +
+		`for a date with no time`,
+	"Time": `gopgql has no Time scalar. Use DateTime (timestamptz), or String @column(type: "time")`,
+	"UUID": `gopgql has no UUID scalar. Use ID, which is uuid (SPEC.md §5.1)`,
+	"BigInt": `gopgql has no BigInt scalar. Use Int with the column type: ` +
+		`n: Int! @column(type: "bigint")`,
+	"Decimal": `gopgql has no Decimal scalar. Use Float with the column type: ` +
+		`amount: Float @column(type: "numeric(10,2)")`,
+}
+
+// undefinedTypeRe matches gqlparser's message for a type nothing declares.
+var undefinedTypeRe = regexp.MustCompile(`Undefined type ([A-Za-z_][A-Za-z0-9_]*)`)
+
+// unknownScalarGuidance appends the mapping for a scalar an author plausibly
+// expected to exist.
+//
+// gqlparser's own message is accurate and unhelpful in the same breath —
+// "Undefined type Bytes" is true, and leaves the author to guess whether the
+// scalar is missing, misspelled, or theirs to define. It names the file and
+// position, so it is not a silent failure; what it does not say is what to write
+// instead, which is the whole of the distance between an error and an answer.
+func unknownScalarGuidance(err error) error {
+	m := undefinedTypeRe.FindStringSubmatch(err.Error())
+	if m == nil {
+		return err
+	}
+	guidance, ok := unsupportedScalars[m[1]]
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%w\n\n%s", err, guidance)
+}
+
 func Parse(src string) (*Document, error) {
 	schema, err := gqlparser.LoadSchema(
 		&ast.Source{Name: "gopgql/prelude", Input: prelude, BuiltIn: true},
 		&ast.Source{Name: "schema.graphql", Input: src},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("sdl: %w", err)
+		return nil, unknownScalarGuidance(fmt.Errorf("sdl: %w", err))
 	}
 
 	doc := &Document{

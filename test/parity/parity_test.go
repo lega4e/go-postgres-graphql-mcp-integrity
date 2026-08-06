@@ -207,7 +207,7 @@ func runStrategy(ctx context.Context, t *testing.T, w *built, sc scenario, s com
 	require.NoError(t, err, "compile %q under %s", sc.query, s)
 	require.Equal(t, s, cq.Shaping, "the compiled query records the strategy it was compiled under")
 
-	resp, err := exec.Query(ctx, w.pool, cq)
+	resp, err := exec.Query(ctx, exec.PgxQuerier(w.pool), cq)
 	require.NoError(t, err, "execute under %s:\n%s", s, cq.SQL)
 
 	encoded, err := shape.Encode(resp)

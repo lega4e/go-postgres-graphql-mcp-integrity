@@ -37,6 +37,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
 	// Registers the "pgx" database/sql driver goose runs through.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -46,7 +47,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	gopgqlexec "github.com/lega4e/gopgql/exec"
+	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/generator/client"
 	"github.com/lega4e/gopgql/migrate"
@@ -255,17 +256,17 @@ func TestGeneratedMutationsRunInTheCallersTransaction(t *testing.T) {
 	withTx(t, func(ctx context.Context, tx pgx.Tx) {
 		c := gen.New()
 
-		name, err := c.AddPerson(ctx, tx, gen.AddPersonInput{PersonName: "Ada"})
+		name, err := c.AddPerson(ctx, exec.Pgx(tx), gen.AddPersonInput{PersonName: "Ada"})
 		require.NoError(t, err)
 		assert.Equal(t, "Ada", name, "a scalar-returning function's value comes back typed")
 
-		_, err = c.AddPerson(ctx, tx, gen.AddPersonInput{PersonName: "Grace"})
+		_, err = c.AddPerson(ctx, exec.Pgx(tx), gen.AddPersonInput{PersonName: "Grace"})
 		require.NoError(t, err)
 
 		// A void-returning mutation's method returns only whether it worked.
-		require.NoError(t, c.Follow(ctx, tx, gen.FollowInput{FromName: "Ada", ToName: "Grace"}))
+		require.NoError(t, c.Follow(ctx, exec.Pgx(tx), gen.FollowInput{FromName: "Ada", ToName: "Grace"}))
 
-		people, err := c.ListPeople(ctx, tx, gen.ListPeopleInput{})
+		people, err := c.ListPeople(ctx, exec.Pgx(tx), gen.ListPeopleInput{})
 		require.NoError(t, err)
 		require.Len(t, people, 1,
 			"only Ada has a follow, and the query's MATCH requires one")
@@ -290,10 +291,10 @@ func TestGeneratedWritesAreInvisibleOutsideTheTransaction(t *testing.T) {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	c := gen.New()
-	_, err = c.AddPerson(ctx, tx, gen.AddPersonInput{PersonName: "Hopper"})
+	_, err = c.AddPerson(ctx, exec.Pgx(tx), gen.AddPersonInput{PersonName: "Hopper"})
 	require.NoError(t, err)
 
-	inside, err := c.FindPerson(ctx, tx, gen.FindPersonInput{Name: "Hopper"})
+	inside, err := c.FindPerson(ctx, exec.Pgx(tx), gen.FindPersonInput{Name: "Hopper"})
 	require.NoError(t, err)
 	assert.Len(t, inside, 1, "the caller's own transaction sees its own write")
 
@@ -302,7 +303,7 @@ func TestGeneratedWritesAreInvisibleOutsideTheTransaction(t *testing.T) {
 	require.NoError(t, err)
 	defer other.Close()
 
-	outside, err := c.FindPerson(ctx, other, gen.FindPersonInput{Name: "Hopper"})
+	outside, err := c.FindPerson(ctx, exec.Pgx(other), gen.FindPersonInput{Name: "Hopper"})
 	require.NoError(t, err)
 	assert.Empty(t, outside, "an uncommitted write must not be visible to anything else")
 }
@@ -326,12 +327,12 @@ func TestGeneratedWritesAreInvisibleOutsideTheTransaction(t *testing.T) {
 func TestGeneratedClientDecodesTheCanonicalScalarForms(t *testing.T) {
 	withTx(t, func(ctx context.Context, tx pgx.Tx) {
 		c := gen.New()
-		_, err := c.AddPerson(ctx, tx, gen.AddPersonInput{PersonName: "Ada"})
+		_, err := c.AddPerson(ctx, exec.Pgx(tx), gen.AddPersonInput{PersonName: "Ada"})
 		require.NoError(t, err)
 
 		// Before anything is measured: the SDL's defaults decode, and the
 		// columns that are genuinely NULL stay nil rather than becoming zero.
-		unmeasured, err := c.FindMeasurements(ctx, tx, gen.FindMeasurementsInput{Name: "Ada"})
+		unmeasured, err := c.FindMeasurements(ctx, exec.Pgx(tx), gen.FindMeasurementsInput{Name: "Ada"})
 		require.NoError(t, err)
 		require.Len(t, unmeasured, 1)
 		assert.Equal(t, int64(0), unmeasured[0].Age, "@default(value: \"0\") reaches the caller as 0")
@@ -347,7 +348,7 @@ func TestGeneratedClientDecodesTheCanonicalScalarForms(t *testing.T) {
 		// so the response cannot depend on a session's TimeZone, and what comes
 		// back is the same instant rather than the same wall clock.
 		seen := time.Date(2020, 1, 2, 3, 4, 5, 0, time.FixedZone("+02:00", 2*60*60))
-		age, err := c.Measure(ctx, tx, gen.MeasureInput{
+		age, err := c.Measure(ctx, exec.Pgx(tx), gen.MeasureInput{
 			PersonName:   "Ada",
 			PersonAge:    41,
 			PersonScore:  9.5,
@@ -358,7 +359,7 @@ func TestGeneratedClientDecodesTheCanonicalScalarForms(t *testing.T) {
 		assert.Equal(t, int64(41), age,
 			"a scalar-returning function's Int is unshaped: exec.Call hands back what pgx scanned")
 
-		people, err := c.FindMeasurements(ctx, tx, gen.FindMeasurementsInput{Name: "Ada"})
+		people, err := c.FindMeasurements(ctx, exec.Pgx(tx), gen.FindMeasurementsInput{Name: "Ada"})
 		require.NoError(t, err)
 		require.Len(t, people, 1)
 
@@ -398,10 +399,10 @@ func TestGeneratedClientDecodesTheCanonicalScalarForms(t *testing.T) {
 // SQLSTATE intact, through the generated layer.
 func TestGeneratedMutationCarriesTheSQLSTATE(t *testing.T) {
 	withTx(t, func(ctx context.Context, tx pgx.Tx) {
-		_, err := gen.New().Explode(ctx, tx, gen.ExplodeInput{Code: "P0001"})
+		_, err := gen.New().Explode(ctx, exec.Pgx(tx), gen.ExplodeInput{Code: "P0001"})
 		require.Error(t, err)
 
-		var fnErr *gopgqlexec.FunctionError
+		var fnErr *exec.FunctionError
 		require.ErrorAs(t, err, &fnErr,
 			"the generated layer must not flatten the typed error into prose")
 		assert.Equal(t, "P0001", fnErr.SQLSTATE)
@@ -419,7 +420,7 @@ func TestGeneratedQueryRunsOnAPool(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 
-	_, err = gen.New().FindPerson(ctx, pool, gen.FindPersonInput{Name: "nobody"})
+	_, err = gen.New().FindPerson(ctx, exec.Pgx(pool), gen.FindPersonInput{Name: "nobody"})
 	require.NoError(t, err)
 }
 

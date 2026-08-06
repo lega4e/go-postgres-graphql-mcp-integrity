@@ -293,7 +293,7 @@ func (st *scenarioState) compileAndExecute(ctx context.Context, op *godog.DocStr
 	if err != nil {
 		return err
 	}
-	res, err := exec.Query(ctx, st.pool, cq)
+	res, err := exec.Query(ctx, exec.PgxQuerier(st.pool), cq)
 	if err != nil {
 		return fmt.Errorf("%w\n\nSQL:\n%s", err, cq.SQL)
 	}
@@ -388,7 +388,7 @@ func (st *scenarioState) assertDistinct(k1 string, s1 int, k2 string, s2 int) er
 }
 
 func (st *scenarioState) assertElements(ctx context.Context, want string) error {
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT c.relname::text AS name
 		FROM pg_catalog.pg_propgraph_element e
 		JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid
@@ -418,7 +418,7 @@ func (st *scenarioState) assertEdgeElement(ctx context.Context, qualified string
 	if !found {
 		return fmt.Errorf("%q is not a schema-qualified table name", qualified)
 	}
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT e.pgekind::text AS kind
 		FROM pg_catalog.pg_propgraph_element e
 		JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid
@@ -481,7 +481,7 @@ func (st *scenarioState) assertEdgeElementCount(ctx context.Context, want int, q
 	if !found {
 		return fmt.Errorf("%q is not a schema-qualified table name", qualified)
 	}
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT e.pgealias::text AS alias
 		FROM pg_catalog.pg_propgraph_element e
 		JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid

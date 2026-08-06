@@ -345,7 +345,7 @@ func (e *env) run(query string, vars map[string]any) (map[string]any, *compiler.
 	e.t.Helper()
 	cq, err := compiler.New(e.doc).CompileQuery(query, vars)
 	require.NoError(e.t, err, "compile %q", query)
-	resp, err := exec.Query(e.ctx, e.pool, cq)
+	resp, err := exec.Query(e.ctx, exec.PgxQuerier(e.pool), cq)
 	require.NoError(e.t, err, "execute compiled SQL:\n%s", cq.SQL)
 	return resp, cq
 }
@@ -361,7 +361,7 @@ func scalar[T any](e *env, query string) T {
 // reflectGraph reads the live property graph back into a schema model.
 func (e *env) reflectGraph() *schema.Schema {
 	e.t.Helper()
-	actual, err := conform.Reflect(e.ctx, e.pool, "")
+	actual, err := conform.Reflect(e.ctx, exec.PgxQuerier(e.pool), "")
 	require.NoError(e.t, err, "reflect the property graph")
 	return actual
 }
@@ -758,7 +758,7 @@ func TestConformancePassesOnACleanDatabase(t *testing.T) {
 func TestReflectReportsAMissingGraph(t *testing.T) {
 	e := newEnv(t)
 
-	_, err := conform.Reflect(e.ctx, e.pool, "")
+	_, err := conform.Reflect(e.ctx, exec.PgxQuerier(e.pool), "")
 	require.ErrorIs(t, err, conform.ErrGraphNotFound)
 	assert.Contains(t, err.Error(), generator.DefaultGraphName,
 		"the error names the graph it looked for")

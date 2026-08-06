@@ -136,7 +136,7 @@ func run(argv []string) error {
 	}
 	defer pool.Close()
 
-	srv := mcp.New(doc, string(source), pool, mcp.WithVersion(version))
+	srv := mcp.New(doc, string(source), exec.PgxQuerier(pool), mcp.WithVersion(version))
 
 	if *transport == transportHTTP {
 		return serveHTTP(ctx, srv, *addr, *path)

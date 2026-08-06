@@ -105,47 +105,90 @@ func DeltaTables(from, to *schema.Schema) (up, down string, changed bool) {
 // fold still holding no columns for the table, so the next generation would emit
 // a CREATE TABLE for a table that already exists — a migration that reads
 // correctly and fails at apply.
+//
+// # Unowned is a property of a role, not of a name
+//
+// The two roles are removed separately, because one table can hold both and be
+// owned in one of them. An edge mapped with @relationship(table:, sourceKey:,
+// destKey:) lives on a table gopgql does not create *as an edge* — but that same
+// table is very often a vertex table gopgql does own, and must create. The FK
+// shape makes this the ordinary case rather than a corner: an edge that touches
+// a @readonly type has to be mapped that way (sdl.validateRelationshipMapping
+// refuses the alternative), and the table it is mapped onto is the child of the
+// foreign key — which is the gopgql-owned side.
+//
+// Keying the removal by table name alone therefore stripped owned vertex tables
+// out of both sides of the diff, and their CREATE TABLE with them: gopgql#53,
+// where a two-schema SDL emitted a migration for none of its seven owned tables
+// and said "already up to date". The vertex role is removed only when nothing in
+// the desired schema claims that table as an owned vertex.
 func withoutUnmanaged(from, to *schema.Schema) (*schema.Schema, *schema.Schema) {
-	unmanaged := map[string]bool{}
+	// The tables gopgql owns *as vertices*. An unmanaged edge on one of these is
+	// still an unmanaged edge; the table underneath it is still created.
+	ownedVertex := map[string]bool{}
+	for _, vt := range to.VertexTables {
+		if !vt.Unmanaged {
+			ownedVertex[vt.Key()] = true
+		}
+	}
+
+	drop := dropSet{table: map[string]bool{}, edge: map[string]bool{}}
 	for _, vt := range to.VertexTables {
 		if vt.Unmanaged {
-			unmanaged[vt.Key()] = true
+			// @readonly: nothing about this table, in either role.
+			drop.table[vt.Key()] = true
+			drop.edge[vt.Key()] = true
 		}
 	}
 	// An edge mapped onto an existing table is unowned in exactly the same way,
 	// and it is the same table as a vertex element when a join table is queried
 	// from both roles (SPEC.md §7 → M13). Missing it here is a CREATE TABLE for
-	// a table that already exists.
+	// a table that already exists — but only when no owned vertex is that table.
 	for _, e := range to.EdgeTables {
-		if e.Unmanaged {
-			unmanaged[e.Key()] = true
+		if !e.Unmanaged {
+			continue
+		}
+		drop.edge[e.Key()] = true
+		if !ownedVertex[e.Key()] {
+			drop.table[e.Key()] = true
 		}
 	}
-	if len(unmanaged) == 0 {
+	if drop.empty() {
 		return from, to
 	}
-	return stripTables(from, unmanaged), stripTables(to, unmanaged)
+	return stripTables(from, drop), stripTables(to, drop)
 }
+
+// dropSet is what withoutUnmanaged removes, split by role: table drops the
+// vertex table (and its indexes) as well as the edge, edge drops only the edge
+// element. A table gopgql owns as a vertex and does not own as an edge is in
+// edge and not in table.
+type dropSet struct {
+	table map[string]bool
+	edge  map[string]bool
+}
+
+func (d dropSet) empty() bool { return len(d.table) == 0 && len(d.edge) == 0 }
 
 // stripTables returns a copy of m without the named tables or anything attached
 // to them, on either side of the diff.
-func stripTables(m *schema.Schema, drop map[string]bool) *schema.Schema {
+func stripTables(m *schema.Schema, drop dropSet) *schema.Schema {
 	if m == nil {
 		return nil
 	}
 	out := &schema.Schema{GraphName: m.GraphName}
 	for _, e := range m.EdgeTables {
-		if !drop[e.Key()] && !e.Unmanaged {
+		if !drop.table[e.Key()] && !drop.edge[e.Key()] && !e.Unmanaged {
 			out.EdgeTables = append(out.EdgeTables, e)
 		}
 	}
 	for _, vt := range m.VertexTables {
-		if !drop[vt.Key()] {
+		if !drop.table[vt.Key()] {
 			out.VertexTables = append(out.VertexTables, vt)
 		}
 	}
 	for _, idx := range m.Indexes {
-		if !drop[schema.QualifiedKey(idx.Schema, idx.Table)] {
+		if !drop.table[schema.QualifiedKey(idx.Schema, idx.Table)] {
 			out.Indexes = append(out.Indexes, idx)
 		}
 	}
