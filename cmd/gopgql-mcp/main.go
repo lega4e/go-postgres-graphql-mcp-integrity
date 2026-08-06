@@ -6,6 +6,9 @@
 //	gopgql-mcp --sdl schema.graphql --dsn postgres://…                    # stdio
 //	gopgql-mcp --sdl schema.graphql --transport http --addr :8080         # HTTP
 //
+// --sdl is repeatable and also takes a directory of *.graphql, read in sorted
+// order; every document is served as one schema (gopgql#54).
+//
 // stdio is the default because that is how an agent spawns a server it owns:
 // one process per client, on its stdin/stdout. HTTP is for a server that
 // outlives its clients — a container in a compose stack, say — where several
@@ -38,6 +41,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lega4e/gopgql/exec"
+	"github.com/lega4e/gopgql/internal/sdlsource"
 	"github.com/lega4e/gopgql/mcp"
 	"github.com/lega4e/gopgql/sdl"
 )
@@ -68,7 +72,8 @@ func main() {
 
 func run(argv []string) error {
 	fs := flag.NewFlagSet("gopgql-mcp", flag.ContinueOnError)
-	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
+	sdlPaths := &sdlsource.PathList{}
+	fs.Var(sdlPaths, "sdl", sdlsource.FlagUsage)
 	dsn := fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)")
 	transport := fs.String("transport", "", `transport: "stdio" (default) or "http" (env GOPGQL_TRANSPORT)`)
 	addr := fs.String("addr", "", `listen address for the http transport, default ":8080" (env GOPGQL_ADDR)`)
@@ -87,8 +92,8 @@ func run(argv []string) error {
 	}
 
 	// A flag wins over the environment.
-	if *sdlPath == "" {
-		*sdlPath = os.Getenv("GOPGQL_SDL")
+	if len(*sdlPaths) == 0 {
+		*sdlPaths = sdlsource.EnvPaths(sdlsource.EnvVar)
 	}
 	if *dsn == "" {
 		*dsn = os.Getenv("GOPGQL_DSN")
@@ -105,7 +110,7 @@ func run(argv []string) error {
 	if *transport != transportStdio && *transport != transportHTTP {
 		return fmt.Errorf("unknown transport %q; supported transports are %q and %q", *transport, transportStdio, transportHTTP)
 	}
-	if *sdlPath == "" {
+	if len(*sdlPaths) == 0 {
 		return errors.New("no schema: pass --sdl or set GOPGQL_SDL")
 	}
 	if *dsn == "" {
@@ -114,11 +119,11 @@ func run(argv []string) error {
 
 	// Parse and validate the schema before connecting: a half-loaded schema
 	// would serve tools that cannot answer.
-	source, err := os.ReadFile(*sdlPath)
+	src, err := sdlsource.Load(*sdlPaths)
 	if err != nil {
-		return fmt.Errorf("read schema: %w", err)
+		return err
 	}
-	doc, err := sdl.Parse(string(source))
+	doc, err := sdl.ParseSources(src.Sources...)
 	if err != nil {
 		return err
 	}
@@ -136,7 +141,9 @@ func run(argv []string) error {
 	}
 	defer pool.Close()
 
-	srv := mcp.New(doc, string(source), exec.PgxQuerier(pool), mcp.WithVersion(version))
+	// The schema the server serves over MCP is the documents together, which is
+	// the same text a single --sdl would have held.
+	srv := mcp.New(doc, src.Text, exec.PgxQuerier(pool), mcp.WithVersion(version))
 
 	if *transport == transportHTTP {
 		return serveHTTP(ctx, srv, *addr, *path)

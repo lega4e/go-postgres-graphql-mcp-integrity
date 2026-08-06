@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lega4e/gopgql/conform"
+	"github.com/lega4e/gopgql/generator"
 )
 
 // minimalSDL is the smallest schema generator.Build accepts: one @node type
@@ -160,7 +161,7 @@ func TestConformUnreachableDatabaseIsNotDrift(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	err := conformCheck(ctx, writeSDL(t, minimalSDL), unreachableDSN, "")
+	err := conformCheck(ctx, []string{writeSDL(t, minimalSDL)}, unreachableDSN, generator.Options{})
 	require.Error(t, err)
 
 	var drift *driftError
@@ -174,7 +175,7 @@ func TestConformUnreachableDatabaseIsNotDrift(t *testing.T) {
 func TestConformRejectsAnUnreadableSchema(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "absent.graphql")
 
-	err := conformCheck(context.Background(), missing, unreachableDSN, "")
+	err := conformCheck(context.Background(), []string{missing}, unreachableDSN, generator.Options{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conformance check did not run")
 	assert.Equal(t, exitFailure, exitCode(err))
@@ -184,7 +185,7 @@ func TestConformRejectsAnUnreadableSchema(t *testing.T) {
 // the limit of what it compares all have to be discoverable from the usage
 // text alone.
 func TestUsageDocumentsConform(t *testing.T) {
-	assert.Contains(t, usage, "gopgql conform  --sdl <file> --dsn <url> [--graph <name>]")
+	assert.Contains(t, usage, "gopgql conform  --sdl <path> [--sdl <path>…] --dsn <url> [--graph <name>]")
 	assert.Contains(t, usage, "conform    Report how the database's property graph differs from the SDL.")
 	assert.Contains(t, usage, "2  conform only")
 	// The check must not read as broader than it is (package conform's doc).
