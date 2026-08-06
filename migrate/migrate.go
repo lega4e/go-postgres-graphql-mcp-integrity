@@ -322,13 +322,18 @@ func checkNothingOwedIsMissing(prior, desired *schema.Schema, halves Halves) err
 	if !halves.Tables() || desired == nil {
 		return nil
 	}
+	// One table can appear in both roles, and a table is created if *either* of
+	// them says so — the same "unowned is a property of a role, not of a name"
+	// that withoutUnmanaged rests on. Keyed without the OR, an unmanaged edge
+	// element (which never has columns) would erase the evidence that the vertex
+	// table under it was created, and this check would refuse every second run.
 	created := map[string]bool{}
 	if prior != nil {
 		for _, vt := range prior.VertexTables {
-			created[vt.Key()] = len(vt.Columns) > 0
+			created[vt.Key()] = created[vt.Key()] || len(vt.Columns) > 0
 		}
 		for _, e := range prior.EdgeTables {
-			created[e.Key()] = len(e.Columns) > 0
+			created[e.Key()] = created[e.Key()] || len(e.Columns) > 0
 		}
 	}
 
