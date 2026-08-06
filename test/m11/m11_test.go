@@ -279,7 +279,7 @@ func (st *scenarioState) callInTx(ctx context.Context, op *godog.DocString) erro
 	if err != nil {
 		return err
 	}
-	st.result, st.lastErr = exec.Call(ctx, st.tx, cc)
+	st.result, st.lastErr = exec.Call(ctx, exec.Pgx(st.tx), cc)
 	return st.lastErr
 }
 
@@ -308,7 +308,7 @@ func (st *scenarioState) callReadOnlyExpectingFailure(ctx context.Context, op *g
 	if err != nil {
 		return err
 	}
-	if _, err := exec.Call(ctx, pool, cc); err != nil {
+	if _, err := exec.Call(ctx, exec.Pgx(pool), cc); err != nil {
 		st.lastErr = err
 		return nil
 	}
@@ -406,7 +406,7 @@ func (st *scenarioState) assertRowsInTx(ctx context.Context, want int, table str
 	if st.tx == nil {
 		return fmt.Errorf("no transaction")
 	}
-	return assertCount(ctx, st.tx, table, want, "inside the transaction")
+	return assertCount(ctx, exec.PgxQuerier(st.tx), table, want, "inside the transaction")
 }
 
 func (st *scenarioState) assertRowsOutside(ctx context.Context, want int, table string) error {
@@ -415,7 +415,7 @@ func (st *scenarioState) assertRowsOutside(ctx context.Context, want int, table 
 		return err
 	}
 	defer pool.Close()
-	return assertCount(ctx, pool, table, want,
+	return assertCount(ctx, exec.PgxQuerier(pool), table, want,
 		"outside the transaction — an uncommitted call must not be visible")
 }
 
@@ -432,7 +432,7 @@ func (st *scenarioState) assertRows(ctx context.Context, table string, want int)
 		return err
 	}
 	defer pool.Close()
-	return assertCount(ctx, pool, table, want, "after the transaction settled")
+	return assertCount(ctx, exec.PgxQuerier(pool), table, want, "after the transaction settled")
 }
 
 func assertCount(ctx context.Context, q exec.Querier, table string, want int, where string) error {
@@ -463,7 +463,7 @@ func (st *scenarioState) readWorkflow(ctx context.Context, id, column string) (a
 	default:
 		return nil, fmt.Errorf("app.workflows has no column %q", column)
 	}
-	rows, err := exec.Rows(ctx, pool,
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(pool),
 		"SELECT "+column+" AS v FROM app.workflows WHERE id = $1", id)
 	if err != nil {
 		return nil, err

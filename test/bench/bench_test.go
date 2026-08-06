@@ -254,7 +254,7 @@ func BenchmarkShaping(b *testing.B) {
 
 					b.ResetTimer()
 					for range b.N {
-						if _, err := exec.Query(ctx, f.pool, cq); err != nil {
+						if _, err := exec.Query(ctx, exec.PgxQuerier(f.pool), cq); err != nil {
 							b.Fatalf("execute under %s: %v", strategy, err)
 						}
 					}

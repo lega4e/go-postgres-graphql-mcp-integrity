@@ -29,50 +29,12 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/shape"
-)
-
-// Querier is the subset of a pgx connection pool exec needs to read.
-// *pgxpool.Pool, *pgx.Conn and pgx.Tx all satisfy it.
-//
-// It stays the parameter of [Query] and [Rows] even though [Handle] exists: a
-// read needs no Exec, and the smaller interface asks less of a caller who only
-// wants to run a compiled query.
-type Querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-// Handle is a database handle the caller owns and hands to gopgql for the
-// duration of one operation: it queries *and* it executes.
-//
-// *pgxpool.Pool, *pgx.Conn and pgx.Tx all satisfy it, so a caller inside a
-// transaction of its own passes that transaction straight through and the
-// statement runs in it — the property the caller cannot get from a package that
-// opens its own connection, because a checkpoint committed elsewhere is a
-// checkpoint that can disagree with the work.
-//
-// Exec is here rather than in [Querier] because a `@function` declared
-// `returns: VOID` has no result set to read: [Call] runs it as a statement and
-// reads the command tag (SPEC.md §7 → M11). Without that path Handle would
-// carry a method nothing uses, and it would collapse back into Querier.
-type Handle interface {
-	Querier
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-// The three pgx types a caller realistically has in hand all satisfy Handle. The
-// assertions are here so a pgx upgrade that moves one of those signatures fails
-// the build, with the type named, rather than a test somewhere downstream.
-var (
-	_ Handle = (*pgxpool.Pool)(nil)
-	_ Handle = (*pgx.Conn)(nil)
-	_ Handle = (pgx.Tx)(nil)
 )
 
 // Query executes a compiled query and returns the nested GraphQL response.
@@ -93,7 +55,7 @@ func Query(ctx context.Context, db Querier, cq *compiler.Compiled) (map[string]a
 	if cq.Shaping == compiler.SQLSide {
 		return queryShaped(ctx, db, cq)
 	}
-	flat, err := Rows(ctx, db, cq.SQL, cq.Args...)
+	flat, err := rowsOf(ctx, db, cq.SQL, cq.Columns, cq.Args...)
 	if err != nil {
 		return nil, err
 	}
@@ -111,10 +73,15 @@ func queryShaped(ctx context.Context, db Querier, cq *compiler.Compiled) (map[st
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
-	defer rows.Close()
+	defer closeCursor(rows)
 
-	if fds := rows.FieldDescriptions(); len(fds) != 1 {
-		return nil, fmt.Errorf("exec: an SQL-side shaped query returns one column, got %d", len(fds))
+	// The column count is checked only where the cursor can report it. A
+	// portable cursor cannot, and the statement's shape is the compiler's rather
+	// than the caller's: an SQL-side render emits one column by construction.
+	if named, ok := rows.(NamedCursor); ok {
+		if cols := named.Columns(); len(cols) != 1 {
+			return nil, fmt.Errorf("exec: an SQL-side shaped query returns one column, got %d", len(cols))
+		}
 	}
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
@@ -140,14 +107,77 @@ func queryShaped(ctx context.Context, db Querier, cq *compiler.Compiled) (map[st
 // form the shaper consumes. It is exported for callers that want the rows
 // themselves — a hand-written statement in a test, or a future SQL-side shaper
 // whose result is already nested and must not go through a projection.
+//
+// The statement is a raw one, so nothing has recorded its output columns: the
+// handle has to be able to name them, which the pgx adapter can and a portable
+// cursor cannot. Use [Query] with a compiled query to read through a portable
+// handle — a compiled query carries its own column list.
 func Rows(ctx context.Context, db Querier, sql string, args ...any) ([]map[string]any, error) {
+	return rowsOf(ctx, db, sql, nil, args...)
+}
+
+// rowsOf runs a statement and keys each row by its output column names, taking
+// them from the cursor when it can say and from the compiled statement's
+// recorded SELECT list otherwise.
+//
+// Where both can say, they are compared. The cursor's names are the database's
+// own and win a disagreement, but a disagreement is a bug — the recorded list is
+// the SELECT list that produced the result set — so it is reported rather than
+// resolved. That is the check that keeps Compiled.Columns honest on the path
+// where it is not needed, so it can be trusted on the path where it is.
+func rowsOf(ctx context.Context, db Querier, sql string, recorded []string, args ...any) ([]map[string]any, error) {
+	if db == nil {
+		return nil, fmt.Errorf("exec: nil database handle")
+	}
 	rows, err := db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("exec: %w", err)
 	}
-	defer rows.Close()
-	return scan(rows)
+	defer closeCursor(rows)
+
+	cols, err := columnsOf(rows, recorded)
+	if err != nil {
+		return nil, err
+	}
+	return scan(rows, cols)
 }
+
+// columnsOf settles which names a flat row is keyed by.
+func columnsOf(rows Cursor, recorded []string) ([]string, error) {
+	named, ok := rows.(NamedCursor)
+	if !ok {
+		if len(recorded) == 0 {
+			return nil, fmt.Errorf("exec: this handle's cursor cannot name its output columns and the " +
+				"statement does not record them; run a compiled query through Query (its columns travel " +
+				"with it), or adapt a pgx handle with exec.Pgx")
+		}
+		return recorded, nil
+	}
+	cols := named.Columns()
+	if len(recorded) > 0 && !sameNames(cols, recorded) {
+		return nil, fmt.Errorf("exec: the result set has columns (%s) but the statement was emitted with "+
+			"(%s); the compiled query and the statement it ran have drifted apart",
+			strings.Join(cols, ", "), strings.Join(recorded, ", "))
+	}
+	return cols, nil
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// closeCursor releases a cursor in a defer. A Cursor's Close reports an error
+// because database/sql's does; nothing here can act on it, and every read below
+// has already reported through Err.
+func closeCursor(rows Cursor) { _ = rows.Close() }
 
 // PoolOption adjusts the pool configuration OpenReadOnly builds — a tracer in a
 // test, a connection limit in a long-lived process.
@@ -196,19 +226,27 @@ func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (*pgxpool
 }
 
 // scan drains a result set into one map per row, keyed by output column name.
-func scan(rows pgx.Rows) ([]map[string]any, error) {
-	fds := rows.FieldDescriptions()
+//
+// Each value is scanned into an `any`, which is the one destination every driver
+// agrees on: pgx decodes the column to the Go type its OID maps to — the same
+// value pgx.Rows.Values would have produced — and database/sql yields its own
+// driver value. Scanning positionally is also what makes the read portable,
+// because a portable cursor offers Scan and nothing else.
+func scan(rows Cursor, cols []string) ([]map[string]any, error) {
+	vals := make([]any, len(cols))
+	dest := make([]any, len(cols))
+	for i := range vals {
+		dest[i] = &vals[i]
+	}
+
 	var out []map[string]any
 	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
+		if err := rows.Scan(dest...); err != nil {
 			return nil, fmt.Errorf("exec: read row: %w", err)
 		}
-		row := make(map[string]any, len(fds))
-		for i, fd := range fds {
-			if i < len(vals) {
-				row[fd.Name] = jsonValue(vals[i])
-			}
+		row := make(map[string]any, len(cols))
+		for i, name := range cols {
+			row[name] = jsonValue(vals[i])
 		}
 		out = append(out, row)
 	}

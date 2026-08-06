@@ -273,7 +273,7 @@ func (st *scenarioState) compileAndExecute(ctx context.Context, op *godog.DocStr
 	if err != nil {
 		return err
 	}
-	res, err := exec.Query(ctx, st.pool, cq)
+	res, err := exec.Query(ctx, exec.PgxQuerier(st.pool), cq)
 	if err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func (st *scenarioState) columnExists(ctx context.Context, qualified, column str
 	if !found {
 		return false, fmt.Errorf("%q is not a schema-qualified table name", qualified)
 	}
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT count(*) AS n
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
@@ -396,7 +396,7 @@ func (st *scenarioState) assertTableExists(ctx context.Context, qualified string
 	if !found {
 		return fmt.Errorf("%q is not a schema-qualified table name", qualified)
 	}
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT count(*) AS n
 		FROM information_schema.tables
 		WHERE table_schema = $1 AND table_name = $2`, schemaName, table)
@@ -412,7 +412,7 @@ func (st *scenarioState) assertTableExists(ctx context.Context, qualified string
 // assertElements reads the graph's elements back out of the catalogs, which is
 // the only evidence that a property graph spanning two schemas was accepted.
 func (st *scenarioState) assertElements(ctx context.Context, want string) error {
-	rows, err := exec.Rows(ctx, st.pool, `
+	rows, err := exec.Rows(ctx, exec.PgxQuerier(st.pool), `
 		SELECT c.relname::text AS name
 		FROM pg_catalog.pg_propgraph_element e
 		JOIN pg_catalog.pg_class c ON c.oid = e.pgerelid

@@ -248,6 +248,8 @@ type FindMeasurementsPerson struct {
 
 const findMeasurementsSQL = "SELECT v0_k, v0_c0, v0_c1, v0_c2, v0_c3, v0_c4, v0_c5, v0_c6, v0_c7, v0_c8, v0_c9, v0_c10::text AS v0_c10\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person)\n  WHERE v0.name = $1\n  COLUMNS (v0.id AS v0_k, v0.id AS v0_c0, v0.name AS v0_c1, v0.age AS v0_c2, v0.score AS v0_c3, v0.rating AS v0_c4, v0.seen AS v0_c5, v0.marks AS v0_c6, v0.tally AS v0_c7, v0.ticket AS v0_c8, v0.active AS v0_c9, v0.notes AS v0_c10)\n)\nORDER BY v0_k"
 
+var findMeasurementsColumns = []string{"v0_k", "v0_c0", "v0_c1", "v0_c2", "v0_c3", "v0_c4", "v0_c5", "v0_c6", "v0_c7", "v0_c8", "v0_c9", "v0_c10"}
+
 var findMeasurementsProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumns: []string{"v0_k"}, Fields: []compiler.ProjectedField{{ResponseKey: "id", Property: "id", Column: "v0_c0", GraphQLType: "ID", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarID}, {ResponseKey: "name", Property: "name", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "age", Property: "age", Column: "v0_c2", GraphQLType: "Int", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarInt}, {ResponseKey: "score", Property: "score", Column: "v0_c3", GraphQLType: "Float", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarFloat}, {ResponseKey: "rating", Property: "rating", Column: "v0_c4", GraphQLType: "Float", ColumnType: "numeric(10,2)", List: false, NonNull: false, Scalar: compiler.ScalarNumeric}, {ResponseKey: "seen", Property: "seen", Column: "v0_c5", GraphQLType: "DateTime", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarDateTime}, {ResponseKey: "marks", Property: "marks", Column: "v0_c6", GraphQLType: "Int", ColumnType: "", List: true, NonNull: false, Scalar: compiler.ScalarInt}, {ResponseKey: "tally", Property: "tally", Column: "v0_c7", GraphQLType: "Int", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarInt}, {ResponseKey: "ticket", Property: "ticket", Column: "v0_c8", GraphQLType: "Int", ColumnType: "bigint", List: false, NonNull: true, Scalar: compiler.ScalarInt}, {ResponseKey: "active", Property: "active", Column: "v0_c9", GraphQLType: "Boolean", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarBoolean}, {ResponseKey: "notes", Property: "notes", Column: "v0_c10", GraphQLType: "JSON", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarJSON}}}}
 
 // FindMeasurements runs the FindMeasurements operation through the handle the caller supplies.
@@ -255,6 +257,7 @@ func (c *Client) FindMeasurements(ctx context.Context, h exec.Handle, in FindMea
 	res, err := exec.Query(ctx, h, &compiler.Compiled{
 		SQL:        findMeasurementsSQL,
 		Args:       []any{in.Name},
+		Columns:    findMeasurementsColumns,
 		Projection: findMeasurementsProjection,
 	})
 	if err != nil {
@@ -331,6 +334,8 @@ type FindPersonPerson struct {
 
 const findPersonSQL = "SELECT v0_k, v0_c0, v0_c1\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person)\n  WHERE v0.name = $1\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1)\n)\nORDER BY v0_k"
 
+var findPersonColumns = []string{"v0_k", "v0_c0", "v0_c1"}
+
 var findPersonProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumns: []string{"v0_k"}, Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarString}}}}
 
 // FindPerson runs the FindPerson operation through the handle the caller supplies.
@@ -338,6 +343,7 @@ func (c *Client) FindPerson(ctx context.Context, h exec.Handle, in FindPersonInp
 	res, err := exec.Query(ctx, h, &compiler.Compiled{
 		SQL:        findPersonSQL,
 		Args:       []any{in.Name},
+		Columns:    findPersonColumns,
 		Projection: findPersonProjection,
 	})
 	if err != nil {
@@ -415,6 +421,8 @@ type ListPeoplePersonFollows struct {
 
 const listPeopleSQL = "SELECT v0_k, v0_c0, v0_c1, v1_k, v1_c0\nFROM GRAPH_TABLE (app_graph\n  MATCH (v0 IS person) -[e0 IS follows]-> (v1 IS person)\n  WHERE v0.id <> v1.id\n  COLUMNS (v0.id AS v0_k, v0.name AS v0_c0, v0.nickname AS v0_c1, v1.id AS v1_k, v1.name AS v1_c0)\n)\nORDER BY v0_k, v1_k"
 
+var listPeopleColumns = []string{"v0_k", "v0_c0", "v0_c1", "v1_k", "v1_c0"}
+
 var listPeopleProjection = compiler.Projection{Root: &compiler.Selection{ResponseKey: "persons", TypeName: "Person", Alias: "v0", KeyColumns: []string{"v0_k"}, Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v0_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}, {ResponseKey: "nickname", Property: "nickname", Column: "v0_c1", GraphQLType: "String", ColumnType: "", List: false, NonNull: false, Scalar: compiler.ScalarString}}, Children: []*compiler.Selection{&compiler.Selection{ResponseKey: "follows", TypeName: "Person", Alias: "v1", KeyColumns: []string{"v1_k"}, Fields: []compiler.ProjectedField{{ResponseKey: "name", Property: "name", Column: "v1_c0", GraphQLType: "String", ColumnType: "", List: false, NonNull: true, Scalar: compiler.ScalarString}}}}}}
 
 // ListPeople runs the ListPeople operation through the handle the caller supplies.
@@ -422,6 +430,7 @@ func (c *Client) ListPeople(ctx context.Context, h exec.Handle, in ListPeopleInp
 	res, err := exec.Query(ctx, h, &compiler.Compiled{
 		SQL:        listPeopleSQL,
 		Args:       nil,
+		Columns:    listPeopleColumns,
 		Projection: listPeopleProjection,
 	})
 	if err != nil {

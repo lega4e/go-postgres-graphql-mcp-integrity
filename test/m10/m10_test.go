@@ -207,7 +207,7 @@ func (st *scenarioState) queryThroughTx(ctx context.Context, op *godog.DocString
 	if st.tx == nil {
 		return fmt.Errorf("no transaction; the caller must open one first")
 	}
-	return st.query(ctx, st.tx, op)
+	return st.query(ctx, exec.PgxQuerier(st.tx), op)
 }
 
 func (st *scenarioState) queryThroughSeparatePool(ctx context.Context, op *godog.DocString) error {
@@ -216,7 +216,7 @@ func (st *scenarioState) queryThroughSeparatePool(ctx context.Context, op *godog
 		return err
 	}
 	defer pool.Close()
-	return st.query(ctx, pool, op)
+	return st.query(ctx, exec.PgxQuerier(pool), op)
 }
 
 func (st *scenarioState) queryThroughReadOnly(ctx context.Context, op *godog.DocString) error {
@@ -225,7 +225,7 @@ func (st *scenarioState) queryThroughReadOnly(ctx context.Context, op *godog.Doc
 		return err
 	}
 	defer pool.Close()
-	return st.query(ctx, pool, op)
+	return st.query(ctx, exec.PgxQuerier(pool), op)
 }
 
 // query compiles once and executes through whichever handle the scenario chose,

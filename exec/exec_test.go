@@ -45,7 +45,26 @@ func (r *fakeRows) Next() bool {
 	return true
 }
 
-func (r *fakeRows) Scan(...any) error { return errors.New("not used") }
+// Scan assigns the current row into `any` destinations, which is how exec reads
+// every row now that the read path is driver-agnostic: Values and
+// FieldDescriptions are pgx's alone, and a portable cursor has neither.
+func (r *fakeRows) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	row := r.values[r.i-1]
+	if len(dest) != len(row) {
+		return errors.New("scan: wrong number of destinations")
+	}
+	for i, d := range dest {
+		p, ok := d.(*any)
+		if !ok {
+			return errors.New("scan: destination is not *any")
+		}
+		*p = row[i]
+	}
+	return nil
+}
 
 func (r *fakeRows) Values() ([]any, error) {
 	if r.err != nil {
@@ -83,7 +102,7 @@ func TestRowsScansByColumnName(t *testing.T) {
 		values: [][]any{{int64(1), "Ada"}, {int64(2), "Linus"}},
 	}}
 
-	got, err := Rows(context.Background(), db, "SELECT 1", "arg")
+	got, err := Rows(context.Background(), PgxQuerier(db), "SELECT 1", "arg")
 	if err != nil {
 		t.Fatalf("Rows: %v", err)
 	}
@@ -104,7 +123,7 @@ func TestRowsScansByColumnName(t *testing.T) {
 
 func TestRowsEmptyResult(t *testing.T) {
 	db := &fakeDB{rows: &fakeRows{cols: []string{"v0_k"}}}
-	got, err := Rows(context.Background(), db, "SELECT 1")
+	got, err := Rows(context.Background(), PgxQuerier(db), "SELECT 1")
 	if err != nil {
 		t.Fatalf("Rows: %v", err)
 	}
@@ -116,7 +135,7 @@ func TestRowsEmptyResult(t *testing.T) {
 func TestRowsPropagatesErrors(t *testing.T) {
 	t.Run("query", func(t *testing.T) {
 		db := &fakeDB{err: errors.New("boom")}
-		if _, err := Rows(context.Background(), db, "SELECT 1"); err == nil {
+		if _, err := Rows(context.Background(), PgxQuerier(db), "SELECT 1"); err == nil {
 			t.Fatal("want an error from a failing query")
 		}
 	})
@@ -126,7 +145,7 @@ func TestRowsPropagatesErrors(t *testing.T) {
 			values: [][]any{{1}},
 			err:    errors.New("read failed"),
 		}}
-		if _, err := Rows(context.Background(), db, "SELECT 1"); err == nil {
+		if _, err := Rows(context.Background(), PgxQuerier(db), "SELECT 1"); err == nil {
 			t.Fatal("want an error from a failing read")
 		}
 	})
@@ -152,7 +171,7 @@ func TestQueryShapesThroughTheProjection(t *testing.T) {
 		},
 	}}
 
-	got, err := Query(context.Background(), db, &compiler.Compiled{SQL: "SELECT 1", Projection: proj})
+	got, err := Query(context.Background(), PgxQuerier(db), &compiler.Compiled{SQL: "SELECT 1", Projection: proj})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -170,7 +189,7 @@ func TestQueryShapesThroughTheProjection(t *testing.T) {
 
 func TestQueryRejectsNilCompiled(t *testing.T) {
 	db := &fakeDB{}
-	if _, err := Query(context.Background(), db, nil); err == nil {
+	if _, err := Query(context.Background(), PgxQuerier(db), nil); err == nil {
 		t.Fatal("want an error for a nil compiled query")
 	}
 	if db.calls != 0 {
@@ -188,7 +207,7 @@ func TestScanRendersUUIDsAsText(t *testing.T) {
 		values: [][]any{{id, []byte{0xde, 0xad}}},
 	}}
 
-	got, err := Rows(context.Background(), db, "SELECT 1")
+	got, err := Rows(context.Background(), PgxQuerier(db), "SELECT 1")
 	if err != nil {
 		t.Fatalf("Rows: %v", err)
 	}

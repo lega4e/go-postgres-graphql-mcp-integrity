@@ -2,12 +2,14 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/sdl"
 )
 
@@ -37,7 +39,6 @@ type cannedRows struct {
 func (r *cannedRows) Close()                        {}
 func (r *cannedRows) Err() error                    { return nil }
 func (r *cannedRows) CommandTag() pgconn.CommandTag { return pgconn.CommandTag{} }
-func (r *cannedRows) Scan(...any) error             { return nil }
 func (r *cannedRows) RawValues() [][]byte           { return nil }
 func (r *cannedRows) Conn() *pgx.Conn               { return nil }
 func (r *cannedRows) Values() ([]any, error)        { return r.values[r.i-1], nil }
@@ -47,6 +48,23 @@ func (r *cannedRows) FieldDescriptions() []pgconn.FieldDescription {
 		fds[i] = pgconn.FieldDescription{Name: c}
 	}
 	return fds
+}
+
+// Scan assigns the current row into `any` destinations: exec reads every row
+// positionally now that its cursor is driver-agnostic.
+func (r *cannedRows) Scan(dest ...any) error {
+	row := r.values[r.i-1]
+	if len(dest) != len(row) {
+		return fmt.Errorf("scan: %d destinations for %d columns", len(dest), len(row))
+	}
+	for i, d := range dest {
+		p, ok := d.(*any)
+		if !ok {
+			return fmt.Errorf("scan: destination %d is %T, not *any", i, d)
+		}
+		*p = row[i]
+	}
+	return nil
 }
 
 func (r *cannedRows) Next() bool {
@@ -63,7 +81,7 @@ func newServerWithDB(t *testing.T, db *recordingDB) *Server {
 	if err != nil {
 		t.Fatalf("parse SDL: %v", err)
 	}
-	return New(doc, testSDL, db)
+	return New(doc, testSDL, exec.PgxQuerier(db))
 }
 
 func TestQueryBindsVariables(t *testing.T) {

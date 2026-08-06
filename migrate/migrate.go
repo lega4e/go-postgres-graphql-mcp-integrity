@@ -214,6 +214,9 @@ func Generate(dir string, desired *schema.Schema, slug string, halves Halves) ([
 	}
 	planned := Plan(prior, desired, slug, next, halves)
 	if len(planned) == 0 {
+		if err := checkNothingOwedIsMissing(prior, desired, halves); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 
@@ -284,6 +287,68 @@ func checkManagement(owned Ownership, prior, desired *schema.Schema) error {
 		}
 	}
 	return nil
+}
+
+// ErrNothingWritten reports that a generation planned nothing while the SDL
+// still declares owned tables the directory's own history never creates.
+//
+// It is a sentinel so a caller can tell "your schema is already applied" from
+// "gopgql produced nothing and that is wrong", which are the same exit status
+// and, until this existed, the same message.
+var ErrNothingWritten = errors.New(
+	"nothing was generated, but the schema declares owned tables this directory does not create")
+
+// checkNothingOwedIsMissing refuses a no-op generation that leaves a table gopgql
+// owns uncreated.
+//
+// "Already up to date" is only true if the history really does hold everything
+// the SDL says gopgql owns. When it does not, an empty plan is a *wrong artifact*
+// dressed as a successful run: exit 0, no files, no warning, and the first thing
+// that knows is PostgreSQL at apply time — or, worse, a later migration whose
+// foreign key references a table nothing created.
+//
+// This is the same failure class as gopgql#49's dropped edge label, and it is
+// checked the same way: not against the specific bug that produced it, but
+// against the invariant it broke. gopgql#53 reached it through withoutUnmanaged
+// stripping owned vertex tables; anything else that drops an owned table between
+// the SDL and the plan lands here too, because the check is on what the SDL
+// declares against what the history holds and shares no code with the differ.
+//
+// The evidence a table was created is that the fold gave it columns — the same
+// evidence checkManagement reads, and readable for the same reason: a --no-tables
+// history folds every table without columns, so the question is only asked of a
+// directory that generates tables at all.
+func checkNothingOwedIsMissing(prior, desired *schema.Schema, halves Halves) error {
+	if !halves.Tables() || desired == nil {
+		return nil
+	}
+	created := map[string]bool{}
+	if prior != nil {
+		for _, vt := range prior.VertexTables {
+			created[vt.Key()] = len(vt.Columns) > 0
+		}
+		for _, e := range prior.EdgeTables {
+			created[e.Key()] = len(e.Columns) > 0
+		}
+	}
+
+	var missing []string
+	for _, vt := range desired.VertexTables {
+		if !vt.Unmanaged && !created[vt.Key()] {
+			missing = append(missing, vt.QualifiedName())
+		}
+	}
+	for _, e := range desired.EdgeTables {
+		if !e.Unmanaged && !created[e.Key()] {
+			missing = append(missing, e.QualifiedName())
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: %s. Every table above is one gopgql owns — no @readonly, no @relationship(table:) "+
+		"onto somebody else's table — so a generation that writes nothing has left the schema unbuildable",
+		ErrNothingWritten, strings.Join(missing, ", "))
 }
 
 // GraphTeardown renders the graph-teardown migration for the graph a history

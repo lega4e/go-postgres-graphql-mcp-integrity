@@ -43,6 +43,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/lega4e/gopgql/conform"
+	gopgqlexec "github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/schema"
@@ -259,9 +260,9 @@ func physicalFingerprint(t *testing.T, pool *pgxpool.Pool) string {
 func assertSameGraph(t *testing.T, want, got *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
-	wantGraph, err := conform.Reflect(ctx, want, "")
+	wantGraph, err := conform.Reflect(ctx, gopgqlexec.PgxQuerier(want), "")
 	require.NoError(t, err, "reflect the expected property graph")
-	gotGraph, err := conform.Reflect(ctx, got, "")
+	gotGraph, err := conform.Reflect(ctx, gopgqlexec.PgxQuerier(got), "")
 	require.NoError(t, err, "reflect the actual property graph")
 	report := conform.Check(wantGraph, gotGraph)
 	assert.True(t, report.OK(), "the two property graphs differ: %+v", report.Findings)

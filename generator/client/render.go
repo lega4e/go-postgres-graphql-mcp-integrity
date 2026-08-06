@@ -144,14 +144,19 @@ func renderQuery(b *strings.Builder, c *compiler.Compiler, op operation, vars ma
 	b.WriteString(types.String())
 
 	fmt.Fprintf(b, "const %sSQL = %s\n\n", unexported(op.Name), quoteGo(cq.SQL))
+	// The output column names travel with the operation because a portable
+	// database handle cannot report them: a DBOS transaction's cursor offers
+	// Next/Scan/Err/Close and nothing that names a column (gopgql#53). They are
+	// the SELECT list the compiler emitted, recorded rather than re-derived.
+	fmt.Fprintf(b, "var %sColumns = %s\n\n", unexported(op.Name), renderStrings(cq.Columns))
 	fmt.Fprintf(b, "var %sProjection = %s\n\n", unexported(op.Name), renderProjection(root))
 
 	fmt.Fprintf(b, "// %s runs the %s operation through the handle the caller supplies.\n", op.Name, op.Name)
 	fmt.Fprintf(b, "func (c *Client) %s(ctx context.Context, h exec.Handle, in %s) ([]%s, error) {\n",
 		op.Name, inputType, rootType)
 	fmt.Fprintf(b, "\tres, err := exec.Query(ctx, h, &compiler.Compiled{\n"+
-		"\t\tSQL: %sSQL,\n\t\tArgs: %s,\n\t\tProjection: %sProjection,\n\t})\n",
-		unexported(op.Name), renderArgs(cq.Args), unexported(op.Name))
+		"\t\tSQL: %sSQL,\n\t\tArgs: %s,\n\t\tColumns: %sColumns,\n\t\tProjection: %sProjection,\n\t})\n",
+		unexported(op.Name), renderArgs(cq.Args), unexported(op.Name), unexported(op.Name))
 	b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	fmt.Fprintf(b, "\treturn %s(%s, res[%s])\n}\n\n",
 		assembler(rootType), quoteGo(root.ResponseKey), quoteGo(root.ResponseKey))
@@ -437,6 +442,18 @@ func goStrings(xs []string) string {
 // quoteGo renders a string as a Go literal. %q is exact for every string a
 // compiled statement can contain and needs no escaping table of its own.
 func quoteGo(s string) string { return fmt.Sprintf("%q", s) }
+
+// renderStrings renders a string slice as a Go composite literal.
+func renderStrings(ss []string) string {
+	if len(ss) == 0 {
+		return "[]string(nil)"
+	}
+	parts := make([]string, len(ss))
+	for i, s := range ss {
+		parts[i] = quoteGo(s)
+	}
+	return "[]string{" + strings.Join(parts, ", ") + "}"
+}
 
 // namedType strips list and non-null wrappers to the underlying named type.
 func namedType(t *ast.Type) string {
