@@ -434,11 +434,6 @@ scalar DateTime
 scalar JSON
 `
 
-// Parse parses and validates an SDL source and builds the mapping model.
-//
-// Validation covers both GraphQL well-formedness (via gqlparser) and gopgql's
-// own rules: at least one @node type, a surrogate `id: ID!` key on every node,
-// and consistent @relationship/@hasInverse pairing.
 // unsupportedScalars are scalar names an author reasonably expects gopgql to
 // have, together with what to write instead. They are *not* implemented, and the
 // entry is the deliberate way of saying so (gopgql#53).
@@ -492,11 +487,56 @@ func unknownScalarGuidance(err error) error {
 	return fmt.Errorf("%w\n\n%s", err, guidance)
 }
 
+// Source is one named SDL document. Name is what a parse or validation error
+// points at, so it should be the path the author wrote on the command line.
+type Source struct {
+	// Name identifies the document in diagnostics.
+	Name string
+	// Input is the document text.
+	Input string
+}
+
+// DefaultSourceName is the name Parse gives its single anonymous document.
+const DefaultSourceName = "schema.graphql"
+
+// Parse parses one SDL document.
 func Parse(src string) (*Document, error) {
-	schema, err := gqlparser.LoadSchema(
-		&ast.Source{Name: "gopgql/prelude", Input: prelude, BuiltIn: true},
-		&ast.Source{Name: "schema.graphql", Input: src},
-	)
+	return ParseSources(Source{Name: DefaultSourceName, Input: src})
+}
+
+// ParseSources parses and validates several SDL documents as one schema and
+// builds the mapping model.
+//
+// Validation covers both GraphQL well-formedness (via gqlparser) and gopgql's
+// own rules: at least one @node type, a surrogate `id: ID!` key on every node,
+// and consistent @relationship/@hasInverse pairing.
+//
+// The documents are merged before anything is validated, so a type declared in
+// one may be referenced from another — which is the point: a property graph can
+// only span two PostgreSQL schemas if one document describes both, and keeping
+// "what this service owns" separate from "what it only reads" is worth a file
+// boundary (gopgql#54). Splitting a schema across files therefore changes
+// nothing about the result: the model is sorted by type name and the generated
+// DDL is byte-identical to generating from the files concatenated.
+//
+// What it does change is diagnostics. Each document keeps its own name, so an
+// error names the file the author has to open rather than a merged buffer whose
+// line numbers match nothing on disk.
+func ParseSources(sources ...Source) (*Document, error) {
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("sdl: no schema documents given")
+	}
+	inputs := make([]*ast.Source, 0, len(sources)+1)
+	inputs = append(inputs, &ast.Source{Name: "gopgql/prelude", Input: prelude, BuiltIn: true})
+	for _, s := range sources {
+		name := s.Name
+		if name == "" {
+			name = DefaultSourceName
+		}
+		inputs = append(inputs, &ast.Source{Name: name, Input: s.Input})
+	}
+
+	schema, err := gqlparser.LoadSchema(inputs...)
 	if err != nil {
 		return nil, unknownScalarGuidance(fmt.Errorf("sdl: %w", err))
 	}

@@ -23,7 +23,8 @@ const DefaultGraphName = "app_graph"
 
 // scalarMapping is the default GraphQL-scalar → PostgreSQL-type mapping
 // (SPEC.md §5.1). ID maps to uuid; the surrogate key adds PRIMARY KEY DEFAULT
-// gen_random_uuid() on top.
+// gen_random_uuid() on top. JSON's entry is a default the caller can move —
+// see [Options.JSONType].
 var scalarMapping = map[string]string{
 	"Int":      "integer",
 	"Float":    "double precision",
@@ -31,19 +32,63 @@ var scalarMapping = map[string]string{
 	"Boolean":  "boolean",
 	"ID":       "uuid",
 	"DateTime": "timestamptz",
-	"JSON":     "jsonb",
+	"JSON":     DefaultJSONType,
+}
+
+// The physical types the JSON scalar may be mapped to, and the default.
+//
+// jsonb stays the default (decided on gopgql#53, and re-affirmed on gopgql#54):
+// it is the one that can be indexed, and moving the default would make the
+// differ emit an ALTER TABLE … TYPE json for every existing JSON column in every
+// deployed schema — a rewrite of every row of every such table, for schemas that
+// never asked for it. What jsonb costs is byte-identical round trip: it sorts
+// keys, drops insignificant whitespace and keeps only the last of a duplicated
+// key. A schema on a round-trip path says so once, with --json-type json, rather
+// than remembering @column(type: "json") on every column (gopgql#54).
+const (
+	// DefaultJSONType is the physical type the JSON scalar maps to when nothing
+	// says otherwise.
+	DefaultJSONType = "jsonb"
+	// JSONTypeJSON stores the document as written: byte-identical round trip,
+	// no key sorting, no whitespace normalisation, no indexing.
+	JSONTypeJSON = "json"
+	// JSONTypeJSONB is the binary, indexable, queryable form.
+	JSONTypeJSONB = "jsonb"
+)
+
+// Options configure [BuildWith].
+type Options struct {
+	// GraphName is the property-graph name; empty means DefaultGraphName.
+	GraphName string
+	// JSONType is the physical type the JSON scalar maps to — "json" or
+	// "jsonb"; empty means DefaultJSONType.
+	//
+	// It moves the *default* only. @column(type:) still wins on the column that
+	// carries it, so a schema can set the safe type globally and still name an
+	// exception (SPEC.md §5.1).
+	JSONType string
 }
 
 // Build maps an SDL document to the physical schema model and verifies the
 // §5.3 invariants. graphName defaults to DefaultGraphName when empty.
 func Build(doc *sdl.Document, graphName string) (*schema.Schema, error) {
+	return BuildWith(doc, Options{GraphName: graphName})
+}
+
+// BuildWith is [Build] with the generator's configurable defaults.
+func BuildWith(doc *sdl.Document, opts Options) (*schema.Schema, error) {
+	graphName := opts.GraphName
 	if graphName == "" {
 		graphName = DefaultGraphName
+	}
+	mapping, err := scalarMappingFor(opts.JSONType)
+	if err != nil {
+		return nil, err
 	}
 	m := &schema.Schema{GraphName: graphName}
 
 	for _, n := range doc.Nodes {
-		vt, err := buildVertex(n)
+		vt, err := buildVertex(n, mapping)
 		if err != nil {
 			return nil, err
 		}
@@ -139,7 +184,33 @@ func validateNothingDropped(m *schema.Schema, doc *sdl.Document) error {
 	return nil
 }
 
-func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
+// scalarMappingFor returns the scalar mapping with JSON pointed at jsonType.
+//
+// An unrecognised type is refused rather than passed through. --json-type is the
+// *default* for a scalar, which is a different thing from @column(type:): the
+// per-column escape carries arbitrary SQL because it names one column an author
+// is looking at, while a default nobody re-reads must not be able to make every
+// JSON column in a schema some type PostgreSQL will reject at migration time.
+func scalarMappingFor(jsonType string) (map[string]string, error) {
+	switch jsonType {
+	case "", DefaultJSONType:
+		return scalarMapping, nil
+	case JSONTypeJSON:
+	default:
+		return nil, fmt.Errorf("generator: unknown JSON type %q; the JSON scalar maps to %q or %q "+
+			"(a column needing anything else says so with @column(type: ...))",
+			jsonType, JSONTypeJSON, JSONTypeJSONB)
+	}
+
+	out := make(map[string]string, len(scalarMapping))
+	for k, v := range scalarMapping {
+		out[k] = v
+	}
+	out["JSON"] = jsonType
+	return out, nil
+}
+
+func buildVertex(n *sdl.Node, mapping map[string]string) (schema.VertexTable, error) {
 	vt := schema.VertexTable{
 		Name: n.Table, Schema: n.Schema, Unmanaged: n.ReadOnly,
 		Label: n.Label, RenamedFrom: n.PriorTableNames(),
@@ -151,7 +222,7 @@ func buildVertex(n *sdl.Node) (schema.VertexTable, error) {
 		if !f.IsScalarColumn() {
 			continue
 		}
-		base, ok := scalarMapping[f.TypeName]
+		base, ok := mapping[f.TypeName]
 		if !ok {
 			return schema.VertexTable{}, fmt.Errorf(
 				"generator: %s.%s has unsupported type %q (no default scalar mapping)",

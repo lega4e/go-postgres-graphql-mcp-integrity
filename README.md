@@ -257,7 +257,8 @@ claude mcp add gopgql --env GOPGQL_DSN="$GOPGQL_DSN" -- gopgql-mcp --sdl schema.
 Pass the DSN through the environment rather than `--dsn`: an MCP configuration
 file sits on disk and command-line arguments are visible to every process on the
 machine. `--sdl` falls back to `GOPGQL_SDL` the same way, and a flag wins over
-the environment.
+the environment. It is repeatable here too, and takes a directory: the server
+loads whatever documents it names as one schema.
 
 Two tools:
 
@@ -497,19 +498,68 @@ underneath it do.
 ## CLI reference
 
 ```
-gopgql generate --sdl <file> --dir <dir> [--name <suffix>] [--graph <name>]
-                [--no-tables] [--no-graph]
-gopgql generate client --sdl <file> --operations <dir> --out <dir>
+gopgql generate --sdl <path> [--sdl <path>…] --dir <dir> [--name <suffix>]
+                [--graph <name>] [--json-type <type>] [--no-tables] [--no-graph]
+gopgql generate client --sdl <path> [--sdl <path>…] --operations <dir> --out <dir>
                 [--package <name>] [--graph <name>]
-gopgql migrate  --dsn <url> [--sdl <file>] [--dir <dir>] [--name <suffix>] [--graph <name>]
-                [--no-tables] [--no-graph]
-gopgql conform  --sdl <file> --dsn <url> [--graph <name>]
+gopgql migrate  --dsn <url> [--sdl <path>…] [--dir <dir>] [--name <suffix>]
+                [--graph <name>] [--json-type <type>] [--no-tables] [--no-graph]
+gopgql conform  --sdl <path> [--sdl <path>…] --dsn <url> [--graph <name>]
 gopgql version
 ```
 
 `--sdl`, `--dsn` and `--dir` fall back to `GOPGQL_SDL`, `GOPGQL_DSN` and
 `GOPGQL_MIGRATIONS`; a flag wins over the environment. `--dir` defaults to
 `migrations`.
+
+### A schema in several files
+
+**`--sdl` is repeatable, and it also takes a directory** whose `*.graphql` files
+are read in sorted order (not recursively). Every document is parsed as one
+schema:
+
+```sh
+gopgql generate --sdl schema/00-dbos.graphql --sdl schema/10-app.graphql --dir migrations
+gopgql generate --sdl schema/ --dir migrations            # the same thing
+```
+
+The reason to want this is that **a property graph can only span two PostgreSQL
+schemas if one schema describes both** — and the boundary between what a service
+owns and migrates and what it only reads is usually the thing you least want to
+lose. Splitting the SDL along that boundary keeps it visible without giving up
+the graph that crosses it.
+
+Splitting is purely editorial: generating from several files produces
+byte-identical output to generating from those files concatenated, so there is
+never a reason to concatenate them yourself. The files are merged before anything
+is resolved, so a type may be referenced before the file declaring it is read —
+the split follows ownership, not dependency order. What each file keeps is its
+name, so a parse or validation error points at the file you have to open.
+
+`GOPGQL_SDL` carries one path or several, separated the way your platform
+separates a path list (`:` on Unix, `;` on Windows).
+
+### `--json-type`
+
+The `JSON` scalar maps to `jsonb`. `--json-type json` moves that default for the
+whole schema, and `@column(type:)` still wins on any column that carries one:
+
+```sh
+gopgql generate --sdl schema.graphql --json-type json --dir migrations
+```
+
+`jsonb` is the default because it is what can be indexed and queried. What it
+costs is byte-identical round trip — it sorts object keys, drops insignificant
+whitespace and keeps only the last of a duplicated key — so a schema on a
+round-trip path (a signed payload, a document whose hash is checked) wants
+`json`. Setting it globally is the point: per column, the annotation that was
+forgotten is invisible until a stored value has more than one key.
+
+Changing it on a schema that is already deployed generates a real migration —
+`ALTER TABLE … ALTER COLUMN … TYPE json USING …::json`, which keeps the column's
+rows. It cannot un-normalise what `jsonb` already stored, though: only documents
+written after the migration round-trip. `GOPGQL_JSON_TYPE` is the environment
+equivalent.
 
 **`--graph` has to match across commands.** It names the property graph, and it
 defaults to `app_graph` everywhere it appears. `generate` bakes that name into

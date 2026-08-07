@@ -183,7 +183,7 @@ Single Go module, `github.com/<owner>/gopgql`:
 
 |Package     |Responsibility                                                                                         |
 |------------|-------------------------------------------------------------------------------------------------------|
-|`sdl`       |Parse and validate SDL via `vektah/gqlparser/v2`; read directives into a typed mapping model.          |
+|`sdl`       |Parse and validate SDL via `vektah/gqlparser/v2`; read directives into a typed mapping model. `ParseSources` takes several named documents and merges them into one schema (M15); it has no IO, so resolving `--sdl` paths is `internal/sdlsource`'s.|
 |`schema`    |The in-memory schema model (tables, columns, indexes, graph elements). Shared by generator and migrate.|
 |`generator` |Model → DDL statements (`CREATE TABLE`, indexes, `CREATE PROPERTY GRAPH`).                             |
 |`migrate`   |Fold prior goose migrations → model; diff against desired; emit next migration.                        |
@@ -308,11 +308,47 @@ travel through the same cast to `text` on the way out (design D5), so the shaped
 response is produced the same way for either.
 
 The default is deliberately *not* changed to `json`. Doing so would re-type every
-existing `JSON` column, and the differ would correctly emit an
-`ALTER TABLE … TYPE json` for each of them on the next generation of every schema
-already in production — a migration nobody asked for, to change a default most
-schemas want as it is. The choice is per column because that is the grain at
-which the requirement actually differs (gopgql#53).
+existing `JSON` column, and the differ would emit an `ALTER TABLE … TYPE json`
+for each of them on the next generation of every schema already in production — a
+migration nobody asked for, to change a default most schemas want as it is
+(gopgql#53).
+
+**The default is configurable, and the choice is not per column only
+(gopgql#54).** Re-examining the decision above, the reasoning that keeps `jsonb`
+survives intact — it is about the cost of *moving every schema at once*, which is
+a cost only a changed default imposes. What did not survive is the conclusion
+drawn from it, that the escape has to be per column. A schema on a byte-identical
+round-trip path does not have one JSON column that is special; it has JSON
+columns, and one that was left unannotated is a defect nothing can see until a
+stored value has more than one key. So the *default* is settable for a whole
+schema:
+
+```
+gopgql generate --sdl schema.graphql --json-type json --dir migrations
+```
+
+`--json-type` takes `jsonb` (the default) or `json`, and nothing else — a type
+outside that pair is refused rather than passed through, because a default nobody
+re-reads must not be able to make every JSON column in a schema something
+PostgreSQL will reject at migration time. `@column(type:)` is unchanged and still
+wins on the column that carries it, so a schema can declare the safe default once
+and still name an exception. `GOPGQL_JSON_TYPE` is the environment equivalent.
+
+Setting it on a schema that is already deployed is a real migration, and it is
+generated as one: the differ emits
+`ALTER TABLE … ALTER COLUMN … TYPE json USING …::json`, keeping the column's rows.
+Until gopgql#54 it emitted nothing at all — a changed column *type* was not
+diffed, so `@column(type:)` edits were silently dropped too and the sentence
+above about the differ "correctly" emitting an `ALTER TABLE … TYPE json` was
+aspirational rather than true. The `USING` is always written: PostgreSQL has no
+assignment cast between `json` and `jsonb` and rejects the bare `ALTER` with
+*column cannot be cast automatically*.
+
+What no migration can do is un-normalise what `jsonb` already stored. Moving an
+existing column onto `json` makes every document written *from then on*
+round-trip; the ones already in the table were normalised on the way in and that
+is not recoverable. A schema that knows it needs byte-identity should say so
+before it has rows.
 
 **Note on the scalars gopgql does *not* have.** `Bytes`, `Date`, `Time`, `UUID`,
 `BigInt` and `Decimal` are not scalars here; each is refused at parse time with
@@ -647,6 +683,48 @@ It was sequenced **after gopgql#10 (M8)**, which rewrites `shape` and touches th
 **Exit:** a generated client compiled and run against a real container through a caller's transaction, returning the same data the hand-written suites assert, with a failing mutation still carrying its SQLSTATE; and the determinism checks running in CI as ordinary tests that boot no container.
 
 **Amended after v0.2.1 (gopgql#51).** The exit above was met by a fixture projecting only `ID` and `String`, so exactly one of the generated decoders ever ran against a database and the seam above went unasserted in both directions. `Int`, `Float`, a `numeric`-backed `Float` and `DateTime` were all undecodable in the released client — `cannot read json.Number as int64`, `cannot read string as time.Time` — with every suite green, because `shape`'s tests asserted the canonical form from one side and the generator's asserted that the decoders compiled from the other. The exit criterion now requires the M14 fixture to project **every scalar the decoders handle**, asserted on the values returned rather than on the call succeeding, including a nullable column that is genuinely NULL and an integer beyond `float64` precision so that "read from the digits" is a claim a test can fail. The defect is a decoder written against one of its two producers; the fixture that can notice the next one is the one that reads them all.
+
+### M15 — A schema in several files, and a settable JSON default
+
+Two generator-configuration gaps, each of which forced a workaround in the
+consumer rather than a change here (gopgql#54).
+
+- **`--sdl` is repeatable, and also takes a directory** of `*.graphql` read in
+  sorted order, not recursively. Every document is parsed as one schema. This is
+  what lets a property graph span two PostgreSQL schemas — a read-only one and an
+  owned one — while the boundary between them stays visible in the file layout,
+  which is the fact a consumer most needs to keep. Before it, the only ways to
+  get one `CREATE PROPERTY GRAPH` over two schemas were to put both in one
+  physical file, losing the boundary, or to concatenate the files before every
+  generate. AgentIQ took the second and wrote an ~80-line tool for it.
+- **The `JSON` scalar's physical type is settable for a whole schema**
+  (`--json-type`, `GOPGQL_JSON_TYPE`), with `@column(type:)` still overriding per
+  column, and `jsonb` still the default. §5.1 carries the decision and its
+  reasoning.
+
+The claim that makes the concatenating tool *deletable* rather than merely
+redundant is stronger than "gopgql reads more than one file": generating from
+several files produces **byte-identical output to generating from those files
+concatenated**. Anything weaker and a consumer has to keep concatenating, because
+the concatenation is the thing whose output it already trusts. It is tested as
+that property — generate both ways into two directories and compare every byte of
+both — rather than as a claim about the parser. The documents are still kept
+apart rather than joined before parsing, for one reason: diagnostics. A merged
+buffer's line numbers match nothing on disk, so each document keeps its own name
+and an error names the file the author has to open.
+
+Splitting a schema is therefore editorial. The files are merged before anything
+is resolved, so a type may be referenced before the file declaring it is read and
+the split can follow the ownership boundary rather than a dependency order — of
+which, for a cycle, there is none.
+
+**Exit:** the same schema generated from two files and from their concatenation,
+compared byte for byte; a `CREATE PROPERTY GRAPH` naming tables in two
+PostgreSQL schemas declared in two files; the global JSON type reaching an
+unannotated column and an annotated one keeping its own, proved against a
+container by reading `information_schema` and round-tripping a document that
+exercises all three of `jsonb`'s normalisations; and a deployed schema moved onto
+`json` by a generated migration that PostgreSQL accepts.
 
 -----
 

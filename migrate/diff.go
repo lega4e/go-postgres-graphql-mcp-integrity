@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/lega4e/gopgql/generator"
@@ -259,6 +260,9 @@ type schemaDiff struct {
 	// recreate it (design D6, task 4.1).
 	defaultChanges []defaultChange
 
+	// Physical types moved on a column present in both schemas (gopgql#54).
+	typeChanges []typeChange
+
 	// renames is the hint-driven rename plan, already applied to the prior
 	// schema this diff was computed against.
 	renames renamePlan
@@ -287,6 +291,16 @@ type defaultChange struct {
 	To     string
 }
 
+// typeChange is one column's physical type moving from From to To. Both are the
+// full column type as it appears in DDL, array marker included, so rendering the
+// ALTER is a substitution rather than a reconstruction.
+type typeChange struct {
+	Table  string
+	Column string
+	From   string
+	To     string
+}
+
 // uniqueChange is one column's UNIQUE constraint, named the way PostgreSQL names
 // an implicit one so the ADD and DROP paths agree.
 type uniqueChange struct {
@@ -305,7 +319,7 @@ func (d *schemaDiff) structural() bool {
 		len(d.addedIndexes) > 0 || len(d.droppedIndexes) > 0 ||
 		len(d.addedUniques) > 0 || len(d.droppedUniques) > 0 ||
 		len(d.addedConstraints) > 0 || len(d.droppedConstraints) > 0 ||
-		len(d.defaultChanges) > 0 || !d.renames.empty() ||
+		len(d.defaultChanges) > 0 || len(d.typeChanges) > 0 || !d.renames.empty() ||
 		d.hasColumnChanges()
 }
 
@@ -358,6 +372,7 @@ func diffSchemas(from, to *schema.Schema) *schemaDiff {
 		d.droppedConstraints = append(d.droppedConstraints, droppedCons...)
 
 		d.defaultChanges = append(d.defaultChanges, defaultDiff(vt.Key(), vt.Columns, toVT.Columns)...)
+		d.typeChanges = append(d.typeChanges, typeDiff(vt.Key(), vt.Columns, toVT.Columns)...)
 	}
 
 	fromE := edgeIndex(from)
@@ -516,6 +531,64 @@ func defaultDiff(table string, fromCols, toCols []schema.Column) []defaultChange
 	return out
 }
 
+// typeDiff reports the physical types that moved on columns present in both
+// schemas.
+//
+// Until gopgql#54 a changed type was left untouched, which made every way of
+// changing one — @column(type:), and now the global --json-type — a silent
+// no-op: the generator reported the directory "already up to date" while the
+// database kept the old type. A column that is itself added or dropped carries
+// its type in its own definition and never appears here.
+func typeDiff(table string, fromCols, toCols []schema.Column) []typeChange {
+	prior := map[string]schema.Column{}
+	for _, c := range fromCols {
+		prior[c.Name] = c
+	}
+	var out []typeChange
+	for _, c := range toCols {
+		p, ok := prior[c.Name]
+		if !ok || sameColumnType(p, c) {
+			continue
+		}
+		out = append(out, typeChange{
+			Table: table, Column: c.Name,
+			From: columnTypeText(p), To: columnTypeText(c),
+		})
+	}
+	return out
+}
+
+// columnTypeText is a column's full type as DDL spells it, array marker
+// included.
+func columnTypeText(c schema.Column) string {
+	if c.Array {
+		return c.Type + "[]"
+	}
+	return c.Type
+}
+
+// sameColumnType compares two columns' physical types for the purpose of
+// deciding whether a migration is owed.
+//
+// The comparison ignores case and the whitespace inside a type modifier, so
+// `NUMERIC(10, 2)` and `numeric(10,2)` are the same type. Neither difference is
+// semantic, and a diff that treated them as a change would emit an ALTER on
+// every generation — the far worse failure, because it is the one that keeps
+// producing migrations that do nothing.
+func sameColumnType(a, b schema.Column) bool {
+	return a.Array == b.Array && normalizeType(a.Type) == normalizeType(b.Type)
+}
+
+// typePunctSpaceRe matches the whitespace around a type modifier's punctuation.
+var typePunctSpaceRe = regexp.MustCompile(`\s*([(),])\s*`)
+
+// normalizeType renders a type in the one spelling the comparison uses: single
+// spaces between words, none around punctuation, lower case.
+func normalizeType(t string) string {
+	collapsed := strings.Join(strings.Fields(t), " ")
+	return strings.ToLower(typePunctSpaceRe.ReplaceAllString(collapsed, "$1"))
+}
+
 // staleAsConstraints turns the constraints a rename left under an old name into
 // ordinary drops, so they travel through the same emission and inversion path as
 // every other constraint change.
@@ -589,6 +662,9 @@ func (d *schemaDiff) upStructural(to *schema.Schema) []string {
 			s = append(s, addColumnStmt(t, c))
 		}
 	}
+	for _, c := range d.typeChanges {
+		s = append(s, alterTypeStmt(c, c.To))
+	}
 	for _, c := range d.defaultChanges {
 		s = append(s, setDefaultStmt(c.Table, c.Column, c.To))
 	}
@@ -634,6 +710,9 @@ func (d *schemaDiff) downStructural(from *schema.Schema) []string {
 	}
 	for _, c := range d.defaultChanges {
 		s = append(s, setDefaultStmt(c.Table, c.Column, c.From))
+	}
+	for _, c := range d.typeChanges {
+		s = append(s, alterTypeStmt(c, c.From))
 	}
 	for _, t := range d.commonVertices {
 		for _, c := range d.addedColumns[t] {
@@ -686,8 +765,8 @@ func (d *schemaDiff) graphOf(prior *schema.Schema) *schema.Schema {
 // columnDiff compares two column lists by name. added is the columns present
 // only in to (rendered with their desired definition); dropped is the columns
 // present only in from (rendered with their prior definition so Down can
-// restore them). Type changes on a shared column are out of M2's scope and are
-// left untouched.
+// restore them). A shared column whose *type* moved is not recreated — that is
+// [typeDiff]'s ALTER COLUMN … TYPE, which keeps the column's data.
 func columnDiff(fromCols, toCols []schema.Column) (added, dropped []schema.Column) {
 	fromSet := map[string]bool{}
 	for _, c := range fromCols {
@@ -740,6 +819,19 @@ func addColumnStmt(table string, c schema.Column) string {
 
 func dropColumnStmt(table, col string) string {
 	return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", qualify(table), quote(col))
+}
+
+// alterTypeStmt renders one column's move to target.
+//
+// The USING clause is always written, never left to PostgreSQL's implicit
+// assignment cast. Between json and jsonb — the pair --json-type moves between —
+// there is no assignment cast at all, so the statement without it fails with
+// "column cannot be cast automatically". Writing the explicit cast every time
+// means one shape for every type change, and a cast PostgreSQL does not have is
+// its error at migration time rather than a statement that is silently absent.
+func alterTypeStmt(c typeChange, target string) string {
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;",
+		qualify(c.Table), quote(c.Column), target, quote(c.Column), target)
 }
 
 func dropTableStmt(key string) string {

@@ -44,6 +44,7 @@ import (
 	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/generator/client"
+	"github.com/lega4e/gopgql/internal/sdlsource"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/schema"
 	"github.com/lega4e/gopgql/sdl"
@@ -52,13 +53,13 @@ import (
 const usage = `gopgql — generate and apply migrations from a GraphQL SDL schema.
 
 Usage:
-  gopgql generate --sdl <file> --dir <dir> [--name <suffix>] [--graph <name>]
-                  [--no-tables] [--no-graph]
-  gopgql generate client --sdl <file> --operations <dir> --out <dir>
+  gopgql generate --sdl <path> [--sdl <path>…] --dir <dir> [--name <suffix>]
+                  [--graph <name>] [--json-type <type>] [--no-tables] [--no-graph]
+  gopgql generate client --sdl <path> [--sdl <path>…] --operations <dir> --out <dir>
                   [--package <name>] [--graph <name>]
-  gopgql migrate  --dsn <url> [--sdl <file>] [--dir <dir>] [--name <suffix>] [--graph <name>]
-                  [--no-tables] [--no-graph]
-  gopgql conform  --sdl <file> --dsn <url> [--graph <name>]
+  gopgql migrate  --dsn <url> [--sdl <path>…] [--dir <dir>] [--name <suffix>]
+                  [--graph <name>] [--json-type <type>] [--no-tables] [--no-graph]
+  gopgql conform  --sdl <path> [--sdl <path>…] --dsn <url> [--graph <name>]
 
 Commands:
   generate   Write the next migration for the schema into --dir.
@@ -74,7 +75,19 @@ Commands:
   version    Print the version, commit and build date (also --version, -v).
 
 Flags:
-  --sdl    Path to the SDL schema.                     (env GOPGQL_SDL)
+  --sdl    Path to an SDL schema file, or to a directory whose *.graphql files
+           are read in sorted order (not recursive). Repeatable: every document
+           is parsed as one schema, so a property graph can span PostgreSQL
+           schemas declared in separate files, and splitting a schema across
+           files produces exactly what concatenating them would.
+           GOPGQL_SDL holds one path or several, separated the way the platform
+           separates a path list (':' on Unix, ';' on Windows).
+  --json-type  Physical type for the JSON scalar: "jsonb" (default) or "json".
+           jsonb is indexable and queryable; json is what round-trips a document
+           byte-identically, because jsonb sorts keys, drops insignificant
+           whitespace and keeps only the last of a duplicated key. This is the
+           default for every JSON column; @column(type: ...) still wins on the
+           column that carries it. (env GOPGQL_JSON_TYPE)
   --dsn    PostgreSQL connection string.               (env GOPGQL_DSN)
   --dir    Migration directory. Default "migrations".  (env GOPGQL_MIGRATIONS)
            One directory, one goose history, one goose_db_version table. No
@@ -182,11 +195,12 @@ func exitCode(err error) int {
 // spellings, their GOPGQL_* fallbacks and their flag-wins-over-env precedence
 // cannot drift apart between subcommands.
 type commonFlags struct {
-	sdlPath  *string
+	sdlPaths *sdlsource.PathList
 	dsn      *string
 	dir      *string
 	name     *string
 	graph    *string
+	jsonType *string
 	noTables *bool
 	noGraph  *bool
 }
@@ -204,15 +218,18 @@ type commonFlags struct {
 func newFlagSet(command string) (*flag.FlagSet, *commonFlags) {
 	fs := flag.NewFlagSet("gopgql "+command, flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
-	return fs, &commonFlags{
-		sdlPath:  fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)"),
+	f := &commonFlags{
+		sdlPaths: &sdlsource.PathList{},
 		dsn:      fs.String("dsn", "", "PostgreSQL connection string (env GOPGQL_DSN)"),
 		dir:      fs.String("dir", "", `migration directory (env GOPGQL_MIGRATIONS, default "migrations")`),
 		name:     fs.String("name", "schema", "descriptive suffix for a generated delta"),
 		graph:    fs.String("graph", "", "property-graph name (default: the generator's)"),
+		jsonType: fs.String("json-type", "", `physical type for the JSON scalar: "jsonb" (default) or "json" (env GOPGQL_JSON_TYPE)`),
 		noTables: fs.Bool("no-tables", false, "skip the tables half (someone else owns the tables)"),
 		noGraph:  fs.Bool("no-graph", false, "skip the property-graph half"),
 	}
+	fs.Var(f.sdlPaths, "sdl", sdlsource.FlagUsage)
+	return fs, f
 }
 
 // parse parses argv and folds the environment in underneath the flags.
@@ -230,8 +247,11 @@ func (c *commonFlags) parse(fs *flag.FlagSet, argv []string) error {
 	}
 
 	// A flag wins over the environment.
-	if *c.sdlPath == "" {
-		*c.sdlPath = os.Getenv("GOPGQL_SDL")
+	if len(*c.sdlPaths) == 0 {
+		*c.sdlPaths = sdlsource.EnvPaths(sdlsource.EnvVar)
+	}
+	if *c.jsonType == "" {
+		*c.jsonType = os.Getenv("GOPGQL_JSON_TYPE")
 	}
 	if *c.dsn == "" {
 		*c.dsn = os.Getenv("GOPGQL_DSN")
@@ -256,6 +276,11 @@ func (c *commonFlags) parse(fs *flag.FlagSet, argv []string) error {
 
 func (c *commonFlags) halves() migrate.Halves {
 	return migrate.Halves{NoTables: *c.noTables, NoGraph: *c.noGraph}
+}
+
+// buildOptions are the generator settings the flags carry.
+func (c *commonFlags) buildOptions() generator.Options {
+	return generator.Options{GraphName: *c.graph, JSONType: *c.jsonType}
 }
 
 // errHelp signals that the usage text was printed and the process should exit
@@ -285,10 +310,10 @@ func run(argv []string) error {
 		if err := f.parse(fs, rest); err != nil {
 			return skipHelp(err)
 		}
-		if *f.sdlPath == "" {
+		if len(*f.sdlPaths) == 0 {
 			return errors.New("generate needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		return generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves())
+		return generate(*f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves())
 
 	case "migrate":
 		fs, f := newFlagSet(command)
@@ -298,8 +323,8 @@ func run(argv []string) error {
 		if *f.dsn == "" {
 			return errors.New("migrate needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		if *f.sdlPath != "" {
-			if err := generate(*f.sdlPath, *f.dir, *f.name, *f.graph, f.halves()); err != nil {
+		if len(*f.sdlPaths) > 0 {
+			if err := generate(*f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves()); err != nil {
 				return err
 			}
 		}
@@ -313,13 +338,13 @@ func run(argv []string) error {
 		// Both sides are required: the check is a comparison, and with either
 		// half missing there is nothing to compare rather than a default to
 		// fall back on.
-		if *f.sdlPath == "" {
+		if len(*f.sdlPaths) == 0 {
 			return errors.New("conform needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
 		if *f.dsn == "" {
 			return errors.New("conform needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		return conformCheck(context.Background(), *f.sdlPath, *f.dsn, *f.graph)
+		return conformCheck(context.Background(), *f.sdlPaths, *f.dsn, f.buildOptions())
 
 	// --version and -v are accepted alongside the subcommand because that is
 	// what a reader reaches for first, and neither form collides with anything:
@@ -360,7 +385,8 @@ func generateClient(argv []string) error {
 	// newFlagSet: it takes neither --dir nor --dsn nor the halves flags, and a
 	// flag a subcommand cannot act on is worse than one it does not offer.
 	fs := flag.NewFlagSet("gopgql generate client", flag.ContinueOnError)
-	sdlPath := fs.String("sdl", "", "path to the SDL schema (env GOPGQL_SDL)")
+	sdlPaths := &sdlsource.PathList{}
+	fs.Var(sdlPaths, "sdl", sdlsource.FlagUsage)
 	opsDir := fs.String("operations", "", "directory of *.graphql operation documents (env GOPGQL_OPERATIONS)")
 	out := fs.String("out", "", "directory to write the generated package into (env GOPGQL_CLIENT_OUT)")
 	pkg := fs.String("package", client.DefaultPackage, "package name for the generated code")
@@ -374,8 +400,8 @@ func generateClient(argv []string) error {
 	}
 
 	// A flag wins over the environment, matching every other subcommand.
-	if *sdlPath == "" {
-		*sdlPath = os.Getenv("GOPGQL_SDL")
+	if len(*sdlPaths) == 0 {
+		*sdlPaths = sdlsource.EnvPaths(sdlsource.EnvVar)
 	}
 	if *opsDir == "" {
 		*opsDir = os.Getenv("GOPGQL_OPERATIONS")
@@ -384,7 +410,7 @@ func generateClient(argv []string) error {
 		*out = os.Getenv("GOPGQL_CLIENT_OUT")
 	}
 	switch {
-	case *sdlPath == "":
+	case len(*sdlPaths) == 0:
 		return errors.New("generate client needs a schema: pass --sdl or set GOPGQL_SDL")
 	case *opsDir == "":
 		return errors.New("generate client needs operations: pass --operations or set GOPGQL_OPERATIONS")
@@ -392,23 +418,28 @@ func generateClient(argv []string) error {
 		return errors.New("generate client needs an output directory: pass --out or set GOPGQL_CLIENT_OUT")
 	}
 
+	src, err := sdlsource.Load(*sdlPaths)
+	if err != nil {
+		return err
+	}
+
 	// Writing the generated package over its own inputs would destroy them, and
 	// the failure would look like a bad generation rather than a lost file.
-	outAbs, opsAbs, sdlAbs := abs(*out), abs(*opsDir), abs(*sdlPath)
+	// Every schema file is checked, not just the first: --sdl is repeatable, and
+	// the one that would be overwritten is as likely to be the last.
+	outAbs, opsAbs := abs(*out), abs(*opsDir)
 	if outAbs == opsAbs {
 		return fmt.Errorf("--out and --operations are the same directory (%s); "+
 			"the generated package would be written over the operations it was generated from", *out)
 	}
-	if outAbs == abs(filepath.Dir(sdlAbs)) {
-		return fmt.Errorf("--out is the directory holding --sdl (%s); "+
-			"write the generated package somewhere of its own", *out)
+	for _, p := range src.Paths {
+		if outAbs == abs(filepath.Dir(p)) {
+			return fmt.Errorf("--out is the directory holding %s (%s); "+
+				"write the generated package somewhere of its own", p, *out)
+		}
 	}
 
-	source, err := os.ReadFile(*sdlPath)
-	if err != nil {
-		return fmt.Errorf("read schema: %w", err)
-	}
-	doc, err := sdl.Parse(string(source))
+	doc, err := sdl.ParseSources(src.Sources...)
 	if err != nil {
 		return err
 	}
@@ -442,8 +473,8 @@ func abs(path string) string {
 }
 
 // generate writes the generation the SDL calls for into dir.
-func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
-	model, err := build(sdlPath, graph)
+func generate(sdlPaths []string, dir, name string, opts generator.Options, halves migrate.Halves) error {
+	model, schemaSrc, err := build(sdlPaths, opts)
 	if err != nil {
 		return err
 	}
@@ -452,7 +483,7 @@ func generate(sdlPath, dir, name, graph string, halves migrate.Halves) error {
 		return disownGuidance(err, halves)
 	}
 	if len(paths) == 0 {
-		fmt.Printf("gopgql: %s is already up to date with %s\n", dir, sdlPath)
+		fmt.Printf("gopgql: %s is already up to date with %s\n", dir, schemaSrc.Display())
 		return nil
 	}
 	for _, p := range paths {
@@ -497,17 +528,28 @@ func disownGuidance(err error, halves migrate.Halves) error {
 	}
 }
 
-// build parses and validates the SDL and returns the physical schema model.
-func build(sdlPath, graph string) (*schema.Schema, error) {
-	source, err := os.ReadFile(sdlPath)
+// build parses and validates the SDL and returns the physical schema model,
+// alongside the resolved sources so a message can name what was read.
+//
+// Every --sdl is parsed as one schema, which is what lets one property graph
+// span two PostgreSQL schemas declared in two files (gopgql#54). Splitting them
+// changes nothing about the result — the model is the same as it would be for
+// the files concatenated — so the split is free to follow the ownership
+// boundary rather than the generator's convenience.
+func build(sdlPaths []string, opts generator.Options) (*schema.Schema, *sdlsource.Schema, error) {
+	src, err := sdlsource.Load(sdlPaths)
 	if err != nil {
-		return nil, fmt.Errorf("read schema: %w", err)
+		return nil, nil, err
 	}
-	doc, err := sdl.Parse(string(source))
+	doc, err := sdl.ParseSources(src.Sources...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return generator.Build(doc, graph)
+	m, err := generator.BuildWith(doc, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return m, src, nil
 }
 
 // apply applies every pending migration in dir, in ascending version order.
@@ -574,11 +616,12 @@ func connect(dsn string) (*sql.DB, error) {
 // non-zero, so the first words of the message are what tell them apart. The
 // wrapper is added here rather than left to each error's own text, so that a
 // new failure mode cannot quietly start reading like a verdict.
-func conformCheck(ctx context.Context, sdlPath, dsn, graph string) error {
-	desired, err := build(sdlPath, graph)
+func conformCheck(ctx context.Context, sdlPaths []string, dsn string, opts generator.Options) error {
+	desired, schemaSrc, err := build(sdlPaths, opts)
 	if err != nil {
 		return fmt.Errorf("conformance check did not run: %w", err)
 	}
+	sdlPath := schemaSrc.Display()
 	// desired.GraphName is the *resolved* name — generator.Build substitutes
 	// its default for an empty --graph — so reporting and reflecting both use
 	// it rather than re-deriving the default here and risking disagreement.
