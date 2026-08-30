@@ -31,10 +31,33 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/lega4e/goga/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/shape"
+)
+
+// module is the goga module name this package's telemetry is attributed to; it
+// is the value of the goga.module attribute on every span opened below.
+const module = "exec"
+
+// instr is the instrumentation handle. It is taken at package level, which is
+// long before the process has configured telemetry: the handle resolves through
+// OpenTelemetry's globals on every use, so it starts emitting the moment the
+// composition root installs them and needs no wiring to get there.
+var instr = telemetry.For(module)
+
+// The attribute keys this package records. They are constants rather than
+// literals at the call site so that one key cannot drift into two spellings.
+const (
+	// attrShaping is the strategy the query was compiled under — the single
+	// fact that decides whether the nesting happened in Go or in PostgreSQL.
+	attrShaping = attribute.Key("gopgql.shaping")
+	// attrRows is the number of rows the statement returned.
+	attrRows = attribute.Key("gopgql.rows")
 )
 
 // Query executes a compiled query and returns the nested GraphQL response.
@@ -48,18 +71,35 @@ import (
 // already assembled and is decoded. The signature is the same either way, so
 // every caller — the integration suites, mcp — keeps working and inherits
 // whichever strategy its compiler was configured with (design D1).
-func Query(ctx context.Context, db Querier, cq *compiler.Compiled) (map[string]any, error) {
+//
+// The result parameters are named because the deferred closer observes the
+// error *variable*: with unnamed results a `return nil, err` would leave the
+// local at nil and the span would record success on every failure.
+func Query(ctx context.Context, db Querier, cq *compiler.Compiled) (_ map[string]any, err error) {
+	// Before the span: a nil compiled query has no strategy to attribute an
+	// operation to, and there is no operation — the call never reaches a
+	// database.
 	if cq == nil {
 		return nil, fmt.Errorf("exec: nil compiled query")
 	}
+
+	ctx, end := instr.Start(ctx, "Query", attrShaping.String(cq.Shaping.String()))
+	defer func() { end(err) }()
+
+	// Every path below assigns err rather than returning an expression
+	// directly, for the reason the comment above gives.
 	if cq.Shaping == compiler.SQLSide {
-		return queryShaped(ctx, db, cq)
+		var shaped map[string]any
+		shaped, err = queryShaped(ctx, db, cq)
+		return shaped, err
 	}
-	flat, err := rowsOf(ctx, db, cq.SQL, cq.Columns, cq.Args...)
+	var flat []map[string]any
+	flat, err = rowsOf(ctx, db, cq.SQL, cq.Columns, cq.Args...)
 	if err != nil {
 		return nil, err
 	}
-	return shape.Rows(cq.Projection, flat)
+	response, err := shape.Rows(cq.Projection, flat)
+	return response, err
 }
 
 // queryShaped runs an SQL-side-shaped query, whose result is one row of one text
@@ -115,8 +155,20 @@ func queryShaped(ctx context.Context, db Querier, cq *compiler.Compiled) (map[st
 // handle has to be able to name them, which the pgx adapter can and a portable
 // cursor cannot. Use [Query] with a compiled query to read through a portable
 // handle — a compiled query carries its own column list.
-func Rows(ctx context.Context, db Querier, sql string, args ...any) ([]map[string]any, error) {
-	return rowsOf(ctx, db, sql, nil, args...)
+//
+// The statement text is deliberately not an attribute: it is unbounded, and its
+// literals are the caller's data. The row count is, because "how much came
+// back" is the question a slow read raises.
+func Rows(ctx context.Context, db Querier, sql string, args ...any) (rows []map[string]any, err error) {
+	ctx, end := instr.Start(ctx, "Rows")
+	defer func() { end(err) }()
+
+	rows, err = rowsOf(ctx, db, sql, nil, args...)
+	if err != nil {
+		return nil, err
+	}
+	trace.SpanFromContext(ctx).SetAttributes(attrRows.Int(len(rows)))
+	return rows, nil
 }
 
 // rowsOf runs a statement and keys each row by its output column names, taking
@@ -225,7 +277,15 @@ type PoolOption func(*pgxpool.Config)
 //
 // The ping means an unreachable database is reported when the process starts,
 // not on every call it would otherwise fail.
-func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (*pgxpool.Pool, error) {
+//
+// The open is instrumented because it is the one place gopgql talks to a
+// database before any query does: a span here separates "the database was
+// unreachable at startup" from "a query failed", which is otherwise the same
+// connection error seen twice.
+func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (_ *pgxpool.Pool, err error) {
+	ctx, end := instr.Start(ctx, "OpenReadOnly")
+	defer func() { end(err) }()
+
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("exec: parse connection string: %w", err)
@@ -242,7 +302,10 @@ func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (*pgxpool
 	if err != nil {
 		return nil, fmt.Errorf("exec: open pool: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
+	// Assigned to the named result rather than shadowed with `if err := …`: a
+	// shadow here would leave the deferred closer looking at a nil err and
+	// recording an unreachable database as a successful open.
+	if err = pool.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("exec: connect to the database: %w", err)
 	}

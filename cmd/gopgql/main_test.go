@@ -261,3 +261,16 @@ func TestVersionReportsBuildInfo(t *testing.T) {
 func TestUsageDocumentsVersion(t *testing.T) {
 	assert.Contains(t, usage, "version    Print the version, commit and build date")
 }
+
+// TestObservedCommands pins which commands establish telemetry. The three that
+// read a schema, write a directory or reach a database do; `version` and `help`
+// answer from memory, and building three providers to print one line would make
+// the fastest command the slowest.
+func TestObservedCommands(t *testing.T) {
+	for _, command := range []string{"generate", "migrate", "conform"} {
+		assert.True(t, observed(command), "%s does work worth observing", command)
+	}
+	for _, command := range []string{"version", "--version", "-v", "help", "--help", "nonsense"} {
+		assert.False(t, observed(command), "%s does no work to observe", command)
+	}
+}

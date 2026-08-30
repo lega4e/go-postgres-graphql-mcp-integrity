@@ -49,7 +49,26 @@ type typenameSite struct {
 // meta-fields never reaches the database (design D2). Everything else compiles
 // to SQL with its values bound as parameters, executes, and is shaped by the
 // same code path the library uses.
-func (s *Server) Query(ctx context.Context, query string, vars map[string]any, format string) (string, error) {
+//
+// This is the span the query tool is measured by, and the parent of the
+// exec.Query span underneath it: the difference between the two is what parsing,
+// compiling and shaping cost, which is the only way to tell a slow database from
+// a slow compiler. The result parameters are named because the deferred closer
+// observes the error *variable*; the work is delegated to an unexported method
+// so that none of its many `return` statements can bypass that assignment and
+// record a failure as a success.
+//
+// The operation text is not an attribute. It is unbounded, and its literals are
+// the caller's data.
+func (s *Server) Query(ctx context.Context, query string, vars map[string]any, format string) (out string, err error) {
+	ctx, end := instr.Start(ctx, "Query", attrFormat.String(defaultFormat(format, FormatJSON)))
+	defer func() { end(err) }()
+
+	out, err = s.query(ctx, query, vars, format)
+	return out, err
+}
+
+func (s *Server) query(ctx context.Context, query string, vars map[string]any, format string) (string, error) {
 	switch format {
 	case "", FormatJSON:
 		format = FormatJSON

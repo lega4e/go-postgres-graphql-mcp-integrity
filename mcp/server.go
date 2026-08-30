@@ -27,11 +27,31 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/lega4e/goga/telemetry"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/lega4e/gopgql/compiler"
 	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/sdl"
+)
+
+// module is the goga module name this package's telemetry is attributed to, and
+// instr the handle it is emitted through. The handle resolves through
+// OpenTelemetry's globals on every use, so taking it at package level — before
+// the composition root has configured anything — is deliberate and safe.
+const module = "mcp"
+
+var instr = telemetry.For(module)
+
+// The attribute keys this package records. Constants, not literals at the call
+// site, so one key cannot drift into two spellings.
+const (
+	// attrFormat is the result format the caller asked for.
+	attrFormat = attribute.Key("gopgql.format")
+	// attrIntrospectType is the type name an introspect call drilled into, and
+	// is absent from the overview and full-schema calls.
+	attrIntrospectType = attribute.Key("gopgql.introspect.type")
 )
 
 // The tool names the server advertises.
@@ -205,12 +225,12 @@ type queryArgs struct {
 	Format    string         `json:"format"`
 }
 
-func (s *Server) handleIntrospect(_ context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+func (s *Server) handleIntrospect(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
 	var args introspectArgs
 	if err := decodeArgs(req.Params.Arguments, &args); err != nil {
 		return toolError(err), nil
 	}
-	out, err := s.Introspect(args.Type, args.Full, args.Format)
+	out, err := s.Introspect(ctx, args.Type, args.Full, args.Format)
 	if err != nil {
 		return toolError(err), nil
 	}
@@ -235,7 +255,26 @@ func (s *Server) handleQuery(ctx context.Context, req *mcpsdk.CallToolRequest) (
 // Introspect answers the introspect tool: it issues one of four standard
 // introspection queries against the loaded schema. It never touches the
 // database.
-func (s *Server) Introspect(typeName string, full bool, format string) (string, error) {
+//
+// The context is the calling tool invocation's, so an introspection is a child
+// of the call that asked for it rather than a trace of its own.
+//
+// The result parameters are named because the deferred closer observes the
+// error *variable*; the work itself is delegated so that no `return` inside it
+// can bypass the assignment.
+func (s *Server) Introspect(ctx context.Context, typeName string, full bool, format string) (out string, err error) {
+	attrs := []attribute.KeyValue{attrFormat.String(defaultFormat(format, FormatIntrospection))}
+	if typeName != "" {
+		attrs = append(attrs, attrIntrospectType.String(typeName))
+	}
+	ctx, end := instr.Start(ctx, "Introspect", attrs...)
+	defer func() { end(err) }()
+
+	out, err = s.introspect(ctx, typeName, full, format)
+	return out, err
+}
+
+func (s *Server) introspect(ctx context.Context, typeName string, full bool, format string) (string, error) {
 	switch format {
 	case "", FormatIntrospection:
 	case FormatSDL:
@@ -246,12 +285,21 @@ func (s *Server) Introspect(typeName string, full bool, format string) (string, 
 
 	switch {
 	case typeName != "":
-		return s.Query(context.Background(), typeDetailQuery, map[string]any{"name": typeName}, FormatJSON)
+		return s.Query(ctx, typeDetailQuery, map[string]any{"name": typeName}, FormatJSON)
 	case full:
-		return s.Query(context.Background(), FullIntrospectionQuery, nil, FormatJSON)
+		return s.Query(ctx, FullIntrospectionQuery, nil, FormatJSON)
 	default:
-		return s.Query(context.Background(), overviewQuery, nil, FormatJSON)
+		return s.Query(ctx, overviewQuery, nil, FormatJSON)
 	}
+}
+
+// defaultFormat names the format an empty argument selects, so that a span
+// records the format that ran rather than the absence of one.
+func defaultFormat(format, fallback string) string {
+	if format == "" {
+		return fallback
+	}
+	return format
 }
 
 // decodeArgs unmarshals the raw tool arguments, rejecting anything the schema
