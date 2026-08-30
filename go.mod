@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/cucumber/godog v0.15.1
 	github.com/dbos-inc/dbos-transact-golang v1.0.0
-	github.com/lega4e/goga v0.0.0-20260830164044-73b0339a61fb
+	github.com/lega4e/goga v0.0.0-20260830180651-593afc77da68
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pressly/goose/v3 v3.27.3
