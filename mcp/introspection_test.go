@@ -31,7 +31,11 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("parse SDL: %v", err)
 	}
-	return New(doc, testSDL, nil)
+	s, err := New(doc, testSDL, nil)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return s
 }
 
 func introspect(t *testing.T, s *Server, query string) map[string]any {

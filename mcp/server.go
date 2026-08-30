@@ -19,14 +19,37 @@
 //
 // The compiled SQL is not part of either tool's result: the server connects to
 // Postgres, executes, and returns the data (design D2a).
+//
+// # The tools ride on goga/mcp
+//
+// Both tools are registered through github.com/lega4e/goga/mcp.AddTool,
+// which is that module's only route onto the wrapped SDK server. Everything a
+// tool call needs around it comes with the route rather than being written
+// here: a goga.mcp.tool span per call, a bound on how long one may run, a
+// panic recovered into a result instead of a dead process, and the caller's
+// trace context restored from the request's _meta. The operation spans this
+// package opens — Introspect, Query — sit inside that one, so a trace reads
+// tool call, then what the tool did, then what the database did.
+//
+// A tool here returns an ordinary error and goga reports it in band, with
+// IsError set on the result, which is what the specification asks for: the
+// model reads the failure and corrects itself rather than seeing a server that
+// looks broken.
+//
+// Each tool's argument and result types are plain Go structs and the SDK
+// derives their JSON schemas, so the schema a client reads and the decoding
+// the tool runs cannot drift. That is also why both results are structs: goga
+// derives the call's structured content from the tool's output value, so a
+// pre-rendered document would arrive as one JSON-escaped string.
 package mcp
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
+	gogamcp "github.com/lega4e/goga/mcp"
 	"github.com/lega4e/goga/telemetry"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -73,7 +96,7 @@ type Server struct {
 	db        exec.Querier
 	comp      *compiler.Compiler
 	intro     *introspector
-	mcp       *mcpsdk.Server
+	mcp       *gogamcp.Server
 }
 
 type config struct {
@@ -100,10 +123,19 @@ func WithCompilerOptions(opts ...compiler.Option) Option {
 // New builds a server over a parsed SDL document and a database handle, and
 // registers both tools. sdlSource is the verbatim document, returned by the
 // introspect tool's SDL format.
-func New(doc *sdl.Document, sdlSource string, db exec.Querier, opts ...Option) *Server {
+//
+// It returns an error because goga/mcp validates its options at construction:
+// a server that cannot be built is a startup failure, not a tool call that
+// fails later.
+func New(doc *sdl.Document, sdlSource string, db exec.Querier, opts ...Option) (*Server, error) {
 	cfg := config{name: "gopgql", version: "dev"}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+
+	m, err := gogamcp.New(gogamcp.WithName(cfg.name), gogamcp.WithVersion(cfg.version))
+	if err != nil {
+		return nil, fmt.Errorf("gopgql/mcp: %w", err)
 	}
 
 	s := &Server{
@@ -112,20 +144,35 @@ func New(doc *sdl.Document, sdlSource string, db exec.Querier, opts ...Option) *
 		db:        db,
 		comp:      compiler.New(doc, cfg.compilerOpts...),
 		intro:     newIntrospector(doc, sdlSource),
+		mcp:       m,
 	}
-	s.mcp = mcpsdk.NewServer(&mcpsdk.Implementation{Name: cfg.name, Version: cfg.version}, nil)
 	s.register()
-	return s
+	return s, nil
 }
 
-// MCPServer returns the underlying MCP server, for a caller that wants to add
-// middleware or drive the connection itself.
-func (s *Server) MCPServer() *mcpsdk.Server { return s.mcp }
+// Handler serves this server over streamable HTTP, for a process that mounts
+// MCP beside its other routes on one port — which is what cmd/gopgql-mcp does
+// under --transport http, handing the mux to goga/serve.
+func (s *Server) Handler() http.Handler { return s.mcp.Handler() }
 
-// Run serves MCP over the transport until the context is cancelled or the peer
+// Run serves MCP over goga's configured transport — stdio, which is how an
+// agent spawns a server it owns — until the context is cancelled or the peer
 // disconnects.
-func (s *Server) Run(ctx context.Context, t mcpsdk.Transport) error {
-	return s.mcp.Run(ctx, t)
+func (s *Server) Run(ctx context.Context) error { return s.mcp.Run(ctx) }
+
+// Connect serves one session over a transport the caller already holds, and
+// returns once the session is established.
+//
+// It is the one place gopgql reaches through goga/mcp's escape hatch, and it
+// is here because goga resolves a transport by *name* from a registry: that
+// covers stdio and a listening transport, and has nothing to say about an
+// in-process transport pair a caller constructed itself, which is what the
+// integration suite drives the server with. Nothing is registered through the
+// escape hatch — both tools go on through goga's AddTool — so the span, the
+// timeout and the panic guard apply to a session opened this way exactly as
+// they do to one goga opened.
+func (s *Server) Connect(ctx context.Context, t mcpsdk.Transport) (*mcpsdk.ServerSession, error) {
+	return s.mcp.SDK().Connect(ctx, t, nil)
 }
 
 const introspectDescription = `Discover what this GraphQL schema exposes, before querying it.
@@ -159,102 +206,107 @@ and finally select its fields:
 
 format: "json" (default) returns the nested response. format: "markdown" renders a table instead, and is refused for an operation that selects a relationship, because a table cannot represent nesting.`
 
-// register declares both tools with the input schemas and descriptions a client
-// needs to call them without guessing — including how to introspect, so an
-// agent that has only the tool list can still reach a valid data query.
+// register declares both tools on goga/mcp, which is what attaches the span,
+// the per-tool timeout and the panic guard to every call — and it is the only
+// route onto the wrapped server, so none of the three can be skipped.
+//
+// The schemas are no longer written out here: the SDK derives each one from
+// the tool's Go argument type, so the declaration a client reads and the
+// decoding the tool runs on cannot drift apart. The descriptions stay, because
+// nothing can derive those — including how to introspect, so an agent that has
+// only the tool list can still reach a valid data query.
 func (s *Server) register() {
-	s.mcp.AddTool(&mcpsdk.Tool{
-		Name:        ToolIntrospect,
-		Description: introspectDescription,
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"type": map[string]any{
-					"type":        "string",
-					"description": "Introspect this type by name (`__type(name:)`). Omit for the schema overview.",
-				},
-				"full": map[string]any{
-					"type":        "boolean",
-					"description": "Return the complete introspection result rather than the overview.",
-				},
-				"format": map[string]any{
-					"type":        "string",
-					"enum":        []any{FormatIntrospection, FormatSDL},
-					"description": "`introspection` (default) returns the introspection result; `sdl` returns the schema document.",
-				},
-			},
-			"additionalProperties": false,
-		},
-	}, s.handleIntrospect)
-
-	s.mcp.AddTool(&mcpsdk.Tool{
-		Name:        ToolQuery,
-		Description: queryDescription,
-		InputSchema: map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"query": map[string]any{
-					"type":        "string",
-					"description": "The GraphQL query to execute. Introspection meta-fields are answered from the schema.",
-				},
-				"variables": map[string]any{
-					"type":        "object",
-					"description": "Values for the operation's variables. They are bound as SQL parameters, never interpolated.",
-				},
-				"format": map[string]any{
-					"type":        "string",
-					"enum":        []any{FormatJSON, FormatMarkdown},
-					"description": "`json` (default) returns the nested response; `markdown` renders a table, and is refused for nested selections.",
-				},
-			},
-			"required":             []any{"query"},
-			"additionalProperties": false,
-		},
-	}, s.handleQuery)
+	gogamcp.AddTool(s.mcp, ToolIntrospect, introspectDescription, s.introspectTool)
+	gogamcp.AddTool(s.mcp, ToolQuery, queryDescription, s.queryTool)
 }
 
-type introspectArgs struct {
-	Type   string `json:"type"`
-	Full   bool   `json:"full"`
-	Format string `json:"format"`
+// IntrospectInput is the introspect tool's argument object.
+//
+// The arguments are ranked rather than exclusive — see introspectDescription —
+// so a caller supplying more than one is answered rather than refused.
+type IntrospectInput struct {
+	// Type drills into one type by name (`__type(name:)`).
+	Type string `json:"type,omitempty" jsonschema:"introspect this type by name (__type(name:)); omit for the schema overview"`
+	// Full asks for the complete introspection result.
+	Full bool `json:"full,omitempty" jsonschema:"return the complete introspection result rather than the overview"`
+	// Format selects the introspection result or the SDL document.
+	Format string `json:"format,omitempty" jsonschema:"introspection (default) returns the introspection result; sdl returns the schema document"`
 }
 
-type queryArgs struct {
-	Query     string         `json:"query"`
-	Variables map[string]any `json:"variables"`
-	Format    string         `json:"format"`
+// IntrospectOutput is the introspect tool's result. Exactly one field is set:
+// the format decides which.
+//
+// It is a struct rather than the rendered string the tool used to return
+// because goga/mcp derives a tool's result from its Go output type — the SDK
+// puts it in the call's structured content and mirrors it as text — so a
+// pre-rendered document would reach the caller as one JSON-escaped string
+// instead of as a result it can read.
+type IntrospectOutput struct {
+	// Schema is the introspection result, for the introspection format.
+	Schema map[string]any `json:"schema,omitempty" jsonschema:"the GraphQL introspection result"`
+	// SDL is the schema document, for the sdl format.
+	SDL string `json:"sdl,omitempty" jsonschema:"the schema as an SDL document, returned for format sdl"`
 }
 
-func (s *Server) handleIntrospect(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
-	var args introspectArgs
-	if err := decodeArgs(req.Params.Arguments, &args); err != nil {
-		return toolError(err), nil
-	}
-	out, err := s.Introspect(ctx, args.Type, args.Full, args.Format)
+// QueryInput is the query tool's argument object.
+type QueryInput struct {
+	// Query is the GraphQL operation to run. It is the one required argument.
+	Query string `json:"query" jsonschema:"the GraphQL query to execute; introspection meta-fields are answered from the schema"`
+	// Variables carries the operation's values, bound as SQL parameters.
+	Variables map[string]any `json:"variables,omitempty" jsonschema:"values for the operation's variables; they are bound as SQL parameters, never interpolated"`
+	// Format selects the nested response or a markdown table.
+	Format string `json:"format,omitempty" jsonschema:"json (default) returns the nested response; markdown renders a table, and is refused for nested selections"`
+}
+
+// QueryOutput is the query tool's result. Exactly one field is set: the format
+// decides which. See [IntrospectOutput] for why it is a struct.
+type QueryOutput struct {
+	// Data is the shaped GraphQL response, for the json format.
+	Data map[string]any `json:"data,omitempty" jsonschema:"the nested GraphQL response, keyed by response key"`
+	// Table is the rendered table, for the markdown format.
+	Table string `json:"table,omitempty" jsonschema:"the result rendered as a markdown table, returned for format markdown"`
+}
+
+// introspectTool is the introspect tool.
+//
+// It returns an ordinary error: goga/mcp converts one into an in-band tool
+// result with IsError set, which is what the specification asks for and what
+// lets the model read the failure and correct itself.
+func (s *Server) introspectTool(ctx context.Context, in IntrospectInput) (IntrospectOutput, error) {
+	res, err := s.introspectResult(ctx, in.Type, in.Full, in.Format)
 	if err != nil {
-		return toolError(err), nil
+		return IntrospectOutput{}, err
 	}
-	return toolText(out), nil
+	return IntrospectOutput{Schema: res.data, SDL: res.text}, nil
 }
 
-func (s *Server) handleQuery(ctx context.Context, req *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
-	var args queryArgs
-	if err := decodeArgs(req.Params.Arguments, &args); err != nil {
-		return toolError(err), nil
+// queryTool is the query tool. Like [Server.introspectTool] it reports a
+// failure as an ordinary error.
+func (s *Server) queryTool(ctx context.Context, in QueryInput) (QueryOutput, error) {
+	if in.Query == "" {
+		return QueryOutput{}, errors.New("gopgql/mcp: query is required")
 	}
-	if args.Query == "" {
-		return toolError(fmt.Errorf("gopgql/mcp: query is required")), nil
-	}
-	out, err := s.Query(ctx, args.Query, args.Variables, args.Format)
+	res, err := s.queryResult(ctx, in.Query, in.Variables, in.Format)
 	if err != nil {
-		return toolError(err), nil
+		return QueryOutput{}, err
 	}
-	return toolText(out), nil
+	return QueryOutput{Data: res.data, Table: res.text}, nil
 }
 
-// Introspect answers the introspect tool: it issues one of four standard
-// introspection queries against the loaded schema. It never touches the
-// database.
+// Introspect answers the introspect tool in its rendered form: it issues one
+// of four standard introspection queries against the loaded schema and returns
+// the result as text. It never touches the database.
+func (s *Server) Introspect(ctx context.Context, typeName string, full bool, format string) (string, error) {
+	res, err := s.introspectResult(ctx, typeName, full, format)
+	if err != nil {
+		return "", err
+	}
+	return res.render()
+}
+
+// introspectResult is [Server.Introspect] without the rendering, and is what
+// the tool calls: goga/mcp turns a tool's Go output value into the call's
+// structured content, so the tool wants the response rather than a document.
 //
 // The context is the calling tool invocation's, so an introspection is a child
 // of the call that asked for it rather than a trace of its own.
@@ -262,7 +314,7 @@ func (s *Server) handleQuery(ctx context.Context, req *mcpsdk.CallToolRequest) (
 // The result parameters are named because the deferred closer observes the
 // error *variable*; the work itself is delegated so that no `return` inside it
 // can bypass the assignment.
-func (s *Server) Introspect(ctx context.Context, typeName string, full bool, format string) (out string, err error) {
+func (s *Server) introspectResult(ctx context.Context, typeName string, full bool, format string) (res result, err error) {
 	attrs := []attribute.KeyValue{attrFormat.String(defaultFormat(format, FormatIntrospection))}
 	if typeName != "" {
 		attrs = append(attrs, attrIntrospectType.String(typeName))
@@ -270,26 +322,26 @@ func (s *Server) Introspect(ctx context.Context, typeName string, full bool, for
 	ctx, end := instr.Start(ctx, "Introspect", attrs...)
 	defer func() { end(err) }()
 
-	out, err = s.introspect(ctx, typeName, full, format)
-	return out, err
+	res, err = s.introspect(ctx, typeName, full, format)
+	return res, err
 }
 
-func (s *Server) introspect(ctx context.Context, typeName string, full bool, format string) (string, error) {
+func (s *Server) introspect(ctx context.Context, typeName string, full bool, format string) (result, error) {
 	switch format {
 	case "", FormatIntrospection:
 	case FormatSDL:
-		return s.sdlSource, nil
+		return result{text: s.sdlSource}, nil
 	default:
-		return "", fmt.Errorf("gopgql/mcp: unknown format %q; supported formats are %q and %q", format, FormatIntrospection, FormatSDL)
+		return result{}, fmt.Errorf("gopgql/mcp: unknown format %q; supported formats are %q and %q", format, FormatIntrospection, FormatSDL)
 	}
 
 	switch {
 	case typeName != "":
-		return s.Query(ctx, typeDetailQuery, map[string]any{"name": typeName}, FormatJSON)
+		return s.queryResult(ctx, typeDetailQuery, map[string]any{"name": typeName}, FormatJSON)
 	case full:
-		return s.Query(ctx, FullIntrospectionQuery, nil, FormatJSON)
+		return s.queryResult(ctx, FullIntrospectionQuery, nil, FormatJSON)
 	default:
-		return s.Query(ctx, overviewQuery, nil, FormatJSON)
+		return s.queryResult(ctx, overviewQuery, nil, FormatJSON)
 	}
 }
 
@@ -300,32 +352,6 @@ func defaultFormat(format, fallback string) string {
 		return fallback
 	}
 	return format
-}
-
-// decodeArgs unmarshals the raw tool arguments, rejecting anything the schema
-// does not declare so a typo surfaces as an error rather than a silent default.
-func decodeArgs(raw json.RawMessage, into any) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(into); err != nil {
-		return fmt.Errorf("gopgql/mcp: invalid arguments: %w", err)
-	}
-	return nil
-}
-
-func toolText(text string) *mcpsdk.CallToolResult {
-	return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: text}}}
-}
-
-// toolError reports a failure as a tool error rather than a protocol error, so
-// the agent sees the message and can correct itself (design D5).
-func toolError(err error) *mcpsdk.CallToolResult {
-	res := &mcpsdk.CallToolResult{}
-	res.SetError(err)
-	return res
 }
 
 // overviewQuery is the default introspection: every root field with its

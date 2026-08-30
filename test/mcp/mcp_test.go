@@ -409,10 +409,14 @@ func (st *scenarioState) connectClient(ctx context.Context) error {
 		return err
 	}
 	st.ro = pool
-	st.server = gopgqlmcp.New(st.doc, st.sdlSource, exec.PgxQuerier(pool), gopgqlmcp.WithVersion("test"))
+	srv, err := gopgqlmcp.New(st.doc, st.sdlSource, exec.PgxQuerier(pool), gopgqlmcp.WithVersion("test"))
+	if err != nil {
+		return fmt.Errorf("new server: %w", err)
+	}
+	st.server = srv
 
 	serverTransport, clientTransport := mcpsdk.NewInMemoryTransports()
-	if _, err := st.server.MCPServer().Connect(ctx, serverTransport, nil); err != nil {
+	if _, err := st.server.Connect(ctx, serverTransport); err != nil {
 		return fmt.Errorf("connect server: %w", err)
 	}
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "gopgql-suite", Version: "test"}, nil)
@@ -555,7 +559,11 @@ func (st *scenarioState) call(ctx context.Context, session *mcpsdk.ClientSession
 		return fmt.Errorf("call %s: %w", tool, err)
 	}
 	st.result = res
-	st.text = resultText(res)
+	text, err := payloadText(res)
+	if err != nil {
+		return err
+	}
+	st.text = text
 	return nil
 }
 
@@ -608,6 +616,42 @@ func resultText(res *mcpsdk.CallToolResult) string {
 		}
 	}
 	return b.String()
+}
+
+// payloadText is what the scenarios assert against: the tool's payload, taken
+// out of the structured envelope the tools now answer in.
+//
+// goga/mcp derives a tool result from the tool's Go output type — the SDK
+// marshals it into the call's structured content and mirrors that JSON as the
+// text content — so a tool can no longer hand a client a bare document. Both
+// tools therefore return a small struct naming which of their formats
+// answered, and this unwraps it once here rather than in every step. A failed
+// call is left alone: an in-band error carries the message as plain text.
+func payloadText(res *mcpsdk.CallToolResult) (string, error) {
+	text := resultText(res)
+	if res.IsError {
+		return text, nil
+	}
+	var envelope struct {
+		Data   json.RawMessage `json:"data"`
+		Table  string          `json:"table"`
+		Schema json.RawMessage `json:"schema"`
+		SDL    string          `json:"sdl"`
+	}
+	if err := json.Unmarshal([]byte(text), &envelope); err != nil {
+		return "", fmt.Errorf("the tool result is not the structured envelope: %w\n%s", err, text)
+	}
+	switch {
+	case len(envelope.Data) > 0:
+		return string(envelope.Data), nil
+	case len(envelope.Schema) > 0:
+		return string(envelope.Schema), nil
+	case envelope.Table != "":
+		return envelope.Table, nil
+	case envelope.SDL != "":
+		return envelope.SDL, nil
+	}
+	return text, nil
 }
 
 // --- discovery assertions --------------------------------------------------

@@ -26,8 +26,10 @@
 // supplied through the environment — an agent's MCP configuration is not a good
 // place for a password.
 //
-// Both tools are traced. Nothing is exported unless the environment carries
-// OpenTelemetry configuration — an OTLP exporter failing every second on a
+// Both tools are traced by github.com/lega4e/goga/mcp, which wraps every
+// tool call in a span, bounds how long it may run, and contains a panicking
+// tool rather than losing the process. Nothing is exported unless the
+// environment carries OpenTelemetry configuration — an OTLP exporter failing every second on a
 // machine with no collector would write to the same stderr the server's
 // diagnostics use — so set OTEL_EXPORTER_OTLP_ENDPOINT (or any other OTEL_
 // variable) to turn it on. See internal/telemetry.
@@ -52,7 +54,6 @@ import (
 
 	"github.com/lega4e/goga/serve"
 	"github.com/jackc/pgx/v5/pgxpool"
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/internal/sdlsource"
@@ -176,14 +177,19 @@ func run(argv []string) error {
 
 	// The schema the server serves over MCP is the documents together, which is
 	// the same text a single --sdl would have held.
-	srv := mcp.New(doc, src.Text, exec.PgxQuerier(pool), mcp.WithVersion(version))
+	srv, err := mcp.New(doc, src.Text, exec.PgxQuerier(pool), mcp.WithVersion(version))
+	if err != nil {
+		return err
+	}
 
 	if *transport == transportHTTP {
 		return serveHTTP(ctx, srv, pool, *addr, *path)
 	}
-	// A closed stdin is how an MCP client says goodbye, and a cancelled context
-	// is how a signal does; neither is a failure to report.
-	if err := srv.Run(ctx, &mcpsdk.StdioTransport{}); err != nil &&
+	// Stdio is goga/mcp's default transport, so this needs no wiring and no
+	// registry. A closed stdin is how an MCP client says goodbye, and a
+	// cancelled context is how a signal does; neither is a failure to report,
+	// and goga wraps what it returns, so errors.Is still sees both.
+	if err := srv.Run(ctx); err != nil &&
 		!errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
 		return err
 	}
@@ -222,15 +228,18 @@ const (
 // newMux builds this command's routing: the streamable HTTP transport, mounted
 // at path.
 //
+// The handler is goga/mcp's, which is the mounted case that module documents:
+// [mcp.Server.Handler] serves the streamable transport, and the listener, its
+// timeouts and its drain stay with goga/serve below. goga's own
+// WithTransport/Run path is deliberately not used here — it is for a process
+// whose only surface is MCP, and this one also serves the probes.
+//
 // It is the whole of gopgql's HTTP handler, and goga/serve takes it as an
 // http.Handler without knowing what is on it. It is a function so that the
 // tests drive the same routing the binary serves rather than a copy of it.
 func newMux(srv *mcp.Server, path string) *http.ServeMux {
-	handler := mcpsdk.NewStreamableHTTPHandler(
-		func(*http.Request) *mcpsdk.Server { return srv.MCPServer() }, nil)
-
 	mux := http.NewServeMux()
-	mux.Handle(path, handler)
+	mux.Handle(path, srv.Handler())
 	return mux
 }
 
