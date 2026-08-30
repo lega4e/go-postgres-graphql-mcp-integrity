@@ -206,7 +206,7 @@ func TestIntrospectToolModes(t *testing.T) {
 	s := newTestServer(t)
 
 	t.Run("overview omits field definitions", func(t *testing.T) {
-		out, err := s.Introspect("", false, "")
+		out, err := s.Introspect(t.Context(), "", false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -230,7 +230,7 @@ func TestIntrospectToolModes(t *testing.T) {
 	})
 
 	t.Run("type detail", func(t *testing.T) {
-		out, err := s.Introspect("Person", false, "")
+		out, err := s.Introspect(t.Context(), "Person", false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -240,7 +240,7 @@ func TestIntrospectToolModes(t *testing.T) {
 	})
 
 	t.Run("full", func(t *testing.T) {
-		out, err := s.Introspect("", true, "")
+		out, err := s.Introspect(t.Context(), "", true, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -250,7 +250,7 @@ func TestIntrospectToolModes(t *testing.T) {
 	})
 
 	t.Run("sdl", func(t *testing.T) {
-		out, err := s.Introspect("", false, FormatSDL)
+		out, err := s.Introspect(t.Context(), "", false, FormatSDL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestIntrospectToolModes(t *testing.T) {
 	})
 
 	t.Run("unknown format", func(t *testing.T) {
-		if _, err := s.Introspect("", false, "yaml"); err == nil {
+		if _, err := s.Introspect(t.Context(), "", false, "yaml"); err == nil {
 			t.Error("an unknown format must be rejected")
 		}
 	})

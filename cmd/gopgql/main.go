@@ -17,6 +17,9 @@
 // history every time, and goose skips the versions it has already applied, so
 // running it repeatedly against the same database is a no-op.
 //
+// Every command is traced. Nothing is exported unless the environment carries
+// OpenTelemetry configuration; see internal/telemetry.
+//
 // `conform` reads the property graph back out of the database and reports how
 // it differs from the SDL. Everything else here reasons from the SDL alone and
 // so cannot notice that the database stopped agreeing with it (SPEC.md §3.1);
@@ -36,6 +39,7 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
+	gogatel "github.com/lega4e/goga/telemetry"
 	// Registers the "pgx" database/sql driver goose runs through.
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -45,6 +49,7 @@ import (
 	"github.com/lega4e/gopgql/generator"
 	"github.com/lega4e/gopgql/generator/client"
 	"github.com/lega4e/gopgql/internal/sdlsource"
+	"github.com/lega4e/gopgql/internal/telemetry"
 	"github.com/lega4e/gopgql/migrate"
 	"github.com/lega4e/gopgql/schema"
 	"github.com/lega4e/gopgql/sdl"
@@ -151,6 +156,14 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
+
+// module is the goga module name this command's telemetry is attributed to, and
+// instr the handle it is emitted through. The handle resolves through
+// OpenTelemetry's globals on every use, so taking it at package level — long
+// before run has configured them — is deliberate and safe.
+const module = "cli"
+
+var instr = gogatel.For(module)
 
 // versionLine renders the build information as the single line the version
 // query prints. gopgql-mcp prints the same shape, so a bug report naming either
@@ -294,6 +307,24 @@ func run(argv []string) error {
 	}
 	command, rest := argv[0], argv[1:]
 
+	// One context for the whole command, and telemetry established over it
+	// before any of them runs. `version` and `help` are excluded on purpose:
+	// they answer from memory, and building three providers to print one line
+	// would be the slowest part of the fastest command.
+	//
+	// The cleanup is deferred here rather than inside each subcommand so the
+	// flush happens after the command's own defers — the pool closes, then
+	// telemetry flushes. Nothing is exported unless the environment asks for
+	// it; see internal/telemetry.
+	ctx := context.Background()
+	if observed(command) {
+		cleanup, err := telemetry.Setup(ctx, "gopgql", version)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+	}
+
 	// A second word is read only for `generate`, which is the only subcommand
 	// that has one.
 	if command == "generate" && len(rest) > 0 && rest[0] == "client" {
@@ -313,7 +344,7 @@ func run(argv []string) error {
 		if len(*f.sdlPaths) == 0 {
 			return errors.New("generate needs a schema: pass --sdl or set GOPGQL_SDL")
 		}
-		return generate(*f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves())
+		return generate(ctx, *f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves())
 
 	case "migrate":
 		fs, f := newFlagSet(command)
@@ -324,11 +355,11 @@ func run(argv []string) error {
 			return errors.New("migrate needs a database: pass --dsn or set GOPGQL_DSN")
 		}
 		if len(*f.sdlPaths) > 0 {
-			if err := generate(*f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves()); err != nil {
+			if err := generate(ctx, *f.sdlPaths, *f.dir, *f.name, f.buildOptions(), f.halves()); err != nil {
 				return err
 			}
 		}
-		return apply(*f.dir, *f.dsn)
+		return apply(ctx, *f.dir, *f.dsn)
 
 	case "conform":
 		fs, f := newFlagSet(command)
@@ -344,7 +375,7 @@ func run(argv []string) error {
 		if *f.dsn == "" {
 			return errors.New("conform needs a database: pass --dsn or set GOPGQL_DSN")
 		}
-		return conformCheck(context.Background(), *f.sdlPaths, *f.dsn, f.buildOptions())
+		return conformCheck(ctx, *f.sdlPaths, *f.dsn, f.buildOptions())
 
 	// --version and -v are accepted alongside the subcommand because that is
 	// what a reader reaches for first, and neither form collides with anything:
@@ -360,6 +391,18 @@ func run(argv []string) error {
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		return fmt.Errorf("unknown command %q", command)
+	}
+}
+
+// observed reports whether a command does enough work to be worth establishing
+// telemetry for. The three that touch a schema, a directory or a database are;
+// `version` and `help` are not.
+func observed(command string) bool {
+	switch command {
+	case "generate", "migrate", "conform":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -473,7 +516,21 @@ func abs(path string) string {
 }
 
 // generate writes the generation the SDL calls for into dir.
-func generate(sdlPaths []string, dir, name string, opts generator.Options, halves migrate.Halves) error {
+//
+// The result parameters are named because the deferred closer observes the
+// error *variable*; the work is delegated so that no `return` inside it can
+// bypass the assignment and record a failed generation as a successful one.
+func generate(ctx context.Context, sdlPaths []string, dir, name string, opts generator.Options, halves migrate.Halves) (err error) {
+	_, end := instr.Start(ctx, "Generate")
+	defer func() { end(err) }()
+
+	err = generateMigrations(sdlPaths, dir, name, opts, halves)
+	return err
+}
+
+// generateMigrations is generate's body. It takes no context because nothing it
+// does is cancellable: it reads the SDL, folds the directory, and writes files.
+func generateMigrations(sdlPaths []string, dir, name string, opts generator.Options, halves migrate.Halves) error {
 	model, schemaSrc, err := build(sdlPaths, opts)
 	if err != nil {
 		return err
@@ -567,8 +624,15 @@ func build(sdlPaths []string, opts generator.Options) (*schema.Schema, *sdlsourc
 // database whose tables have moved and which has no property graph. Re-running
 // closes the window; queries against the graph fail loudly until then rather than
 // returning wrong rows.
-func apply(dir, dsn string) error {
-	if err := checkDir(dir); err != nil {
+//
+// The span covers the whole apply — the connection, goose's own version
+// bookkeeping and every migration it runs — because that is the unit an
+// operator waits on. Named result, so the closer sees a failed migration.
+func apply(ctx context.Context, dir, dsn string) (err error) {
+	ctx, end := instr.Start(ctx, "Apply")
+	defer func() { end(err) }()
+
+	if err = checkDir(dir); err != nil {
 		return err
 	}
 	db, err := connect(dsn)
@@ -576,7 +640,7 @@ func apply(dir, dsn string) error {
 		return err
 	}
 	defer db.Close()
-	if err := goose.UpContext(context.Background(), db, dir); err != nil {
+	if err = goose.UpContext(ctx, db, dir); err != nil {
 		return fmt.Errorf("goose up: %w", err)
 	}
 	fmt.Printf("gopgql: applied %s\n", dir)
@@ -616,7 +680,20 @@ func connect(dsn string) (*sql.DB, error) {
 // non-zero, so the first words of the message are what tell them apart. The
 // wrapper is added here rather than left to each error's own text, so that a
 // new failure mode cannot quietly start reading like a verdict.
-func conformCheck(ctx context.Context, sdlPaths []string, dsn string, opts generator.Options) error {
+//
+// The result parameters are named because the deferred closer observes the
+// error *variable*; the work is delegated so that none of the several returns
+// below — drift included, which is a failure the span must record — can bypass
+// the assignment.
+func conformCheck(ctx context.Context, sdlPaths []string, dsn string, opts generator.Options) (err error) {
+	ctx, end := instr.Start(ctx, "Conform")
+	defer func() { end(err) }()
+
+	err = checkConformance(ctx, sdlPaths, dsn, opts)
+	return err
+}
+
+func checkConformance(ctx context.Context, sdlPaths []string, dsn string, opts generator.Options) error {
 	desired, schemaSrc, err := build(sdlPaths, opts)
 	if err != nil {
 		return fmt.Errorf("conformance check did not run: %w", err)

@@ -20,6 +20,12 @@
 // supplied through the environment — an agent's MCP configuration is not a good
 // place for a password.
 //
+// Both tools are traced. Nothing is exported unless the environment carries
+// OpenTelemetry configuration — an OTLP exporter failing every second on a
+// machine with no collector would write to the same stderr the server's
+// diagnostics use — so set OTEL_EXPORTER_OTLP_ENDPOINT (or any other OTEL_
+// variable) to turn it on. See internal/telemetry.
+//
 // The server exposes two tools, `introspect` and `query`. It applies no
 // migrations and executes no writes: its pool is opened with
 // default_transaction_read_only=on, so even a statement that tried to write
@@ -42,6 +48,7 @@ import (
 
 	"github.com/lega4e/gopgql/exec"
 	"github.com/lega4e/gopgql/internal/sdlsource"
+	"github.com/lega4e/gopgql/internal/telemetry"
 	"github.com/lega4e/gopgql/mcp"
 	"github.com/lega4e/gopgql/sdl"
 )
@@ -117,6 +124,27 @@ func run(argv []string) error {
 		return errors.New("no database: pass --dsn or set GOPGQL_DSN")
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Telemetry is established here, at the top of the composition root, so
+	// that everything constructed below it — the schema, the pool, the server
+	// and every tool call they serve — runs in a process whose providers are
+	// already installed. A span opened before them is lost.
+	//
+	// The deferred cleanup is registered before the pool's Close, so it runs
+	// after it: the pool shuts down, then telemetry flushes, and the shutdown
+	// itself is inside the trace.
+	//
+	// Nothing is exported unless the environment asks for it, which is what
+	// keeps an exporter's failures off the stderr of a server whose stdout is
+	// the MCP protocol. See internal/telemetry.
+	cleanup, err := telemetry.Setup(ctx, "gopgql-mcp", version)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	// Parse and validate the schema before connecting: a half-loaded schema
 	// would serve tools that cannot answer.
 	src, err := sdlsource.Load(*sdlPaths)
@@ -127,9 +155,6 @@ func run(argv []string) error {
 	if err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// Every session starts read-only, so a statement that would write is
 	// refused by the database rather than by convention (design D4). The pool

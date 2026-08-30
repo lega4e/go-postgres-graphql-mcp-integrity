@@ -579,6 +579,37 @@ decides, and a flag contradicting it is refused. With the tables half **on**,
 gopgql is managing those tables, and a column absent from the SDL is a column it
 will remove.
 
+## Telemetry
+
+Both binaries are instrumented with OpenTelemetry through
+[goga](https://github.com/lega4e/goga)'s `telemetry` module: traces and
+metrics for `gopgql generate`, `migrate` (the whole goose apply) and `conform`,
+for the MCP server's `introspect` and `query` tools, and for the query and
+connection paths underneath them — so a slow answer can be split into compiling,
+querying and shaping rather than guessed at.
+
+**Nothing is exported unless you ask for it.** These are short-lived processes —
+an init container, a server on an agent's stdio — and a default that posted to a
+collector nobody runs would print export failures next to the command's real
+output. If the environment carries no `OTEL_` variable, every exporter is
+`none`: the spans are still opened, they simply go nowhere. Set the standard
+variables and they arrive:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 gopgql migrate --sdl schema.graphql
+OTEL_TRACES_EXPORTER=console gopgql conform --sdl schema.graphql
+```
+
+From there the [OpenTelemetry environment
+variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/)
+mean exactly what the specification says they mean. `service.name` is the binary
+(`gopgql` or `gopgql-mcp`) and `service.version` is its build version, the same
+one `--version` prints.
+
+The WASM playground has none of this: `cmd/wasm` reaches neither the MCP server
+nor the pgx path, so the module the docs site ships carries no OpenTelemetry
+code at all.
+
 ## Developing
 
 ```sh
