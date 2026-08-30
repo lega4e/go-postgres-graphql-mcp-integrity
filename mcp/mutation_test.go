@@ -34,7 +34,8 @@ func TestMutationTypeStaysNullForASchemaWithMutations(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, doc.Mutations, 1, "the fixture must really declare a mutation")
 
-	s := New(doc, mutationSDL, nil)
+	s, err := New(doc, mutationSDL, nil)
+	require.NoError(t, err)
 	out := introspect(t, s, `{ __schema { mutationType { name } queryType { name } } }`)
 
 	schema, ok := out["__schema"].(map[string]any)
@@ -49,7 +50,8 @@ func TestMutationTypeStaysNullForASchemaWithMutations(t *testing.T) {
 func TestQueryToolRefusesAMutationOperation(t *testing.T) {
 	doc, err := sdl.Parse(mutationSDL)
 	require.NoError(t, err)
-	s := New(doc, mutationSDL, nil)
+	s, err := New(doc, mutationSDL, nil)
+	require.NoError(t, err)
 
 	_, err = s.Query(context.Background(), `mutation { startAgentRun(agentDigest: "a") }`, nil, FormatJSON)
 	require.Error(t, err)

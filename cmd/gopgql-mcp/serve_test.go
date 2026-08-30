@@ -35,7 +35,9 @@ func testMux(t *testing.T) *http.ServeMux {
 	t.Helper()
 	doc, err := sdl.Parse(testSDL)
 	require.NoError(t, err)
-	return newMux(mcp.New(doc, testSDL, nil), testPath)
+	srv, err := mcp.New(doc, testSDL, nil)
+	require.NoError(t, err)
+	return newMux(srv, testPath)
 }
 
 // okReady is a readiness check that passes, standing in for the pool's Ping.

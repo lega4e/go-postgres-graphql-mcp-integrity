@@ -81,7 +81,11 @@ func newServerWithDB(t *testing.T, db *recordingDB) *Server {
 	if err != nil {
 		t.Fatalf("parse SDL: %v", err)
 	}
-	return New(doc, testSDL, exec.PgxQuerier(db))
+	s, err := New(doc, testSDL, exec.PgxQuerier(db))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	return s
 }
 
 func TestQueryBindsVariables(t *testing.T) {

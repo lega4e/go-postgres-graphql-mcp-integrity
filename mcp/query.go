@@ -42,6 +42,32 @@ type typenameSite struct {
 	drop     bool
 }
 
+// result is one answer before it is rendered: either the shaped response, or
+// text that is already its own rendering.
+//
+// The split exists because the two consumers want different halves of it. The
+// string API renders both to text; the MCP tools hand the structured half
+// straight to goga/mcp, which turns a tool's Go output value into the call's
+// structured content — and a response pre-rendered to a document would reach
+// the caller as one JSON-escaped string instead.
+type result struct {
+	// data is the shaped response, for the json format and for every
+	// introspection result.
+	data map[string]any
+	// text is a rendering that is already text: a markdown table, or the SDL
+	// document.
+	text string
+}
+
+// render is the string form: JSON for a structured answer, the text itself
+// otherwise.
+func (r result) render() (string, error) {
+	if r.data != nil {
+		return renderJSON(r.data)
+	}
+	return r.text, nil
+}
+
 // Query compiles a GraphQL operation, executes it against the connected
 // database, and renders the response in the requested format.
 //
@@ -49,6 +75,16 @@ type typenameSite struct {
 // meta-fields never reaches the database (design D2). Everything else compiles
 // to SQL with its values bound as parameters, executes, and is shaped by the
 // same code path the library uses.
+func (s *Server) Query(ctx context.Context, query string, vars map[string]any, format string) (string, error) {
+	res, err := s.queryResult(ctx, query, vars, format)
+	if err != nil {
+		return "", err
+	}
+	return res.render()
+}
+
+// queryResult is [Server.Query] without the rendering, and is what the query
+// tool calls.
 //
 // This is the span the query tool is measured by, and the parent of the
 // exec.Query span underneath it: the difference between the two is what parsing,
@@ -60,29 +96,29 @@ type typenameSite struct {
 //
 // The operation text is not an attribute. It is unbounded, and its literals are
 // the caller's data.
-func (s *Server) Query(ctx context.Context, query string, vars map[string]any, format string) (out string, err error) {
+func (s *Server) queryResult(ctx context.Context, query string, vars map[string]any, format string) (res result, err error) {
 	ctx, end := instr.Start(ctx, "Query", attrFormat.String(defaultFormat(format, FormatJSON)))
 	defer func() { end(err) }()
 
-	out, err = s.query(ctx, query, vars, format)
-	return out, err
+	res, err = s.query(ctx, query, vars, format)
+	return res, err
 }
 
-func (s *Server) query(ctx context.Context, query string, vars map[string]any, format string) (string, error) {
+func (s *Server) query(ctx context.Context, query string, vars map[string]any, format string) (result, error) {
 	switch format {
 	case "", FormatJSON:
 		format = FormatJSON
 	case FormatMarkdown:
 	default:
-		return "", fmt.Errorf("gopgql/mcp: unknown format %q; supported formats are %q and %q", format, FormatJSON, FormatMarkdown)
+		return result{}, fmt.Errorf("gopgql/mcp: unknown format %q; supported formats are %q and %q", format, FormatJSON, FormatMarkdown)
 	}
 
 	doc, gqlErr := parser.ParseQuery(&ast.Source{Name: "operation", Input: query})
 	if gqlErr != nil {
-		return "", fmt.Errorf("gopgql/mcp: parse operation: %w", gqlErr)
+		return result{}, fmt.Errorf("gopgql/mcp: parse operation: %w", gqlErr)
 	}
 	if len(doc.Operations) != 1 {
-		return "", fmt.Errorf("gopgql/mcp: exactly one operation is supported, got %d", len(doc.Operations))
+		return result{}, fmt.Errorf("gopgql/mcp: exactly one operation is supported, got %d", len(doc.Operations))
 	}
 	op := doc.Operations[0]
 	if op.Operation != ast.Query {
@@ -90,28 +126,28 @@ func (s *Server) query(ctx context.Context, query string, vars map[string]any, f
 		// because running one needs a connection the caller owns and this
 		// server has only the read-only pool it opened itself (see the package
 		// doc).
-		return "", fmt.Errorf("gopgql/mcp: only query operations are supported by this server")
+		return result{}, fmt.Errorf("gopgql/mcp: only query operations are supported by this server")
 	}
 
 	if isIntrospection(op.SelectionSet, doc.Fragments) {
 		if format == FormatMarkdown {
-			return "", fmt.Errorf("gopgql/mcp: an introspection result is nested and a markdown table cannot represent it; use the %q format", FormatJSON)
+			return result{}, fmt.Errorf("gopgql/mcp: an introspection result is nested and a markdown table cannot represent it; use the %q format", FormatJSON)
 		}
 		data, err := s.intro.execute(op, doc.Fragments, vars)
 		if err != nil {
-			return "", fmt.Errorf("gopgql/mcp: introspection: %w", err)
+			return result{}, fmt.Errorf("gopgql/mcp: introspection: %w", err)
 		}
-		return renderJSON(data)
+		return result{data: data}, nil
 	}
 
 	roots := rootFields(op.SelectionSet)
 	if len(roots) != 1 {
-		return "", fmt.Errorf("gopgql/mcp: exactly one root field is supported, got %d", len(roots))
+		return result{}, fmt.Errorf("gopgql/mcp: exactly one root field is supported, got %d", len(roots))
 	}
 	root := roots[0]
 	target := s.doc.RootTarget(root.Name)
 	if target == nil {
-		return "", fmt.Errorf("gopgql/mcp: unknown root field %q; queryable root fields are %s",
+		return result{}, fmt.Errorf("gopgql/mcp: unknown root field %q; queryable root fields are %s",
 			root.Name, strings.Join(s.doc.RootFields(), ", "))
 	}
 
@@ -120,7 +156,7 @@ func (s *Server) query(ctx context.Context, query string, vars map[string]any, f
 	// could reach the database (design D2a).
 	if format == FormatMarkdown {
 		if nesting := s.nestedField(root, target); nesting != "" {
-			return "", fmt.Errorf("gopgql/mcp: %q selects the relationship %q, and a markdown table cannot represent nested results; use the %q format",
+			return result{}, fmt.Errorf("gopgql/mcp: %q selects the relationship %q, and a markdown table cannot represent nested results; use the %q format",
 				responseKey(root), nesting, FormatJSON)
 		}
 	}
@@ -128,23 +164,23 @@ func (s *Server) query(ctx context.Context, query string, vars map[string]any, f
 
 	var sites []typenameSite
 	if err := s.stripTypenames(root, target, nil, &sites); err != nil {
-		return "", err
+		return result{}, err
 	}
 
 	cq, err := s.comp.CompileQuery(formatOperation(doc), vars)
 	if err != nil {
-		return "", err
+		return result{}, err
 	}
 	response, err := exec.Query(ctx, s.db, cq)
 	if err != nil {
-		return "", err
+		return result{}, err
 	}
 	applyTypenames(response, sites)
 
 	if format == FormatMarkdown {
-		return renderMarkdown(response, responseKey(root), columns), nil
+		return result{text: renderMarkdown(response, responseKey(root), columns)}, nil
 	}
-	return renderJSON(response)
+	return result{data: response}, nil
 }
 
 // isIntrospection reports whether an operation selects only introspection

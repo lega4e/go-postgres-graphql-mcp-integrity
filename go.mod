@@ -5,9 +5,9 @@ go 1.27
 require (
 	github.com/cucumber/godog v0.15.1
 	github.com/dbos-inc/dbos-transact-golang v1.0.0
-	github.com/lega4e/goga v0.0.0-20260830180651-593afc77da68
+	github.com/lega4e/goga v0.0.0-20260830201157-d9f480757713
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
@@ -124,6 +124,7 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260825221802-da73d73af1c5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260825221802-da73d73af1c5 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
