@@ -610,6 +610,34 @@ The WASM playground has none of this: `cmd/wasm` reaches neither the MCP server
 nor the pgx path, so the module the docs site ships carries no OpenTelemetry
 code at all.
 
+### Where the connection comes from
+
+The read-only pool `exec.OpenReadOnly` returns is built by goga's
+`database/pgxdb`, and `gopgql migrate`'s goose connection by goga's `database`.
+Both arrive instrumented at the driver, so an individual `SELECT` or a single
+applied migration is a span of its own underneath the operation that asked for
+it — a trace of a `query` tool call reads
+
+```
+mcp.Query → exec.Query → query SELECT → prepare SELECT
+```
+
+with the pool's own statistics (acquired, idle, waiting) exported as metrics
+beside them.
+
+**What you hold is still pgx's.** `OpenReadOnly` returns a `*pgxpool.Pool`, and
+`exec.Handle` still accepts a caller's own pool, connection or transaction:
+goga's database module deliberately has no portable handle to move onto, so
+`CopyFrom`, `SendBatch`, `LISTEN`/`NOTIFY` and pgx's native types stay directly
+available and nothing needs unwrapping. What changed is where the pool is
+constructed, not what flows through it.
+
+One consequence worth knowing: `otelpgx` traces a statement only when the
+context already carries a recording span. Everything gopgql runs is inside one —
+`exec.Query`, `exec.Rows` and `OpenReadOnly` each open their own — but a query
+you issue on the pool yourself, from a `context.Background()`, records nothing.
+Wrap it in a span and it appears.
+
 ## Developing
 
 ```sh

@@ -368,12 +368,43 @@ func (st *scenarioState) follows(ctx context.Context, from, to string) error {
 	return nil
 }
 
+// openTracedReadOnly builds the read-only pool this suite watches, by hand.
+//
+// It is the one pool in gopgql that does not come from exec.OpenReadOnly, and
+// the reason is structural rather than a shortcut. pgx.ConnConfig has exactly
+// one Tracer field; goga/database/pgxdb sets it to otelpgx's unconditionally,
+// after every caller option, because that assignment is the whole of its
+// guarantee that no uninstrumented pool leaves the package. A pool that also
+// reports the statements it ran therefore cannot come through pgxdb, and pgxdb
+// documents that such a caller must build that one pool itself.
+//
+// This suite's assertions are about the SQL the MCP tools emit — which
+// statements, with which arguments — so the recording tracer is the point of
+// the pool and not an accessory to it. Everything else about the pool matches
+// what exec.OpenReadOnly builds: the read-only belt comes from exec.ReadOnlyDSN
+// rather than a second copy of the parameter, so the two cannot drift.
+func openTracedReadOnly(ctx context.Context, dsn string, tracer pgx.QueryTracer) (*pgxpool.Pool, error) {
+	cfg, err := pgxpool.ParseConfig(exec.ReadOnlyDSN(dsn))
+	if err != nil {
+		return nil, fmt.Errorf("parse connection string: %w", err)
+	}
+	cfg.ConnConfig.Tracer = tracer
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open pool: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connect to the database: %w", err)
+	}
+	return pool, nil
+}
+
 // connectClient opens the server's read-only pool, starts the server, and
 // connects a real SDK client over an in-memory transport pair.
 func (st *scenarioState) connectClient(ctx context.Context) error {
-	pool, err := exec.OpenReadOnly(ctx, connString, func(cfg *pgxpool.Config) {
-		cfg.ConnConfig.Tracer = st.tracer
-	})
+	pool, err := openTracedReadOnly(ctx, connString, st.tracer)
 	if err != nil {
 		return err
 	}
