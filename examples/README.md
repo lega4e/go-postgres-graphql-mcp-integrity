@@ -88,6 +88,12 @@ Both ports bind to loopback only. `/healthz` answers the compose healthcheck
 without opening an MCP session, so `docker compose ps` tells you when the
 server is actually ready.
 
+It is served on the MCP port beside the transport, along with `/livez`,
+`/readyz` and `/metrics`. None of the four opens a session or appears in a
+trace. `/readyz` is the one that reports the database: it fails while Postgres
+is unreachable, which is what takes an instance out of rotation without
+restarting it.
+
 The binary still speaks stdio — that is the default, and it is what
 `claude mcp add gopgql -- gopgql-mcp --sdl …` uses for a server an agent owns
 and spawns itself. `--transport http` is for a server that outlives its
