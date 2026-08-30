@@ -11,11 +11,13 @@
 // the gap: consecutive single-purpose migrations, each doing exactly one thing,
 // into --dir itself. Nothing at all when the two already agree.
 //
-// `migrate` does that and then applies the directory with goose — a plain
-// forward apply in version order, with no ordering of gopgql's own. It is what
-// an init container runs: with an ephemeral --dir it regenerates the whole
-// history every time, and goose skips the versions it has already applied, so
-// running it repeatedly against the same database is a no-op.
+// `migrate` does that and then applies the directory through goga/migrate — a
+// plain forward apply in version order, with no ordering of gopgql's own. It is
+// what an init container runs: with an ephemeral --dir it regenerates the whole
+// history every time, and the versions already applied are skipped, so running
+// it repeatedly against the same database is a no-op. The run is held under one
+// PostgreSQL advisory lock, so two of those init containers starting at once
+// take turns rather than racing.
 //
 // Every command is traced. Nothing is exported unless the environment carries
 // OpenTelemetry configuration; see internal/telemetry.
@@ -38,10 +40,11 @@ import (
 	"os"
 	"path/filepath"
 	"text/tabwriter"
+	"time"
 
 	"github.com/lega4e/goga/database"
+	gogamigrate "github.com/lega4e/goga/migrate"
 	gogatel "github.com/lega4e/goga/telemetry"
-	"github.com/pressly/goose/v3"
 
 	"github.com/lega4e/gopgql/conform"
 	"github.com/lega4e/gopgql/exec"
@@ -608,25 +611,43 @@ func build(sdlPaths []string, opts generator.Options) (*schema.Schema, *sdlsourc
 	return m, src, nil
 }
 
+// versionTable is the table the applied migrations are recorded in.
+//
+// It is goose's own default rather than goga/migrate's `goga_db_version`.
+// gopgql's histories already exist under this name — SPEC.md §3.0 names it, and
+// the test suite excludes it from its schema fingerprints by that prefix — and a
+// migrator pointed at a fresh table reads an applied history as an entirely
+// pending one and replays it against a live schema. The name is the state, so
+// it is kept; goga/migrate's WithTable exists for exactly this.
+const versionTable = "goose_db_version"
+
 // apply applies every pending migration in dir, in ascending version order.
 //
-// That is the whole of it: goose's ordinary forward apply against goose's own
-// default version table. gopgql neither reorders the migrations nor decides that
-// any of them is to be skipped, because the order is the file numbering and the
+// That is the whole of it: goga/migrate's forward apply against gopgql's own
+// version table. gopgql neither reorders the migrations nor decides that any of
+// them is to be skipped, because the order is the file numbering and the
 // numbering is chronological by construction (design D3). A turned-off half
 // changes what `generate` writes and never what this applies — a flag that could
 // skip part of an applied history is precisely the class of bug the per-half
 // version tables created.
 //
-// A generation is several files and goose runs each in its own transaction, so an
-// interrupted run can stop between the graph teardown and the rebuild, leaving a
-// database whose tables have moved and which has no property graph. Re-running
-// closes the window; queries against the graph fail loudly until then rather than
-// returning wrong rows.
+// What goga/migrate adds over calling goose here is the boot the migrations are
+// run at: the whole run is held under one PostgreSQL session advisory lock, so
+// two init containers starting together take turns rather than both applying
+// the same generation, and the lock is released even when a migration fails, so
+// one bad migration does not block every later attempt. Each migration also gets
+// a span of its own carrying its version and file, which is how the fortieth
+// migration of a history is found in a trace of the whole apply.
 //
-// The span covers the whole apply — the connection, goose's own version
-// bookkeeping and every migration it runs — because that is the unit an
-// operator waits on. Named result, so the closer sees a failed migration.
+// A generation is several files and each migration runs in its own transaction,
+// so an interrupted run can stop between the graph teardown and the rebuild,
+// leaving a database whose tables have moved and which has no property graph.
+// Re-running closes the window; queries against the graph fail loudly until then
+// rather than returning wrong rows.
+//
+// The span covers the whole apply — the connection, the version bookkeeping and
+// every migration it runs — because that is the unit an operator waits on. Named
+// result, so the closer sees a failed migration.
 func apply(ctx context.Context, dir, dsn string) (err error) {
 	ctx, end := instr.Start(ctx, "Apply")
 	defer func() { end(err) }()
@@ -639,11 +660,40 @@ func apply(ctx context.Context, dir, dsn string) (err error) {
 		return err
 	}
 	defer db.Close()
-	if err = goose.UpContext(ctx, db, dir); err != nil {
-		return fmt.Errorf("goose up: %w", err)
+
+	m, err := gogamigrate.New(db, gogamigrate.WithDir(dir), gogamigrate.WithTable(versionTable))
+	if err != nil {
+		return err
+	}
+	applied, upErr := m.Up(ctx)
+	// Printed before the error is returned: Up reports what it applied even when
+	// it fails, those migrations are committed, and an operator reading only the
+	// error would not know where the history now stands.
+	report(applied)
+	if upErr != nil {
+		return upErr
 	}
 	fmt.Printf("gopgql: applied %s\n", dir)
 	return nil
+}
+
+// report names every migration a run applied, one per line.
+//
+// goga/migrate drives goose through its provider, which says nothing on its own,
+// so this is what `gopgql migrate` answers with — the same shape goose's own
+// output had. It is written to stdout rather than through the log package
+// precisely because it is the command's answer and not a diagnostic; see
+// internal/telemetry for the other half of that rule.
+func report(applied []gogamigrate.Applied) {
+	for _, a := range applied {
+		state := "OK"
+		if a.Empty {
+			state = "EMPTY"
+		}
+		// Rounded to the microsecond: a migration's duration is worth a glance,
+		// and its nanoseconds never are.
+		fmt.Printf("%-5s %s (%s)\n", state, filepath.Base(a.Source), a.Duration.Round(time.Microsecond))
+	}
 }
 
 // checkDir reports a missing migration directory as the actionable error it is.
@@ -654,18 +704,18 @@ func checkDir(dir string) error {
 	return nil
 }
 
-// connect opens the database goose will run through and proves it answers.
+// connect opens the database the migrations will run through and proves it
+// answers.
 //
-// goose is written against database/sql, so this is the one place in gopgql
-// that genuinely wants a *sql.DB rather than pgx's pool — which is why it opens
-// through goga/database and not goga/database/pgxdb. The driver underneath is
-// still pgx's database/sql compatibility layer; what goga adds is the otelsql
-// wrapping around it, so every statement goose runs is a span inside the Apply
-// span above rather than an untraced gap in the middle of it.
+// The migrator is written against database/sql, so this is the one place in
+// gopgql that genuinely wants a *sql.DB rather than pgx's pool — which is why it
+// opens through goga/database and not goga/database/pgxdb. The driver underneath
+// is still pgx's database/sql compatibility layer; what goga adds is the otelsql
+// wrapping around it, so every statement a migration runs is a span inside the
+// Apply span above rather than an untraced gap in the middle of it. The pool's
+// size is goga/database's default, and it has to allow more than one connection:
+// the advisory lock holds one for the whole run and the migrations need another.
 func connect(ctx context.Context, dsn string) (*sql.DB, error) {
-	if err := goose.SetDialect("postgres"); err != nil {
-		return nil, fmt.Errorf("goose dialect: %w", err)
-	}
 	db, err := database.Open(ctx, database.DSN(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)

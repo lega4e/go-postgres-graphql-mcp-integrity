@@ -60,8 +60,8 @@ github.com/exaring/otelpgx v0.11.1 h1:pE79fIg/qh/Lpu00kvswFC5dKfqyJJhMJ4Y4N3w5Lj
 github.com/exaring/otelpgx v0.11.1/go.mod h1:3OojrUKhhy3lTbYIMBijP3YjMey/jo14eHAW5cXcUdk=
 github.com/felixge/httpsnoop v1.1.0 h1:3YtUj32ZZkqZtt3sZZsClsymw/QDuVfpNhoA31zeORc=
 github.com/felixge/httpsnoop v1.1.0/go.mod h1:Zqxgdd+1Rkcz8euOqdr7lqgCRJztwr5hp9vDSi5UZCE=
-github.com/lega4e/goga v0.0.0-20260830164044-73b0339a61fb h1:hQpt2Y/kDkqxHKYh/j3FyZuuy1WzK48+OOi5IeDIqZw=
-github.com/lega4e/goga v0.0.0-20260830164044-73b0339a61fb/go.mod h1:y4e3MNpahKgr9N3iJe9jT+GaNHvS9AHDwjnCBfmQyI4=
+github.com/lega4e/goga v0.0.0-20260830180651-593afc77da68 h1:zHTmupeSCIR5Cvum1BwbpBEcxX8+eGWUmB1LM2Kc+nI=
+github.com/lega4e/goga v0.0.0-20260830180651-593afc77da68/go.mod h1:ur+T70LKDpkcdMNNaXjQh/v+HSq+kmZCXOJ7r9cjuiU=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
 github.com/go-logr/logr v1.4.4 h1:tG4xh9yMsRCAiodLVTxyrkzSZ9+o0L1Kg/+cPVcbP/8=
 github.com/go-logr/logr v1.4.4/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
