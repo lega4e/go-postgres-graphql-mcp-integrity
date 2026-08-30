@@ -39,9 +39,8 @@ import (
 	"path/filepath"
 	"text/tabwriter"
 
+	"github.com/lega4e/goga/database"
 	gogatel "github.com/lega4e/goga/telemetry"
-	// Registers the "pgx" database/sql driver goose runs through.
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
 	"github.com/lega4e/gopgql/conform"
@@ -635,7 +634,7 @@ func apply(ctx context.Context, dir, dsn string) (err error) {
 	if err = checkDir(dir); err != nil {
 		return err
 	}
-	db, err := connect(dsn)
+	db, err := connect(ctx, dsn)
 	if err != nil {
 		return err
 	}
@@ -656,15 +655,22 @@ func checkDir(dir string) error {
 }
 
 // connect opens the database goose will run through and proves it answers.
-func connect(dsn string) (*sql.DB, error) {
+//
+// goose is written against database/sql, so this is the one place in gopgql
+// that genuinely wants a *sql.DB rather than pgx's pool — which is why it opens
+// through goga/database and not goga/database/pgxdb. The driver underneath is
+// still pgx's database/sql compatibility layer; what goga adds is the otelsql
+// wrapping around it, so every statement goose runs is a span inside the Apply
+// span above rather than an untraced gap in the middle of it.
+func connect(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err := goose.SetDialect("postgres"); err != nil {
 		return nil, fmt.Errorf("goose dialect: %w", err)
 	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := database.Open(ctx, database.DSN(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("connect to the database: %w", err)
 	}

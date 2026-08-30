@@ -29,8 +29,11 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"strings"
 
+	"github.com/lega4e/goga/database"
+	"github.com/lega4e/goga/database/pgxdb"
 	"github.com/lega4e/goga/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
@@ -255,9 +258,57 @@ func sameNames(a, b []string) bool {
 // has already reported through Err.
 func closeCursor(rows Cursor) { _ = rows.Close() }
 
-// PoolOption adjusts the pool configuration OpenReadOnly builds — a tracer in a
-// test, a connection limit in a long-lived process.
-type PoolOption func(*pgxpool.Config)
+// PoolOption adjusts the pool [OpenReadOnly] builds — a connection limit in a
+// long-lived process.
+//
+// It is an alias for goga/database/pgxdb's own option type rather than a
+// func(*pgxpool.Config) of gopgql's, because the pool is now pgxdb's to build
+// and pgxdb accepts no arbitrary hook into the configuration: the otelpgx
+// tracer it installs is the whole of its guarantee that no uninstrumented pool
+// leaves it, so nothing a caller passes may reach the configuration after it.
+// A test that needs pgx's single Tracer field for itself — the MCP suite, which
+// asserts on the SQL the tools emit — builds that one pool by hand from
+// [ReadOnlyDSN], which is what pgxdb documents such a caller must do.
+type PoolOption = pgxdb.Option
+
+// readOnlyParam is the PostgreSQL connection parameter that makes every session
+// on a pool start read-only. Sessions inherit it as a GUC, so a statement that
+// tries to write is refused before it reaches a table.
+const readOnlyParam = "default_transaction_read_only"
+
+// ReadOnlyDSN returns dsn with [readOnlyParam] set to on.
+//
+// The parameter travels in the connection string rather than being written onto
+// a parsed *pgxpool.Config, because the pool is built by
+// [github.com/lega4e/goga/database/pgxdb.Open], which takes a DSN and
+// exposes no hook into the configuration it parses out of it. pgx puts any
+// setting it does not recognise into ConnConfig.RuntimeParams, so the two
+// spellings reach the server identically.
+//
+// It is exported for the one caller that cannot use [OpenReadOnly] — a test
+// needing pgx's Tracer field, which pgxdb owns — so that the belt below has a
+// single definition rather than a second copy that could drift from it.
+//
+// A dsn already carrying the parameter has it overwritten, in both the URL and
+// the keyword/value form: on is not negotiable. A malformed URL is returned
+// unchanged, so that pgx reports it rather than this function turning a parse
+// error into a silently different connection string.
+func ReadOnlyDSN(dsn string) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
+		}
+		q := u.Query()
+		q.Set(readOnlyParam, "on")
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	// Keyword/value form. pgx folds the pairs into a map left to right, so an
+	// appended pair overrides an earlier one; TrimSpace covers the empty dsn
+	// pgx accepts as "take everything from the environment".
+	return strings.TrimSpace(dsn + " " + readOnlyParam + "=on")
+}
 
 // OpenReadOnly opens a pool whose every session starts with
 // default_transaction_read_only=on, and pings it.
@@ -275,30 +326,27 @@ type PoolOption func(*pgxpool.Config)
 // A `@function` attempted on a pool from here fails with SQLSTATE 25006, which
 // is the belt doing its job rather than a bug.
 //
+// The pool itself is pgx's own *pgxpool.Pool, built by
+// [github.com/lega4e/goga/database/pgxdb.Open]. Nothing about what flows
+// through gopgql changes — pgxdb deliberately has no portable handle and
+// nothing to unwrap — but the pool arrives with otelpgx's tracer and pgx's pool
+// statistics already on it, so every statement run through it is a span and the
+// pool's own gauges are metrics.
+//
 // The ping means an unreachable database is reported when the process starts,
-// not on every call it would otherwise fail.
+// not on every call it would otherwise fail. It is also the only thing that
+// does: pgxdb.Open validates the configuration and connects lazily.
 //
 // The open is instrumented because it is the one place gopgql talks to a
 // database before any query does: a span here separates "the database was
 // unreachable at startup" from "a query failed", which is otherwise the same
-// connection error seen twice.
+// connection error seen twice. It is also what makes the ping's own statement
+// visible, because otelpgx traces a query only inside a recording span.
 func OpenReadOnly(ctx context.Context, dsn string, opts ...PoolOption) (_ *pgxpool.Pool, err error) {
 	ctx, end := instr.Start(ctx, "OpenReadOnly")
 	defer func() { end(err) }()
 
-	cfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		return nil, fmt.Errorf("exec: parse connection string: %w", err)
-	}
-	if cfg.ConnConfig.RuntimeParams == nil {
-		cfg.ConnConfig.RuntimeParams = map[string]string{}
-	}
-	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := pgxdb.Open(ctx, database.DSN(ReadOnlyDSN(dsn)), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("exec: open pool: %w", err)
 	}
